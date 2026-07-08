@@ -1,0 +1,12 @@
+httpx>=0.28
+websockets>=15.0
+pydantic>=2.11
+pydantic-settings>=2.10
+python-dotenv>=1.1
+eth-account>=0.13
+web3>=7.12
+siwe>=4.4
+rich>=14.0
+orjson>=3.11
+tenacity>=9.1
+pytest>=8.4
