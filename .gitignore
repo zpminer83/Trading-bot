@@ -8,7 +8,7 @@ __pycache__/
 
 # Local nested/project copies
 Trading-bot/
-
+trading-bot/
 # Local vendor copy of official DreamDEX bot kit
 vendor/dreamdex-bot-kit-main/
 vendor/dreamdex-bot-kit/
