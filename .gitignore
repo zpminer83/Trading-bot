@@ -5,3 +5,10 @@ __pycache__/
 .vscode/
 .idea/
 *.pyc
+
+# Local nested/project copies
+Trading-bot/
+
+# Local vendor copy of official DreamDEX bot kit
+vendor/dreamdex-bot-kit-main/
+vendor/dreamdex-bot-kit/
