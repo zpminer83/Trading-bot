@@ -1,19 +1,20 @@
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from dataclasses import dataclass
 
 
-class Settings(BaseSettings):
-    BASE_URL: str = "https://stg.api.dreamdex.io/v0"
-    WS_URL: str = "wss://stg.api.dreamdex.io/v0/ws/public"
+@dataclass
+class Settings:
 
-    PRIVATE_KEY: str = ""
-    JWT_TOKEN: str = ""
+    paper_trading: bool = True
 
-    LOG_LEVEL: str = "INFO"
+    max_drawdown: float = 0.10
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        extra="ignore"
-    )
+    max_position_percent: float = 0.40
+
+    order_size_usd: float = 5.0
+
+    trading_symbol: str = "SOMI:USDso"
+
+    log_level: str = "INFO"
 
 
 settings = Settings()
