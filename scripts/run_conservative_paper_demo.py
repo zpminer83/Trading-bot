@@ -1,5 +1,7 @@
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
+from bot.competition.competition_tracker import CompetitionTracker
 from bot.execution.conservative_paper_broker import ConservativePaperBroker
 from bot.execution.execution_manager import ExecutionManager
 from bot.execution.order_manager import OrderManager
@@ -11,6 +13,15 @@ from bot.strategy.passive_market_maker import PassiveMarketMakerStrategy
 
 
 SYMBOL = "SOMI:USDso"
+
+DEMO_START = datetime(
+    2026,
+    7,
+    13,
+    12,
+    0,
+    tzinfo=timezone.utc,
+)
 
 
 def fmt_decimal(value: Decimal, places: str = "0.000000") -> str:
@@ -53,6 +64,7 @@ def print_header() -> None:
     print("- conservative fills")
     print("- order replacement")
     print("- max open orders protection")
+    print("- competition tracking")
     print("=" * 70)
 
 
@@ -102,6 +114,7 @@ def print_open_orders(broker: ConservativePaperBroker) -> None:
 
 def print_portfolio(portfolio: PortfolioManager) -> None:
     print()
+    print("Portfolio:")
     print(f"Cash balance : {fmt_decimal(portfolio.cash_balance, '0.0000')}")
     print(f"Base position: {fmt_decimal(portfolio.base_position)}")
     print(f"Avg entry    : {fmt_decimal(portfolio.average_entry_price, '0.0000')}")
@@ -112,6 +125,19 @@ def print_portfolio(portfolio: PortfolioManager) -> None:
     print(f"Total volume : {fmt_decimal(portfolio.total_volume, '0.0000')}")
 
 
+def print_competition(competition: CompetitionTracker) -> None:
+    snapshot = competition.snapshot()
+
+    print()
+    print("Competition:")
+    print(f"Week start          : {snapshot.week_start.isoformat()}")
+    print(f"Weekly volume       : {fmt_decimal(snapshot.weekly_volume, '0.0000')}")
+    print(f"Estimated score     : {fmt_decimal(snapshot.estimated_score, '0.0000')}")
+    print(f"Raffle tickets      : {snapshot.raffle_tickets}")
+    print(f"Challenge multiplier: {fmt_decimal(snapshot.challenge_multiplier, '0.0000')}")
+    print(f"Pair boost          : {fmt_decimal(competition.get_pair_boost(SYMBOL), '0.0000')}")
+
+
 def main() -> None:
     market = MarketCache()
 
@@ -119,9 +145,17 @@ def main() -> None:
     risk = RiskManager()
     execution = ExecutionManager(portfolio=portfolio, risk_manager=risk)
     broker = ConservativePaperBroker(portfolio=portfolio)
+
     order_manager = OrderManager(
         broker=broker,
         max_open_orders=2,
+    )
+
+    competition = CompetitionTracker(now=DEMO_START)
+
+    competition.set_pair_boost(
+        symbol=SYMBOL,
+        boost=Decimal("1.2"),
     )
 
     strategy = PassiveMarketMakerStrategy(
@@ -139,6 +173,8 @@ def main() -> None:
     print_header()
 
     for index, (bid, ask) in enumerate(scenarios, start=1):
+        current_time = DEMO_START + timedelta(minutes=index)
+
         set_market(
             market=market,
             bid=bid,
@@ -152,6 +188,13 @@ def main() -> None:
             portfolio.update_market_price(mid_price)
 
         fills = broker.process_market(market)
+
+        for fill in fills:
+            competition.record_trade(
+                symbol=fill.symbol,
+                notional=fill.notional,
+                timestamp=current_time,
+            )
 
         intents = strategy.generate_orders(
             market=market,
@@ -180,6 +223,7 @@ def main() -> None:
         print_fills(fills)
         print_open_orders(broker)
         print_portfolio(portfolio)
+        print_competition(competition)
 
     print()
     print("=" * 70)
@@ -190,6 +234,9 @@ def main() -> None:
     print(f"Final equity   : {fmt_decimal(portfolio.equity, '0.0000')}")
     print(f"Realized PnL   : {fmt_decimal(portfolio.realized_pnl, '0.0000')}")
     print(f"Total volume   : {fmt_decimal(portfolio.total_volume, '0.0000')}")
+    print(f"Weekly volume  : {fmt_decimal(competition.weekly_volume, '0.0000')}")
+    print(f"Est. score     : {fmt_decimal(competition.estimated_score, '0.0000')}")
+    print(f"Raffle tickets : {competition.raffle_tickets}")
     print(f"Open orders    : {len(broker.open_orders)}")
     print("=" * 70)
 
