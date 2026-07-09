@@ -12,3 +12,5 @@ trading-bot/
 # Local vendor copy of official DreamDEX bot kit
 vendor/dreamdex-bot-kit-main/
 vendor/dreamdex-bot-kit/
+# Local paper trading run logs
+data/paper_runs/

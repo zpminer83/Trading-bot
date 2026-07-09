@@ -2,8 +2,10 @@ import os
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
+from bot.analytics.paper_run_recorder import PaperRunRecord, PaperRunRecorder
 from bot.competition.competition_tracker import CompetitionTracker
 from bot.core.conservative_paper_trading_engine import (
     ConservativePaperTradingEngine,
@@ -43,6 +45,17 @@ def fmt_decimal(value: Decimal | None, places: str = "0.000000") -> str:
     text = format(quantized, "f")
 
     return text.rstrip("0").rstrip(".") or "0"
+
+
+def build_output_path(started_at: datetime) -> Path:
+    custom_path = os.getenv("PAPER_RUN_OUTPUT")
+
+    if custom_path:
+        return Path(custom_path)
+
+    filename = f"paper_run_{started_at.strftime('%Y%m%d_%H%M%S')}.jsonl"
+
+    return Path("data") / "paper_runs" / filename
 
 
 def build_engine(
@@ -113,6 +126,7 @@ def print_header(
     max_spread_percent: Decimal,
     min_best_bid_quantity: Decimal,
     min_best_ask_quantity: Decimal,
+    output_path: Path,
 ) -> None:
     print("=" * 80)
     print("DREAMDEX REST PAPER LOOP")
@@ -127,6 +141,7 @@ def print_header(
     print(f"Cash    : {fmt_decimal(initial_cash, '0.000000')}")
     print(f"Order $ : {fmt_decimal(order_size_usd, '0.000000')}")
     print(f"Boost   : {fmt_decimal(pair_boost, '0.000000')}")
+    print(f"Recorder: {output_path}")
     print()
     print("Market safety limits:")
     print(
@@ -267,7 +282,11 @@ def print_competition(engine: ConservativePaperTradingEngine) -> None:
     print(f"  Raffle tickets: {competition.raffle_tickets}")
 
 
-def print_final_summary(engine: ConservativePaperTradingEngine) -> None:
+def print_final_summary(
+    engine: ConservativePaperTradingEngine,
+    recorder: PaperRunRecorder,
+    output_path: Path,
+) -> None:
     portfolio = engine.portfolio
     competition = engine.competition
 
@@ -288,7 +307,53 @@ def print_final_summary(engine: ConservativePaperTradingEngine) -> None:
         print(f"Raffle tickets: {competition.raffle_tickets}")
 
     print(f"Open orders   : {len(engine.broker.open_orders)}")
+    print(f"Records saved : {recorder.count}")
+    print(f"Output file   : {output_path}")
     print("=" * 80)
+
+
+def build_record(
+    timestamp: datetime,
+    symbol: str,
+    snapshot,
+    result,
+    engine: ConservativePaperTradingEngine,
+) -> PaperRunRecord:
+    portfolio = engine.portfolio
+    competition = engine.competition
+    market_safety = result.market_safety_decision
+
+    return PaperRunRecord(
+        timestamp=timestamp,
+        symbol=symbol,
+        best_bid=snapshot.best_bid.price if snapshot.best_bid is not None else None,
+        best_ask=snapshot.best_ask.price if snapshot.best_ask is not None else None,
+        mid_price=snapshot.mid_price,
+        spread=snapshot.spread,
+        market_safe=market_safety.safe if market_safety is not None else None,
+        market_safety_reason=(
+            market_safety.reason if market_safety is not None else None
+        ),
+        intents_count=len(result.intents),
+        decisions_count=len(result.decisions),
+        fills_count=len(result.fills),
+        submitted_orders_count=len(result.submitted_orders),
+        open_orders_count=len(engine.broker.open_orders),
+        cash_balance=portfolio.cash_balance,
+        base_position=portfolio.base_position,
+        equity=portfolio.equity,
+        realized_pnl=portfolio.realized_pnl,
+        unrealized_pnl=portfolio.unrealized_pnl,
+        drawdown=portfolio.drawdown,
+        total_volume=portfolio.total_volume,
+        weekly_volume=(
+            competition.weekly_volume if competition is not None else Decimal("0")
+        ),
+        estimated_score=(
+            competition.estimated_score if competition is not None else Decimal("0")
+        ),
+        raffle_tickets=competition.raffle_tickets if competition is not None else 0,
+    )
 
 
 def run_iteration(
@@ -297,6 +362,7 @@ def run_iteration(
     symbol: str,
     market_data: MarketDataService,
     engine: ConservativePaperTradingEngine,
+    recorder: PaperRunRecorder,
 ) -> None:
     now = datetime.now(timezone.utc)
 
@@ -319,6 +385,16 @@ def run_iteration(
 
     result = engine.step(timestamp=now)
 
+    record = build_record(
+        timestamp=now,
+        symbol=symbol,
+        snapshot=snapshot,
+        result=result,
+        engine=engine,
+    )
+
+    recorder.append(record)
+
     print_market_snapshot(snapshot)
     print_market_safety(result)
     print_fills(result)
@@ -329,6 +405,10 @@ def run_iteration(
 
 
 def main() -> None:
+    started_at = datetime.now(timezone.utc)
+    output_path = build_output_path(started_at)
+    recorder = PaperRunRecorder()
+
     base_url = os.getenv("DREAMDEX_API_BASE_URL", DEFAULT_BASE_URL)
     symbol = os.getenv("DREAMDEX_SYMBOL", DEFAULT_SYMBOL)
     depth = env_int("DREAMDEX_DEPTH", DEFAULT_DEPTH)
@@ -378,6 +458,7 @@ def main() -> None:
         max_spread_percent=max_spread_percent,
         min_best_bid_quantity=min_best_bid_quantity,
         min_best_ask_quantity=min_best_ask_quantity,
+        output_path=output_path,
     )
 
     for index in range(1, iterations + 1):
@@ -388,6 +469,7 @@ def main() -> None:
                 symbol=symbol,
                 market_data=market_data,
                 engine=engine,
+                recorder=recorder,
             )
         except KeyboardInterrupt:
             print()
@@ -404,7 +486,14 @@ def main() -> None:
         if index < iterations:
             time.sleep(interval_seconds)
 
-    print_final_summary(engine)
+    if recorder.count > 0:
+        recorder.write_jsonl(output_path)
+
+    print_final_summary(
+        engine=engine,
+        recorder=recorder,
+        output_path=output_path,
+    )
 
 
 if __name__ == "__main__":
