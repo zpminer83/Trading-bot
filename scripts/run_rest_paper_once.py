@@ -12,6 +12,7 @@ from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
 from bot.portfolio.portfolio_manager import PortfolioManager
+from bot.risk.market_safety import MarketSafety, MarketSafetyLimits
 from bot.risk.risk_manager import RiskManager
 from bot.strategy.passive_market_maker import PassiveMarketMakerStrategy
 from scripts.check_dreamdex_orderbook_rest import (
@@ -49,6 +50,9 @@ def build_engine(
     order_size_usd: Decimal,
     max_open_orders: int,
     pair_boost: Decimal,
+    max_spread_percent: Decimal,
+    min_best_bid_quantity: Decimal,
+    min_best_ask_quantity: Decimal,
 ) -> ConservativePaperTradingEngine:
     portfolio = PortfolioManager(initial_cash=initial_cash)
     risk = RiskManager()
@@ -69,6 +73,14 @@ def build_engine(
         boost=pair_boost,
     )
 
+    market_safety = MarketSafety(
+        limits=MarketSafetyLimits(
+            max_spread_percent=max_spread_percent,
+            min_best_bid_quantity=min_best_bid_quantity,
+            min_best_ask_quantity=min_best_ask_quantity,
+        )
+    )
+
     strategy = PassiveMarketMakerStrategy(
         symbol=symbol,
         order_size_usd=order_size_usd,
@@ -83,6 +95,7 @@ def build_engine(
         broker=broker,
         order_manager=order_manager,
         competition=competition,
+        market_safety=market_safety,
     )
 
 
@@ -111,6 +124,32 @@ def print_market_snapshot(snapshot) -> None:
 
     print(f"Mid price: {fmt_decimal(snapshot.mid_price, '0.000000')}")
     print(f"Spread   : {fmt_decimal(snapshot.spread, '0.000000')}")
+
+
+def print_market_safety(result) -> None:
+    decision = result.market_safety_decision
+
+    print()
+    print("Market safety:")
+
+    if decision is None:
+        print("Status : disabled")
+        return
+
+    print(f"Safe   : {decision.safe}")
+    print(f"Reason : {decision.reason}")
+
+    if decision.spread_percent is not None:
+        print(
+            "Spread %: "
+            f"{fmt_decimal(decision.spread_percent * Decimal('100'), '0.000000')}%"
+        )
+
+    if decision.details:
+        print("Details:")
+
+        for item in decision.details:
+            print(f"- {item}")
 
 
 def print_decisions(result) -> None:
@@ -193,6 +232,10 @@ def main() -> None:
     pair_boost = env_decimal("PAPER_PAIR_BOOST", "1")
     max_open_orders = env_int("PAPER_MAX_OPEN_ORDERS", 2)
 
+    max_spread_percent = env_decimal("MARKET_MAX_SPREAD_PERCENT", "0.02")
+    min_best_bid_quantity = env_decimal("MARKET_MIN_BEST_BID_QTY", "1")
+    min_best_ask_quantity = env_decimal("MARKET_MIN_BEST_ASK_QTY", "1")
+
     url = build_orderbook_url(
         base_url=base_url,
         symbol=symbol,
@@ -210,6 +253,14 @@ def main() -> None:
     print(f"Cash    : {fmt_decimal(initial_cash, '0.000000')}")
     print(f"Order $ : {fmt_decimal(order_size_usd, '0.000000')}")
     print(f"Boost   : {fmt_decimal(pair_boost, '0.000000')}")
+    print()
+    print("Market safety limits:")
+    print(
+        "Max spread % : "
+        f"{fmt_decimal(max_spread_percent * Decimal('100'), '0.000000')}%"
+    )
+    print(f"Min bid qty  : {fmt_decimal(min_best_bid_quantity, '0.000000')}")
+    print(f"Min ask qty  : {fmt_decimal(min_best_ask_quantity, '0.000000')}")
     print("=" * 70)
 
     response = fetch_json(url)
@@ -234,6 +285,9 @@ def main() -> None:
         order_size_usd=order_size_usd,
         max_open_orders=max_open_orders,
         pair_boost=pair_boost,
+        max_spread_percent=max_spread_percent,
+        min_best_bid_quantity=min_best_bid_quantity,
+        min_best_ask_quantity=min_best_ask_quantity,
     )
 
     result = engine.step(
@@ -241,6 +295,7 @@ def main() -> None:
     )
 
     print_market_snapshot(snapshot)
+    print_market_safety(result)
     print_decisions(result)
     print_submitted_orders(engine)
     print_portfolio(engine)
