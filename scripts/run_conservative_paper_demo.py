@@ -2,6 +2,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from bot.competition.competition_tracker import CompetitionTracker
+from bot.core.conservative_paper_trading_engine import (
+    ConservativePaperTradingEngine,
+)
 from bot.execution.conservative_paper_broker import ConservativePaperBroker
 from bot.execution.execution_manager import ExecutionManager
 from bot.execution.order_manager import OrderManager
@@ -56,11 +59,49 @@ def set_market(
     )
 
 
+def build_engine() -> ConservativePaperTradingEngine:
+    market = MarketCache()
+
+    portfolio = PortfolioManager(initial_cash=Decimal("150"))
+    risk = RiskManager()
+    execution = ExecutionManager(portfolio=portfolio, risk_manager=risk)
+    broker = ConservativePaperBroker(portfolio=portfolio)
+
+    order_manager = OrderManager(
+        broker=broker,
+        max_open_orders=2,
+    )
+
+    competition = CompetitionTracker(now=DEMO_START)
+
+    competition.set_pair_boost(
+        symbol=SYMBOL,
+        boost=Decimal("1.2"),
+    )
+
+    strategy = PassiveMarketMakerStrategy(
+        symbol=SYMBOL,
+        order_size_usd=Decimal("5"),
+    )
+
+    return ConservativePaperTradingEngine(
+        symbol=SYMBOL,
+        market=market,
+        portfolio=portfolio,
+        strategy=strategy,
+        execution=execution,
+        broker=broker,
+        order_manager=order_manager,
+        competition=competition,
+    )
+
+
 def print_header() -> None:
     print("=" * 70)
     print("CONSERVATIVE PAPER TRADING DEMO")
     print("=" * 70)
     print("This demo uses:")
+    print("- reusable ConservativePaperTradingEngine")
     print("- conservative fills")
     print("- order replacement")
     print("- max open orders protection")
@@ -125,8 +166,13 @@ def print_portfolio(portfolio: PortfolioManager) -> None:
     print(f"Total volume : {fmt_decimal(portfolio.total_volume, '0.0000')}")
 
 
-def print_competition(competition: CompetitionTracker) -> None:
-    snapshot = competition.snapshot()
+def print_competition(engine: ConservativePaperTradingEngine) -> None:
+    if engine.competition is None:
+        print()
+        print("Competition: disabled")
+        return
+
+    snapshot = engine.competition.snapshot()
 
     print()
     print("Competition:")
@@ -135,33 +181,62 @@ def print_competition(competition: CompetitionTracker) -> None:
     print(f"Estimated score     : {fmt_decimal(snapshot.estimated_score, '0.0000')}")
     print(f"Raffle tickets      : {snapshot.raffle_tickets}")
     print(f"Challenge multiplier: {fmt_decimal(snapshot.challenge_multiplier, '0.0000')}")
-    print(f"Pair boost          : {fmt_decimal(competition.get_pair_boost(SYMBOL), '0.0000')}")
+    print(f"Pair boost          : {fmt_decimal(engine.competition.get_pair_boost(SYMBOL), '0.0000')}")
+
+
+def print_step(
+    index: int,
+    bid: str,
+    ask: str,
+    engine: ConservativePaperTradingEngine,
+    result,
+) -> None:
+    print()
+    print(f"Step {index}")
+    print("-" * 70)
+    print(f"Market bid/ask : {bid} / {ask}")
+    print(
+        "Mid price      : "
+        f"{fmt_decimal(result.mid_price, '0.0000') if result.mid_price is not None else 'n/a'}"
+    )
+    print(f"New intents    : {len(result.intents)}")
+    print(f"Decisions      : {len(result.decisions)}")
+    print(f"Submitted      : {len(result.submitted_orders)}")
+    print(f"New fills      : {len(result.fills)}")
+    print(f"Open orders    : {len(engine.broker.open_orders)}")
+
+    print_decisions(result.decisions)
+    print_fills(result.fills)
+    print_open_orders(engine.broker)
+    print_portfolio(engine.portfolio)
+    print_competition(engine)
+
+
+def print_final_summary(engine: ConservativePaperTradingEngine) -> None:
+    portfolio = engine.portfolio
+    competition = engine.competition
+
+    print()
+    print("=" * 70)
+    print("FINAL SUMMARY")
+    print("=" * 70)
+    print(f"Final cash     : {fmt_decimal(portfolio.cash_balance, '0.0000')}")
+    print(f"Final position : {fmt_decimal(portfolio.base_position)}")
+    print(f"Final equity   : {fmt_decimal(portfolio.equity, '0.0000')}")
+    print(f"Realized PnL   : {fmt_decimal(portfolio.realized_pnl, '0.0000')}")
+    print(f"Total volume   : {fmt_decimal(portfolio.total_volume, '0.0000')}")
+
+    if competition is not None:
+        print(f"Weekly volume  : {fmt_decimal(competition.weekly_volume, '0.0000')}")
+        print(f"Est. score     : {fmt_decimal(competition.estimated_score, '0.0000')}")
+        print(f"Raffle tickets : {competition.raffle_tickets}")
+
+    print(f"Open orders    : {len(engine.broker.open_orders)}")
+    print("=" * 70)
 
 
 def main() -> None:
-    market = MarketCache()
-
-    portfolio = PortfolioManager(initial_cash=Decimal("150"))
-    risk = RiskManager()
-    execution = ExecutionManager(portfolio=portfolio, risk_manager=risk)
-    broker = ConservativePaperBroker(portfolio=portfolio)
-
-    order_manager = OrderManager(
-        broker=broker,
-        max_open_orders=2,
-    )
-
-    competition = CompetitionTracker(now=DEMO_START)
-
-    competition.set_pair_boost(
-        symbol=SYMBOL,
-        boost=Decimal("1.2"),
-    )
-
-    strategy = PassiveMarketMakerStrategy(
-        symbol=SYMBOL,
-        order_size_usd=Decimal("5"),
-    )
+    engine = build_engine()
 
     scenarios = [
         ("1.00", "1.02"),  # Step 1: passive buy should stay open
@@ -176,69 +251,23 @@ def main() -> None:
         current_time = DEMO_START + timedelta(minutes=index)
 
         set_market(
-            market=market,
+            market=engine.market,
             bid=bid,
             ask=ask,
             timestamp=index,
         )
 
-        mid_price = market.mid_price(SYMBOL)
+        result = engine.step(timestamp=current_time)
 
-        if mid_price is not None:
-            portfolio.update_market_price(mid_price)
-
-        fills = broker.process_market(market)
-
-        for fill in fills:
-            competition.record_trade(
-                symbol=fill.symbol,
-                notional=fill.notional,
-                timestamp=current_time,
-            )
-
-        intents = strategy.generate_orders(
-            market=market,
-            portfolio=portfolio,
+        print_step(
+            index=index,
+            bid=bid,
+            ask=ask,
+            engine=engine,
+            result=result,
         )
 
-        decisions = [
-            execution.review_order(intent)
-            for intent in intents
-        ]
-
-        submitted_orders = order_manager.replace_orders(decisions)
-
-        print()
-        print(f"Step {index}")
-        print("-" * 70)
-        print(f"Market bid/ask : {bid} / {ask}")
-        print(f"Mid price      : {fmt_decimal(mid_price, '0.0000') if mid_price is not None else 'n/a'}")
-        print(f"New intents    : {len(intents)}")
-        print(f"Decisions      : {len(decisions)}")
-        print(f"Submitted      : {len(submitted_orders)}")
-        print(f"New fills      : {len(fills)}")
-        print(f"Open orders    : {len(broker.open_orders)}")
-
-        print_decisions(decisions)
-        print_fills(fills)
-        print_open_orders(broker)
-        print_portfolio(portfolio)
-        print_competition(competition)
-
-    print()
-    print("=" * 70)
-    print("FINAL SUMMARY")
-    print("=" * 70)
-    print(f"Final cash     : {fmt_decimal(portfolio.cash_balance, '0.0000')}")
-    print(f"Final position : {fmt_decimal(portfolio.base_position)}")
-    print(f"Final equity   : {fmt_decimal(portfolio.equity, '0.0000')}")
-    print(f"Realized PnL   : {fmt_decimal(portfolio.realized_pnl, '0.0000')}")
-    print(f"Total volume   : {fmt_decimal(portfolio.total_volume, '0.0000')}")
-    print(f"Weekly volume  : {fmt_decimal(competition.weekly_volume, '0.0000')}")
-    print(f"Est. score     : {fmt_decimal(competition.estimated_score, '0.0000')}")
-    print(f"Raffle tickets : {competition.raffle_tickets}")
-    print(f"Open orders    : {len(broker.open_orders)}")
-    print("=" * 70)
+    print_final_summary(engine)
 
 
 if __name__ == "__main__":
