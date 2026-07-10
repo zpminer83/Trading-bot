@@ -30,6 +30,11 @@ class PaperRunRecord:
     timestamp: datetime
     symbol: str
 
+    iteration_index: int = 0
+    iteration_ok: bool = True
+    error_type: str | None = None
+    error_message: str | None = None
+
     best_bid: Decimal | None = None
     best_ask: Decimal | None = None
     mid_price: Decimal | None = None
@@ -68,6 +73,10 @@ class PaperRunRecord:
             {
                 "timestamp": self.timestamp,
                 "symbol": self.symbol,
+                "iteration_index": self.iteration_index,
+                "iteration_ok": self.iteration_ok,
+                "error_type": self.error_type,
+                "error_message": self.error_message,
                 "best_bid": self.best_bid,
                 "best_ask": self.best_ask,
                 "mid_price": self.mid_price,
