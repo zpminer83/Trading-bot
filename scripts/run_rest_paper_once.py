@@ -3,6 +3,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from bot.competition.competition_tracker import CompetitionTracker
+from bot.competition.confirmed_fill_ledger import (
+    ConfirmedFillLedger,
+    ConfirmedFillLedgerLimits,
+)
+from bot.competition.fair_play_guard import FairPlayGuard, FairPlayLimits
 from bot.core.conservative_paper_trading_engine import (
     ConservativePaperTradingEngine,
 )
@@ -41,6 +46,13 @@ def env_int(name: str, default: int) -> int:
     return int(os.getenv(name, str(default)))
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def fmt_decimal(value: Decimal | None, places: str = "0.000000") -> str:
     if value is None:
         return "n/a"
@@ -70,6 +82,7 @@ def build_engine(
     min_best_ask_quantity: Decimal,
     market_freshness_limits: MarketFreshnessLimits | None = None,
     portfolio_risk_limits: PortfolioRiskLimits | None = None,
+    fair_play_limits: FairPlayLimits | None = None,
 ) -> ConservativePaperTradingEngine:
     resolved_risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
     portfolio = PortfolioManager(initial_cash=initial_cash)
@@ -109,6 +122,20 @@ def build_engine(
         limits=resolved_risk_limits,
         risk_manager=risk,
     )
+    confirmed_fill_ledger = None
+    fair_play_guard = None
+    if fair_play_limits is not None:
+        confirmed_fill_ledger = ConfirmedFillLedger(
+            limits=ConfirmedFillLedgerLimits(
+                short_window_seconds=fair_play_limits.short_window_seconds,
+                quantity_tolerance_ratio=fair_play_limits.quantity_tolerance_ratio,
+                near_flat_ratio=fair_play_limits.near_flat_ratio,
+                minimum_meaningful_exposure_notional=(
+                    fair_play_limits.minimum_meaningful_exposure_notional
+                ),
+            )
+        )
+        fair_play_guard = FairPlayGuard(limits=fair_play_limits)
 
     strategy = PassiveMarketMakerStrategy(
         symbol=symbol,
@@ -127,6 +154,8 @@ def build_engine(
         market_safety=market_safety,
         market_freshness=market_freshness,
         portfolio_risk_guard=portfolio_risk_guard,
+        confirmed_fill_ledger=confirmed_fill_ledger,
+        fair_play_guard=fair_play_guard,
     )
 
 
@@ -233,6 +262,51 @@ def print_portfolio_risk(result) -> None:
         print("KILL SWITCH  : LATCHED")
 
 
+def print_confirmed_fill_events(result) -> None:
+    events = getattr(result, "confirmed_fill_events", [])
+    print()
+    print("Confirmed fill audit:")
+    if not events:
+        print("No confirmed fills.")
+        return
+    for event in events:
+        print(
+            f"#{event.sequence_number} {event.timestamp.isoformat()} "
+            f"{event.side.upper()} price={fmt_decimal(event.price)} "
+            f"qty={fmt_decimal(event.quantity)} notional={fmt_decimal(event.notional)} "
+            f"position={fmt_decimal(event.position_before)}->{fmt_decimal(event.position_after)} "
+            f"opposite-delay={fmt_seconds(event.seconds_since_opposite_fill)} "
+            f"short-round-trip={event.short_window_round_trip} "
+            f"near-flat-complete={event.near_flat_cycle_completed}"
+        )
+
+
+def print_fair_play(result) -> None:
+    allowed = getattr(result, "fair_play_allowed", None)
+    print()
+    print("Competition fair play:")
+    if allowed is None:
+        print("Status : disabled")
+        return
+    print(f"Allowed             : {allowed}")
+    print(f"Reason              : {getattr(result, 'fair_play_reason', None)}")
+    print(f"Latched             : {getattr(result, 'fair_play_latched', False)}")
+    print(
+        "Blocked intents     : "
+        f"{getattr(result, 'fair_play_blocked_intents_count', 0)}"
+    )
+    print(
+        "Short-window round trips: "
+        f"{getattr(result, 'short_window_round_trip_count', 0)}"
+    )
+    print(
+        "Near-flat cycles    : "
+        f"{getattr(result, 'near_flat_cycle_count', 0)}"
+    )
+    if getattr(result, "fair_play_latched", False):
+        print("WARNING: FAIR-PLAY GUARD LATCHED")
+
+
 def print_decisions(result) -> None:
     print()
     print("Paper decisions:")
@@ -335,6 +409,34 @@ def main() -> None:
     portfolio_risk_limits = PortfolioRiskLimits(
         max_drawdown=env_decimal("PAPER_MAX_DRAWDOWN_RATIO", "0.10")
     )
+    fair_play_limits = None
+    if env_bool("PAPER_FAIR_PLAY_ENABLED", True):
+        fair_play_limits = FairPlayLimits(
+            short_window_seconds=env_decimal(
+                "PAPER_FAIR_PLAY_SHORT_WINDOW_SECONDS",
+                "30",
+            ),
+            opposite_side_cooldown_seconds=env_decimal(
+                "PAPER_FAIR_PLAY_OPPOSITE_COOLDOWN_SECONDS",
+                "60",
+            ),
+            quantity_tolerance_ratio=env_decimal(
+                "PAPER_FAIR_PLAY_QUANTITY_TOLERANCE_RATIO",
+                "0.10",
+            ),
+            near_flat_ratio=env_decimal(
+                "PAPER_FAIR_PLAY_NEAR_FLAT_RATIO",
+                "0.10",
+            ),
+            minimum_meaningful_exposure_notional=env_decimal(
+                "PAPER_FAIR_PLAY_MIN_EXPOSURE_NOTIONAL",
+                "5",
+            ),
+            max_completed_near_flat_cycles=env_int(
+                "PAPER_FAIR_PLAY_MAX_NEAR_FLAT_CYCLES",
+                2,
+            ),
+        )
 
     url = build_orderbook_url(
         base_url=base_url,
@@ -381,6 +483,32 @@ def main() -> None:
         "Max drawdown : "
         f"{fmt_decimal(portfolio_risk_limits.max_drawdown * Decimal('100'))}%"
     )
+    print()
+    print("Competition fair-play limits:")
+    if fair_play_limits is None:
+        print("Status             : disabled")
+    else:
+        print(f"Short window       : {fmt_seconds(fair_play_limits.short_window_seconds)}")
+        print(
+            "Opposite cooldown  : "
+            f"{fmt_seconds(fair_play_limits.opposite_side_cooldown_seconds)}"
+        )
+        print(
+            "Quantity tolerance : "
+            f"{fmt_decimal(fair_play_limits.quantity_tolerance_ratio * Decimal('100'))}%"
+        )
+        print(
+            "Near-flat ratio    : "
+            f"{fmt_decimal(fair_play_limits.near_flat_ratio * Decimal('100'))}%"
+        )
+        print(
+            "Min exposure       : "
+            f"{fmt_decimal(fair_play_limits.minimum_meaningful_exposure_notional)}"
+        )
+        print(
+            "Max near-flat cycles: "
+            f"{fair_play_limits.max_completed_near_flat_cycles}"
+        )
     print("=" * 70)
 
     response = fetch_json(url)
@@ -410,6 +538,7 @@ def main() -> None:
         min_best_ask_quantity=min_best_ask_quantity,
         market_freshness_limits=market_freshness_limits,
         portfolio_risk_limits=portfolio_risk_limits,
+        fair_play_limits=fair_play_limits,
     )
 
     result = engine.step(
@@ -420,6 +549,8 @@ def main() -> None:
     print_market_freshness(result)
     print_market_safety(result)
     print_portfolio_risk(result)
+    print_confirmed_fill_events(result)
+    print_fair_play(result)
     print_decisions(result)
     print_submitted_orders(engine)
     print_portfolio(engine)

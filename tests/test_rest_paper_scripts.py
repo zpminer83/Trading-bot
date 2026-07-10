@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import pytest
 
 from bot.execution.conservative_paper_broker import PaperOrder
+from bot.competition.confirmed_fill_ledger import ConfirmedFillEvent
+from bot.competition.fair_play_guard import FairPlayLimits
 from bot.execution.order import OrderIntent
 from bot.execution.passive_fill_evidence import PassiveFillEvidenceTracker
 from bot.market.models import OrderBook, OrderBookLevel
@@ -52,6 +54,8 @@ def disable_iteration_prints(monkeypatch):
         "print_market_safety",
         "print_portfolio_risk",
         "print_passive_fill_evidence",
+        "print_confirmed_fill_events",
+        "print_fair_play",
         "print_fills",
         "print_decisions",
         "print_open_orders",
@@ -132,6 +136,30 @@ def test_rest_paper_engine_uses_configured_market_freshness(build_engine):
 
 
 @pytest.mark.parametrize(
+    "build_engine",
+    [run_rest_paper_once.build_engine, run_rest_paper_loop.build_engine],
+)
+def test_rest_paper_engine_can_enable_fair_play(build_engine):
+    limits = FairPlayLimits(opposite_side_cooldown_seconds=Decimal("61"))
+    engine = build_engine(
+        symbol="SOMI:USDso",
+        market_cache=run_rest_paper_loop.MarketCache(),
+        initial_cash=Decimal("150"),
+        order_size_usd=Decimal("5"),
+        max_open_orders=2,
+        pair_boost=Decimal("1"),
+        max_spread_percent=Decimal("0.02"),
+        min_best_bid_quantity=Decimal("1"),
+        min_best_ask_quantity=Decimal("1"),
+        fair_play_limits=limits,
+    )
+
+    assert engine.fair_play_guard is not None
+    assert engine.fair_play_guard.limits == limits
+    assert engine.confirmed_fill_ledger is not None
+
+
+@pytest.mark.parametrize(
     "script",
     [run_rest_paper_once, run_rest_paper_loop],
 )
@@ -149,6 +177,20 @@ def test_rest_paper_rejects_invalid_drawdown_environment(
     )
 
     with pytest.raises(ValueError, match="between 0 and 1"):
+        script.main()
+
+
+@pytest.mark.parametrize("script", [run_rest_paper_once, run_rest_paper_loop])
+def test_rest_paper_rejects_invalid_fair_play_environment(script, monkeypatch):
+    monkeypatch.setenv("PAPER_FAIR_PLAY_SHORT_WINDOW_SECONDS", "61")
+    monkeypatch.setenv("PAPER_FAIR_PLAY_OPPOSITE_COOLDOWN_SECONDS", "60")
+    monkeypatch.setattr(
+        script,
+        "fetch_json",
+        lambda url: pytest.fail("invalid config must fail before network fetch"),
+    )
+
+    with pytest.raises(ValueError, match="opposite_side_cooldown_seconds"):
         script.main()
 
 
@@ -219,6 +261,61 @@ def test_loop_build_record_captures_market_freshness():
     assert record.portfolio_risk_latched is True
     assert record.risk_drawdown == Decimal("0.10")
     assert record.risk_max_drawdown == Decimal("0.10")
+
+
+def test_loop_build_record_serializes_fair_play_telemetry():
+    result = SimpleNamespace(
+        market_safety_decision=None,
+        market_freshness_decision=None,
+        portfolio_risk_decision=None,
+        intents=[],
+        decisions=[],
+        fills=[],
+        submitted_orders=[],
+        confirmed_fill_events=[
+            ConfirmedFillEvent(
+                sequence_number=1,
+                timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+                symbol="SOMI:USDso",
+                side="buy",
+                price=Decimal("1"),
+                quantity=Decimal("5"),
+                notional=Decimal("5"),
+                position_before=Decimal("0"),
+                position_after=Decimal("5"),
+                seconds_since_previous_fill=None,
+                seconds_since_opposite_fill=None,
+                previous_opposite_side=None,
+                previous_opposite_quantity=None,
+                opposite_quantity_difference_ratio=None,
+                short_window_round_trip=False,
+                near_flat_cycle_completed=False,
+                near_flat_cycle_count=0,
+            )
+        ],
+        fair_play_allowed=False,
+        fair_play_reason="opposite_side_cooldown",
+        fair_play_latched=False,
+        fair_play_blocked_intents_count=1,
+        short_window_round_trip_count=0,
+        near_flat_cycle_count=0,
+    )
+    snapshot = SimpleNamespace(best_bid=None, best_ask=None, mid_price=None, spread=None)
+    engine = make_loop_engine()
+
+    record = run_rest_paper_loop.build_record(
+        timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        symbol="SOMI:USDso",
+        snapshot=snapshot,
+        result=result,
+        engine=engine,
+    )
+    data = record.to_dict()
+
+    assert data["confirmed_fill_events"][0]["timestamp"] == "2026-07-13T12:00:00+00:00"
+    assert data["confirmed_fill_events"][0]["quantity"] == "5"
+    assert data["fair_play_allowed"] is False
+    assert data["fair_play_blocked_intents_count"] == 1
 
 
 def test_successful_loop_iteration_is_persisted_immediately(

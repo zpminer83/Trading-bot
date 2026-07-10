@@ -38,6 +38,19 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         level_quantity_decreased_count=1,
         level_disappeared_count=0,
         max_open_order_age_seconds=Decimal("12.5"),
+        confirmed_fill_events=[
+            {
+                "timestamp": datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+                "price": Decimal("1.25"),
+                "quantity": Decimal("4"),
+            }
+        ],
+        fair_play_allowed=False,
+        fair_play_reason="opposite_side_cooldown",
+        fair_play_latched=True,
+        fair_play_blocked_intents_count=2,
+        short_window_round_trip_count=1,
+        near_flat_cycle_count=2,
         cash_balance=Decimal("150"),
         equity=Decimal("150"),
         weekly_volume=Decimal("10.10"),
@@ -74,6 +87,19 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["level_quantity_decreased_count"] == 1
     assert data["level_disappeared_count"] == 0
     assert data["max_open_order_age_seconds"] == "12.5"
+    assert data["confirmed_fill_events"] == [
+        {
+            "timestamp": "2026-07-13T12:00:00+00:00",
+            "price": "1.25",
+            "quantity": "4",
+        }
+    ]
+    assert data["fair_play_allowed"] is False
+    assert data["fair_play_reason"] == "opposite_side_cooldown"
+    assert data["fair_play_latched"] is True
+    assert data["fair_play_blocked_intents_count"] == 2
+    assert data["short_window_round_trip_count"] == 1
+    assert data["near_flat_cycle_count"] == 2
 
 
 def test_paper_run_recorder_appends_records():

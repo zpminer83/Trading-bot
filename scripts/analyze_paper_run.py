@@ -153,6 +153,44 @@ def print_summary(
     )
 
     print()
+    print("Competition fair play:")
+    print(f"  Confirmed fill events : {summary.confirmed_fill_event_count}")
+    print(f"  Buy fills             : {summary.buy_fill_count}")
+    print(f"  Sell fills            : {summary.sell_fill_count}")
+    print(
+        "  Short-window round trips: "
+        f"{summary.short_window_round_trip_count}"
+    )
+    print(f"  Near-flat cycles      : {summary.near_flat_cycle_count}")
+    print(f"  Allowed records       : {summary.fair_play_allowed_count}")
+    print(f"  Blocked records       : {summary.fair_play_blocked_count}")
+    print(f"  Unknown records       : {summary.unknown_fair_play_count}")
+    print(f"  Guard latched         : {summary.fair_play_latched}")
+    print(
+        "  Blocked intents       : "
+        f"{summary.fair_play_blocked_intents_count}"
+    )
+    print(
+        "  Minimum opposite-fill delay: "
+        f"{fmt_seconds(summary.minimum_opposite_fill_delay_seconds)}"
+    )
+    print(
+        "  Maximum opposite-fill delay: "
+        f"{fmt_seconds(summary.maximum_opposite_fill_delay_seconds)}"
+    )
+
+    if summary.fair_play_reason_counts:
+        print("  Reason counts:")
+
+        for reason, count in sorted(summary.fair_play_reason_counts.items()):
+            print(f"    {reason}: {count}")
+
+    print(
+        "  Note: Passing local controls does not guarantee competition "
+        "eligibility. The organizer may apply additional undisclosed filters."
+    )
+
+    print()
     print("Trading activity:")
     print(f"  Fills           : {summary.fills_count}")
     print(f"  Orders submitted: {summary.submitted_orders_count}")

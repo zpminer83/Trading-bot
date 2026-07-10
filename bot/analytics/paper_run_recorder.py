@@ -63,6 +63,14 @@ class PaperRunRecord:
     level_disappeared_count: int = 0
     max_open_order_age_seconds: Decimal | None = None
 
+    confirmed_fill_events: list[dict[str, Any]] = field(default_factory=list)
+    fair_play_allowed: bool | None = None
+    fair_play_reason: str | None = None
+    fair_play_latched: bool | None = None
+    fair_play_blocked_intents_count: int = 0
+    short_window_round_trip_count: int = 0
+    near_flat_cycle_count: int = 0
+
     intents_count: int = 0
     decisions_count: int = 0
     fills_count: int = 0
@@ -116,6 +124,17 @@ class PaperRunRecord:
                 ),
                 "level_disappeared_count": self.level_disappeared_count,
                 "max_open_order_age_seconds": self.max_open_order_age_seconds,
+                "confirmed_fill_events": self.confirmed_fill_events,
+                "fair_play_allowed": self.fair_play_allowed,
+                "fair_play_reason": self.fair_play_reason,
+                "fair_play_latched": self.fair_play_latched,
+                "fair_play_blocked_intents_count": (
+                    self.fair_play_blocked_intents_count
+                ),
+                "short_window_round_trip_count": (
+                    self.short_window_round_trip_count
+                ),
+                "near_flat_cycle_count": self.near_flat_cycle_count,
                 "intents_count": self.intents_count,
                 "decisions_count": self.decisions_count,
                 "fills_count": self.fills_count,

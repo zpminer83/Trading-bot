@@ -45,6 +45,20 @@ class PaperRunSummary:
     level_disappeared_count: int
     maximum_open_order_age_seconds: Decimal | None
 
+    confirmed_fill_event_count: int
+    buy_fill_count: int
+    sell_fill_count: int
+    short_window_round_trip_count: int
+    near_flat_cycle_count: int
+    fair_play_allowed_count: int
+    fair_play_blocked_count: int
+    unknown_fair_play_count: int
+    fair_play_latched: bool
+    fair_play_blocked_intents_count: int
+    minimum_opposite_fill_delay_seconds: Decimal | None
+    maximum_opposite_fill_delay_seconds: Decimal | None
+    fair_play_reason_counts: dict[str, int]
+
     fills_count: int
     submitted_orders_count: int
 
@@ -306,6 +320,74 @@ class PaperRunAnalyzer:
             if record.get("max_open_order_age_seconds") is not None
         ]
 
+        confirmed_fill_events: list[dict[str, Any]] = []
+        for record in records:
+            raw_events = record.get("confirmed_fill_events")
+            if raw_events is None:
+                continue
+            if not isinstance(raw_events, list):
+                raise ValueError("confirmed_fill_events must be a list")
+            for event in raw_events:
+                if not isinstance(event, dict):
+                    raise ValueError("confirmed fill event must be a JSON object")
+                confirmed_fill_events.append(event)
+
+        buy_fill_count = sum(
+            1
+            for event in confirmed_fill_events
+            if str(event.get("side", "")).lower() == "buy"
+        )
+        sell_fill_count = sum(
+            1
+            for event in confirmed_fill_events
+            if str(event.get("side", "")).lower() == "sell"
+        )
+        opposite_fill_delays = [
+            self._to_decimal(event.get("seconds_since_opposite_fill"))
+            for event in confirmed_fill_events
+            if event.get("seconds_since_opposite_fill") is not None
+        ]
+        short_window_round_trip_count = max(
+            (
+                self._to_int(record.get("short_window_round_trip_count"))
+                for record in records
+            ),
+            default=0,
+        )
+        near_flat_cycle_count = max(
+            (
+                self._to_int(record.get("near_flat_cycle_count"))
+                for record in records
+            ),
+            default=0,
+        )
+        fair_play_allowed_count = sum(
+            1 for record in records if record.get("fair_play_allowed") is True
+        )
+        fair_play_blocked_count = sum(
+            1 for record in records if record.get("fair_play_allowed") is False
+        )
+        unknown_fair_play_count = (
+            len(records) - fair_play_allowed_count - fair_play_blocked_count
+        )
+        fair_play_latched = any(
+            record.get("fair_play_latched") is True for record in records
+        )
+        fair_play_blocked_intents_count = sum(
+            self._to_int(record.get("fair_play_blocked_intents_count"))
+            for record in records
+        )
+        fair_play_reason_counts: dict[str, int] = {}
+        for record in records:
+            reason = record.get("fair_play_reason")
+            if reason is None:
+                continue
+            reason_text = str(reason).strip()
+            if reason_text:
+                fair_play_reason_counts[reason_text] = (
+                    fair_play_reason_counts.get(reason_text, 0) + 1
+                )
+
         fills_count = sum(
             self._to_int(record.get("fills_count"))
             for record in records
@@ -370,6 +452,23 @@ class PaperRunAnalyzer:
             maximum_open_order_age_seconds=(
                 max(open_order_ages) if open_order_ages else None
             ),
+            confirmed_fill_event_count=len(confirmed_fill_events),
+            buy_fill_count=buy_fill_count,
+            sell_fill_count=sell_fill_count,
+            short_window_round_trip_count=short_window_round_trip_count,
+            near_flat_cycle_count=near_flat_cycle_count,
+            fair_play_allowed_count=fair_play_allowed_count,
+            fair_play_blocked_count=fair_play_blocked_count,
+            unknown_fair_play_count=unknown_fair_play_count,
+            fair_play_latched=fair_play_latched,
+            fair_play_blocked_intents_count=fair_play_blocked_intents_count,
+            minimum_opposite_fill_delay_seconds=(
+                min(opposite_fill_delays) if opposite_fill_delays else None
+            ),
+            maximum_opposite_fill_delay_seconds=(
+                max(opposite_fill_delays) if opposite_fill_delays else None
+            ),
+            fair_play_reason_counts=fair_play_reason_counts,
             fills_count=fills_count,
             submitted_orders_count=submitted_orders_count,
             final_cash_balance=self._to_decimal(

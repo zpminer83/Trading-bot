@@ -2,6 +2,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from bot.competition.competition_tracker import CompetitionTracker
+from bot.competition.confirmed_fill_ledger import ConfirmedFillLedger
+from bot.competition.fair_play_guard import FairPlayGuard
 from bot.core.conservative_paper_trading_engine import (
     ConservativePaperTradingEngine,
 )
@@ -240,3 +242,70 @@ def test_engine_can_run_without_competition_tracker():
 
     assert len(result.submitted_orders) == 1
     assert result.competition_snapshot is None
+
+
+def test_engine_audits_only_broker_confirmed_fills_and_blocks_cooldown_intent():
+    engine = make_engine()
+    engine.confirmed_fill_ledger = ConfirmedFillLedger()
+    engine.fair_play_guard = FairPlayGuard()
+
+    set_market(engine.market, "1.00", "1.02", timestamp=1)
+    first = engine.step(timestamp=utc_dt(2026, 7, 13, 12))
+    assert first.confirmed_fill_events == []
+
+    set_market(engine.market, "0.99", "1.00", timestamp=2)
+    result = engine.step(timestamp=utc_dt(2026, 7, 13, 12, 1))
+
+    assert len(result.fills) == 1
+    assert len(result.confirmed_fill_events) == 1
+    assert result.confirmed_fill_events[0].side == "buy"
+    assert result.confirmed_fill_events[0].position_after == Decimal("5")
+    assert result.fair_play_blocked_intents_count == 1
+    assert all(decision.intent.side == "buy" for decision in result.decisions)
+    assert engine.competition is not None
+    assert engine.competition.weekly_volume == Decimal("5.00")
+
+
+def test_engine_latched_fair_play_guard_cancels_orders_without_new_intents():
+    engine = make_engine()
+    engine.confirmed_fill_ledger = ConfirmedFillLedger()
+    engine.fair_play_guard = FairPlayGuard()
+    set_market(engine.market, "1.00", "1.02", timestamp=1)
+    engine.step(timestamp=utc_dt(2026, 7, 13, 12))
+    assert engine.order_manager.open_order_count == 1
+
+    event = engine.confirmed_fill_ledger.record_fills(
+        [], Decimal("0"), utc_dt(2026, 7, 13, 12, 1)
+    )
+    assert event == []
+    from bot.competition.confirmed_fill_ledger import ConfirmedFillEvent
+
+    engine.fair_play_guard.consume(
+        [
+            ConfirmedFillEvent(
+                sequence_number=1,
+                timestamp=utc_dt(2026, 7, 13, 12, 1),
+                symbol=SYMBOL,
+                side="sell",
+                price=Decimal("1"),
+                quantity=Decimal("5"),
+                notional=Decimal("5"),
+                position_before=Decimal("5"),
+                position_after=Decimal("0"),
+                seconds_since_previous_fill=None,
+                seconds_since_opposite_fill=Decimal("1"),
+                previous_opposite_side="buy",
+                previous_opposite_quantity=Decimal("5"),
+                opposite_quantity_difference_ratio=Decimal("0"),
+                short_window_round_trip=True,
+                near_flat_cycle_completed=True,
+                near_flat_cycle_count=1,
+            )
+        ]
+    )
+
+    result = engine.step(timestamp=utc_dt(2026, 7, 13, 12, 2))
+    assert result.fair_play_latched is True
+    assert result.intents == []
+    assert result.decisions == []
+    assert engine.order_manager.open_order_count == 0

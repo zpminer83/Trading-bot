@@ -367,6 +367,59 @@ def test_analyzer_supports_records_without_freshness_fields():
     assert summary.freshness_reason_counts == {}
 
 
+def test_analyzer_summarizes_competition_fair_play(capsys):
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00"),
+    ]
+    records[0].update(
+        confirmed_fill_events=[
+            {"side": "buy", "seconds_since_opposite_fill": None},
+            {"side": "sell", "seconds_since_opposite_fill": "29"},
+        ],
+        fair_play_allowed=True,
+        fair_play_reason="ok",
+        fair_play_latched=False,
+        fair_play_blocked_intents_count=1,
+        short_window_round_trip_count=1,
+        near_flat_cycle_count=1,
+    )
+    records[1].update(
+        confirmed_fill_events=[{"side": "buy", "seconds_since_opposite_fill": "61"}],
+        fair_play_allowed=False,
+        fair_play_reason="short_window_round_trip",
+        fair_play_latched=True,
+        fair_play_blocked_intents_count=2,
+        short_window_round_trip_count=1,
+        near_flat_cycle_count=2,
+    )
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.confirmed_fill_event_count == 3
+    assert summary.buy_fill_count == 2
+    assert summary.sell_fill_count == 1
+    assert summary.short_window_round_trip_count == 1
+    assert summary.near_flat_cycle_count == 2
+    assert summary.fair_play_allowed_count == 1
+    assert summary.fair_play_blocked_count == 1
+    assert summary.unknown_fair_play_count == 0
+    assert summary.fair_play_latched is True
+    assert summary.fair_play_blocked_intents_count == 3
+    assert summary.minimum_opposite_fill_delay_seconds == Decimal("29")
+    assert summary.maximum_opposite_fill_delay_seconds == Decimal("61")
+    assert summary.fair_play_reason_counts == {
+        "ok": 1,
+        "short_window_round_trip": 1,
+    }
+
+    print_summary(Path("paper_run.jsonl"), summary)
+    output = capsys.readouterr().out
+    assert "Competition fair play:" in output
+    assert "Confirmed fill events : 3" in output
+    assert "Passing local controls does not guarantee competition eligibility" in output
+
+
 def test_analyzer_calculates_max_drawdown_and_price_range():
     records = [
         make_record(
