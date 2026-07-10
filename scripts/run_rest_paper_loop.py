@@ -16,6 +16,10 @@ from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
 from bot.portfolio.portfolio_manager import PortfolioManager
+from bot.risk.market_freshness import (
+    MarketFreshnessGuard,
+    MarketFreshnessLimits,
+)
 from bot.risk.market_safety import MarketSafety, MarketSafetyLimits
 from bot.risk.risk_manager import RiskManager
 from bot.strategy.passive_market_maker import PassiveMarketMakerStrategy
@@ -47,6 +51,13 @@ def fmt_decimal(value: Decimal | None, places: str = "0.000000") -> str:
     return text.rstrip("0").rstrip(".") or "0"
 
 
+def fmt_seconds(value: Decimal | None) -> str:
+    if value is None:
+        return "n/a"
+
+    return f"{fmt_decimal(value, '0.000000')}s"
+
+
 def build_output_path(started_at: datetime) -> Path:
     custom_path = os.getenv("PAPER_RUN_OUTPUT")
 
@@ -68,6 +79,7 @@ def build_engine(
     max_spread_percent: Decimal,
     min_best_bid_quantity: Decimal,
     min_best_ask_quantity: Decimal,
+    market_freshness_limits: MarketFreshnessLimits | None = None,
 ) -> ConservativePaperTradingEngine:
     portfolio = PortfolioManager(initial_cash=initial_cash)
     risk = RiskManager()
@@ -96,6 +108,10 @@ def build_engine(
         )
     )
 
+    market_freshness = MarketFreshnessGuard(
+        limits=market_freshness_limits,
+    )
+
     strategy = PassiveMarketMakerStrategy(
         symbol=symbol,
         order_size_usd=order_size_usd,
@@ -111,6 +127,7 @@ def build_engine(
         order_manager=order_manager,
         competition=competition,
         market_safety=market_safety,
+        market_freshness=market_freshness,
     )
 
 
@@ -127,7 +144,10 @@ def print_header(
     min_best_bid_quantity: Decimal,
     min_best_ask_quantity: Decimal,
     output_path: Path,
+    market_freshness_limits: MarketFreshnessLimits | None = None,
 ) -> None:
+    freshness_limits = market_freshness_limits or MarketFreshnessLimits()
+
     print("=" * 80)
     print("DREAMDEX REST PAPER LOOP")
     print("=" * 80)
@@ -150,6 +170,20 @@ def print_header(
     )
     print(f"Min bid qty  : {fmt_decimal(min_best_bid_quantity, '0.000000')}")
     print(f"Min ask qty  : {fmt_decimal(min_best_ask_quantity, '0.000000')}")
+    print()
+    print("Market freshness limits:")
+    print(
+        "Max exchange age : "
+        f"{fmt_decimal(freshness_limits.max_exchange_age_seconds)}s"
+    )
+    print(
+        "Max unchanged    : "
+        f"{fmt_decimal(freshness_limits.max_unchanged_seconds)}s"
+    )
+    print(
+        "Max future skew  : "
+        f"{fmt_decimal(freshness_limits.max_future_skew_seconds)}s"
+    )
     print("=" * 80)
 
 
@@ -195,6 +229,27 @@ def print_market_safety(result) -> None:
             "  Spread % : "
             f"{fmt_decimal(decision.spread_percent * Decimal('100'), '0.000000')}%"
         )
+
+
+def print_market_freshness(result) -> None:
+    decision = result.market_freshness_decision
+
+    print("Market freshness:")
+
+    if decision is None:
+        print("  Status         : disabled")
+        return
+
+    print(f"  Fresh          : {decision.fresh}")
+    print(f"  Reason         : {decision.reason}")
+    print(
+        "  Exchange age   : "
+        f"{fmt_seconds(decision.exchange_age_seconds)}"
+    )
+    print(
+        "  Unchanged time : "
+        f"{fmt_seconds(decision.unchanged_seconds)}"
+    )
 
 
 def print_fills(result) -> None:
@@ -322,6 +377,7 @@ def build_record(
     portfolio = engine.portfolio
     competition = engine.competition
     market_safety = result.market_safety_decision
+    market_freshness = result.market_freshness_decision
 
     return PaperRunRecord(
         timestamp=timestamp,
@@ -333,6 +389,22 @@ def build_record(
         market_safe=market_safety.safe if market_safety is not None else None,
         market_safety_reason=(
             market_safety.reason if market_safety is not None else None
+        ),
+        market_fresh=(
+            market_freshness.fresh if market_freshness is not None else None
+        ),
+        market_freshness_reason=(
+            market_freshness.reason if market_freshness is not None else None
+        ),
+        exchange_age_seconds=(
+            market_freshness.exchange_age_seconds
+            if market_freshness is not None
+            else None
+        ),
+        unchanged_seconds=(
+            market_freshness.unchanged_seconds
+            if market_freshness is not None
+            else None
         ),
         intents_count=len(result.intents),
         decisions_count=len(result.decisions),
@@ -396,6 +468,7 @@ def run_iteration(
     recorder.append(record)
 
     print_market_snapshot(snapshot)
+    print_market_freshness(result)
     print_market_safety(result)
     print_fills(result)
     print_decisions(result)
@@ -425,6 +498,21 @@ def main() -> None:
     min_best_bid_quantity = env_decimal("MARKET_MIN_BEST_BID_QTY", "1")
     min_best_ask_quantity = env_decimal("MARKET_MIN_BEST_ASK_QTY", "1")
 
+    market_freshness_limits = MarketFreshnessLimits(
+        max_exchange_age_seconds=env_decimal(
+            "MARKET_MAX_EXCHANGE_AGE_SECONDS",
+            "30",
+        ),
+        max_unchanged_seconds=env_decimal(
+            "MARKET_MAX_UNCHANGED_SECONDS",
+            "30",
+        ),
+        max_future_skew_seconds=env_decimal(
+            "MARKET_MAX_FUTURE_SKEW_SECONDS",
+            "5",
+        ),
+    )
+
     url = build_orderbook_url(
         base_url=base_url,
         symbol=symbol,
@@ -444,6 +532,7 @@ def main() -> None:
         max_spread_percent=max_spread_percent,
         min_best_bid_quantity=min_best_bid_quantity,
         min_best_ask_quantity=min_best_ask_quantity,
+        market_freshness_limits=market_freshness_limits,
     )
 
     print_header(
@@ -459,6 +548,7 @@ def main() -> None:
         min_best_bid_quantity=min_best_bid_quantity,
         min_best_ask_quantity=min_best_ask_quantity,
         output_path=output_path,
+        market_freshness_limits=market_freshness_limits,
     )
 
     for index in range(1, iterations + 1):

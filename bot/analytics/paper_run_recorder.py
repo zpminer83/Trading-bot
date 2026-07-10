@@ -38,6 +38,11 @@ class PaperRunRecord:
     market_safe: bool | None = None
     market_safety_reason: str | None = None
 
+    market_fresh: bool | None = None
+    market_freshness_reason: str | None = None
+    exchange_age_seconds: Decimal | None = None
+    unchanged_seconds: Decimal | None = None
+
     intents_count: int = 0
     decisions_count: int = 0
     fills_count: int = 0
@@ -69,6 +74,10 @@ class PaperRunRecord:
                 "spread": self.spread,
                 "market_safe": self.market_safe,
                 "market_safety_reason": self.market_safety_reason,
+                "market_fresh": self.market_fresh,
+                "market_freshness_reason": self.market_freshness_reason,
+                "exchange_age_seconds": self.exchange_age_seconds,
+                "unchanged_seconds": self.unchanged_seconds,
                 "intents_count": self.intents_count,
                 "decisions_count": self.decisions_count,
                 "fills_count": self.fills_count,

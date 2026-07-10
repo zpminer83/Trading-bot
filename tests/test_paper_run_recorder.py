@@ -18,6 +18,10 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         spread=Decimal("0.0002"),
         market_safe=True,
         market_safety_reason="ok",
+        market_fresh=True,
+        market_freshness_reason="ok",
+        exchange_age_seconds=Decimal("1.25"),
+        unchanged_seconds=Decimal("2.50"),
         cash_balance=Decimal("150"),
         equity=Decimal("150"),
         weekly_volume=Decimal("10.10"),
@@ -34,6 +38,10 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["estimated_score"] == "12.12"
     assert data["market_safe"] is True
     assert data["market_safety_reason"] == "ok"
+    assert data["market_fresh"] is True
+    assert data["market_freshness_reason"] == "ok"
+    assert data["exchange_age_seconds"] == "1.25"
+    assert data["unchanged_seconds"] == "2.50"
 
 
 def test_paper_run_recorder_appends_records():

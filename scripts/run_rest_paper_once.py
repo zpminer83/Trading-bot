@@ -12,6 +12,10 @@ from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
 from bot.portfolio.portfolio_manager import PortfolioManager
+from bot.risk.market_freshness import (
+    MarketFreshnessGuard,
+    MarketFreshnessLimits,
+)
 from bot.risk.market_safety import MarketSafety, MarketSafetyLimits
 from bot.risk.risk_manager import RiskManager
 from bot.strategy.passive_market_maker import PassiveMarketMakerStrategy
@@ -43,6 +47,13 @@ def fmt_decimal(value: Decimal | None, places: str = "0.000000") -> str:
     return text.rstrip("0").rstrip(".") or "0"
 
 
+def fmt_seconds(value: Decimal | None) -> str:
+    if value is None:
+        return "n/a"
+
+    return f"{fmt_decimal(value, '0.000000')}s"
+
+
 def build_engine(
     symbol: str,
     market_cache: MarketCache,
@@ -53,6 +64,7 @@ def build_engine(
     max_spread_percent: Decimal,
     min_best_bid_quantity: Decimal,
     min_best_ask_quantity: Decimal,
+    market_freshness_limits: MarketFreshnessLimits | None = None,
 ) -> ConservativePaperTradingEngine:
     portfolio = PortfolioManager(initial_cash=initial_cash)
     risk = RiskManager()
@@ -81,6 +93,10 @@ def build_engine(
         )
     )
 
+    market_freshness = MarketFreshnessGuard(
+        limits=market_freshness_limits,
+    )
+
     strategy = PassiveMarketMakerStrategy(
         symbol=symbol,
         order_size_usd=order_size_usd,
@@ -96,6 +112,7 @@ def build_engine(
         order_manager=order_manager,
         competition=competition,
         market_safety=market_safety,
+        market_freshness=market_freshness,
     )
 
 
@@ -150,6 +167,28 @@ def print_market_safety(result) -> None:
 
         for item in decision.details:
             print(f"- {item}")
+
+
+def print_market_freshness(result) -> None:
+    decision = result.market_freshness_decision
+
+    print()
+    print("Market freshness:")
+
+    if decision is None:
+        print("Status         : disabled")
+        return
+
+    print(f"Fresh          : {decision.fresh}")
+    print(f"Reason         : {decision.reason}")
+    print(
+        "Exchange age   : "
+        f"{fmt_seconds(decision.exchange_age_seconds)}"
+    )
+    print(
+        "Unchanged time : "
+        f"{fmt_seconds(decision.unchanged_seconds)}"
+    )
 
 
 def print_decisions(result) -> None:
@@ -236,6 +275,21 @@ def main() -> None:
     min_best_bid_quantity = env_decimal("MARKET_MIN_BEST_BID_QTY", "1")
     min_best_ask_quantity = env_decimal("MARKET_MIN_BEST_ASK_QTY", "1")
 
+    market_freshness_limits = MarketFreshnessLimits(
+        max_exchange_age_seconds=env_decimal(
+            "MARKET_MAX_EXCHANGE_AGE_SECONDS",
+            "30",
+        ),
+        max_unchanged_seconds=env_decimal(
+            "MARKET_MAX_UNCHANGED_SECONDS",
+            "30",
+        ),
+        max_future_skew_seconds=env_decimal(
+            "MARKET_MAX_FUTURE_SKEW_SECONDS",
+            "5",
+        ),
+    )
+
     url = build_orderbook_url(
         base_url=base_url,
         symbol=symbol,
@@ -261,6 +315,20 @@ def main() -> None:
     )
     print(f"Min bid qty  : {fmt_decimal(min_best_bid_quantity, '0.000000')}")
     print(f"Min ask qty  : {fmt_decimal(min_best_ask_quantity, '0.000000')}")
+    print()
+    print("Market freshness limits:")
+    print(
+        "Max exchange age : "
+        f"{fmt_decimal(market_freshness_limits.max_exchange_age_seconds)}s"
+    )
+    print(
+        "Max unchanged    : "
+        f"{fmt_decimal(market_freshness_limits.max_unchanged_seconds)}s"
+    )
+    print(
+        "Max future skew  : "
+        f"{fmt_decimal(market_freshness_limits.max_future_skew_seconds)}s"
+    )
     print("=" * 70)
 
     response = fetch_json(url)
@@ -288,6 +356,7 @@ def main() -> None:
         max_spread_percent=max_spread_percent,
         min_best_bid_quantity=min_best_bid_quantity,
         min_best_ask_quantity=min_best_ask_quantity,
+        market_freshness_limits=market_freshness_limits,
     )
 
     result = engine.step(
@@ -295,6 +364,7 @@ def main() -> None:
     )
 
     print_market_snapshot(snapshot)
+    print_market_freshness(result)
     print_market_safety(result)
     print_decisions(result)
     print_submitted_orders(engine)
