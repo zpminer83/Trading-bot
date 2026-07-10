@@ -27,6 +27,11 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         market_freshness_reason="ok",
         exchange_age_seconds=Decimal("1.25"),
         unchanged_seconds=Decimal("2.50"),
+        portfolio_risk_allowed=False,
+        portfolio_risk_reason="max_drawdown_reached",
+        portfolio_risk_latched=True,
+        risk_drawdown=Decimal("0.10"),
+        risk_max_drawdown=Decimal("0.10"),
         cash_balance=Decimal("150"),
         equity=Decimal("150"),
         weekly_volume=Decimal("10.10"),
@@ -52,6 +57,11 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["market_freshness_reason"] == "ok"
     assert data["exchange_age_seconds"] == "1.25"
     assert data["unchanged_seconds"] == "2.50"
+    assert data["portfolio_risk_allowed"] is False
+    assert data["portfolio_risk_reason"] == "max_drawdown_reached"
+    assert data["portfolio_risk_latched"] is True
+    assert data["risk_drawdown"] == "0.10"
+    assert data["risk_max_drawdown"] == "0.10"
 
 
 def test_paper_run_recorder_appends_records():

@@ -50,6 +50,12 @@ class PaperRunRecord:
     exchange_age_seconds: Decimal | None = None
     unchanged_seconds: Decimal | None = None
 
+    portfolio_risk_allowed: bool | None = None
+    portfolio_risk_reason: str | None = None
+    portfolio_risk_latched: bool | None = None
+    risk_drawdown: Decimal | None = None
+    risk_max_drawdown: Decimal | None = None
+
     intents_count: int = 0
     decisions_count: int = 0
     fills_count: int = 0
@@ -90,6 +96,11 @@ class PaperRunRecord:
                 "market_freshness_reason": self.market_freshness_reason,
                 "exchange_age_seconds": self.exchange_age_seconds,
                 "unchanged_seconds": self.unchanged_seconds,
+                "portfolio_risk_allowed": self.portfolio_risk_allowed,
+                "portfolio_risk_reason": self.portfolio_risk_reason,
+                "portfolio_risk_latched": self.portfolio_risk_latched,
+                "risk_drawdown": self.risk_drawdown,
+                "risk_max_drawdown": self.risk_max_drawdown,
                 "intents_count": self.intents_count,
                 "decisions_count": self.decisions_count,
                 "fills_count": self.fills_count,

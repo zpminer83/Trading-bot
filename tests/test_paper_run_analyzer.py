@@ -180,6 +180,66 @@ def test_analyzer_treats_old_records_as_successful_iterations():
     assert summary.success_rate == Decimal("1")
     assert summary.error_type_counts == {}
     assert summary.max_consecutive_failures == 0
+    assert summary.risk_allowed_count == 0
+    assert summary.risk_blocked_count == 0
+    assert summary.unknown_risk_count == 2
+    assert summary.kill_switch_triggered is False
+    assert summary.risk_reason_counts == {}
+    assert summary.maximum_recorded_drawdown is None
+
+
+def test_analyzer_summarizes_portfolio_risk(capsys):
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00"),
+        make_record("2026-07-13T12:02:00+00:00"),
+        make_record("2026-07-13T12:03:00+00:00"),
+    ]
+    records[0].update(
+        portfolio_risk_allowed=True,
+        portfolio_risk_reason="ok",
+        portfolio_risk_latched=False,
+        risk_drawdown="0.02",
+        risk_max_drawdown="0.10",
+    )
+    records[1].update(
+        portfolio_risk_allowed=False,
+        portfolio_risk_reason="max_drawdown_reached",
+        portfolio_risk_latched=True,
+        risk_drawdown="0.10",
+        risk_max_drawdown="0.10",
+    )
+    records[2].update(
+        portfolio_risk_allowed=False,
+        portfolio_risk_reason="max_drawdown_latched",
+        portfolio_risk_latched=True,
+        risk_drawdown="0.03",
+        risk_max_drawdown="0.10",
+    )
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.risk_allowed_count == 1
+    assert summary.risk_blocked_count == 2
+    assert summary.unknown_risk_count == 1
+    assert summary.kill_switch_triggered is True
+    assert summary.risk_reason_counts == {
+        "ok": 1,
+        "max_drawdown_reached": 1,
+        "max_drawdown_latched": 1,
+    }
+    assert summary.maximum_recorded_drawdown == Decimal("0.10")
+
+    print_summary(Path("paper_run.jsonl"), summary)
+    output = capsys.readouterr().out
+
+    assert "Portfolio risk:" in output
+    assert "Allowed records          : 1" in output
+    assert "Blocked records          : 2" in output
+    assert "Unknown records          : 1" in output
+    assert "Kill switch triggered    : True" in output
+    assert "Maximum recorded drawdown: 10%" in output
+    assert "max_drawdown_reached: 1" in output
 
 
 def test_analyzer_summarizes_market_freshness(capsys):

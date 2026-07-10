@@ -10,6 +10,10 @@ from bot.risk.market_freshness import (
     MarketFreshnessGuard,
     MarketFreshnessLimits,
 )
+from bot.risk.portfolio_risk_guard import (
+    PortfolioRiskDecision,
+    PortfolioRiskLimits,
+)
 from scripts import run_rest_paper_loop, run_rest_paper_once
 
 
@@ -42,6 +46,7 @@ def disable_iteration_prints(monkeypatch):
         "print_market_snapshot",
         "print_market_freshness",
         "print_market_safety",
+        "print_portfolio_risk",
         "print_fills",
         "print_decisions",
         "print_open_orders",
@@ -100,6 +105,7 @@ def test_rest_paper_engine_uses_configured_market_freshness(build_engine):
         max_unchanged_seconds=Decimal("12"),
         max_future_skew_seconds=Decimal("13"),
     )
+    risk_limits = PortfolioRiskLimits(max_drawdown=Decimal("0.20"))
 
     engine = build_engine(
         symbol="SOMI:USDso",
@@ -112,10 +118,33 @@ def test_rest_paper_engine_uses_configured_market_freshness(build_engine):
         min_best_bid_quantity=Decimal("1"),
         min_best_ask_quantity=Decimal("1"),
         market_freshness_limits=limits,
+        portfolio_risk_limits=risk_limits,
     )
 
     assert isinstance(engine.market_freshness, MarketFreshnessGuard)
     assert engine.market_freshness.limits == limits
+    assert engine.portfolio_risk_guard.limits == risk_limits
+
+
+@pytest.mark.parametrize(
+    "script",
+    [run_rest_paper_once, run_rest_paper_loop],
+)
+def test_rest_paper_rejects_invalid_drawdown_environment(
+    script,
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("PAPER_MAX_DRAWDOWN_RATIO", "1.01")
+    monkeypatch.setenv("PAPER_RUN_OUTPUT", str(tmp_path / "paper_run.jsonl"))
+    monkeypatch.setattr(
+        script,
+        "fetch_json",
+        lambda url: pytest.fail("invalid config must fail before network fetch"),
+    )
+
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        script.main()
 
 
 def test_loop_build_record_captures_market_freshness():
@@ -128,6 +157,15 @@ def test_loop_build_record_captures_market_freshness():
     result = SimpleNamespace(
         market_safety_decision=None,
         market_freshness_decision=freshness,
+        portfolio_risk_decision=PortfolioRiskDecision(
+            allowed=False,
+            reason="max_drawdown_reached",
+            latched=True,
+            drawdown=Decimal("0.10"),
+            max_drawdown=Decimal("0.10"),
+            equity=Decimal("135"),
+            peak_equity=Decimal("150"),
+        ),
         intents=[],
         decisions=[],
         fills=[],
@@ -171,6 +209,11 @@ def test_loop_build_record_captures_market_freshness():
     assert record.market_freshness_reason == "repeated_snapshot"
     assert record.exchange_age_seconds == Decimal("4.25")
     assert record.unchanged_seconds == Decimal("31.5")
+    assert record.portfolio_risk_allowed is False
+    assert record.portfolio_risk_reason == "max_drawdown_reached"
+    assert record.portfolio_risk_latched is True
+    assert record.risk_drawdown == Decimal("0.10")
+    assert record.risk_max_drawdown == Decimal("0.10")
 
 
 def test_successful_loop_iteration_is_persisted_immediately(
@@ -186,6 +229,15 @@ def test_successful_loop_iteration_is_persisted_immediately(
     result = SimpleNamespace(
         market_safety_decision=None,
         market_freshness_decision=None,
+        portfolio_risk_decision=PortfolioRiskDecision(
+            allowed=True,
+            reason="ok",
+            latched=False,
+            drawdown=Decimal("0"),
+            max_drawdown=Decimal("0.10"),
+            equity=Decimal("150"),
+            peak_equity=Decimal("150"),
+        ),
         intents=[],
         decisions=[],
         fills=[],
@@ -235,6 +287,11 @@ def test_successful_loop_iteration_is_persisted_immediately(
     assert records[0]["error_type"] is None
     assert records[0]["error_message"] is None
     assert records[0]["consecutive_failures"] == 0
+    assert records[0]["portfolio_risk_allowed"] is True
+    assert records[0]["portfolio_risk_reason"] == "ok"
+    assert records[0]["portfolio_risk_latched"] is False
+    assert records[0]["risk_drawdown"] == "0"
+    assert records[0]["risk_max_drawdown"] == "0.10"
 
 
 def test_failed_loop_iterations_are_recorded_and_persisted(

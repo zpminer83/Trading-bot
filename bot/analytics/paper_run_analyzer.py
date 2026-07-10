@@ -31,6 +31,13 @@ class PaperRunSummary:
     max_unchanged_seconds: Decimal | None
     freshness_reason_counts: dict[str, int]
 
+    risk_allowed_count: int
+    risk_blocked_count: int
+    unknown_risk_count: int
+    kill_switch_triggered: bool
+    risk_reason_counts: dict[str, int]
+    maximum_recorded_drawdown: Decimal | None
+
     fills_count: int
     submitted_orders_count: int
 
@@ -220,6 +227,52 @@ class PaperRunAnalyzer:
                 freshness_reason_counts.get(reason_text, 0) + 1
             )
 
+        risk_allowed_count = sum(
+            1
+            for record in records
+            if record.get("portfolio_risk_allowed") is True
+        )
+
+        risk_blocked_count = sum(
+            1
+            for record in records
+            if record.get("portfolio_risk_allowed") is False
+        )
+
+        unknown_risk_count = (
+            len(records)
+            - risk_allowed_count
+            - risk_blocked_count
+        )
+
+        kill_switch_triggered = any(
+            record.get("portfolio_risk_latched") is True
+            for record in records
+        )
+
+        risk_reason_counts: dict[str, int] = {}
+
+        for record in records:
+            reason = record.get("portfolio_risk_reason")
+
+            if reason is None:
+                continue
+
+            reason_text = str(reason).strip()
+
+            if not reason_text:
+                continue
+
+            risk_reason_counts[reason_text] = (
+                risk_reason_counts.get(reason_text, 0) + 1
+            )
+
+        recorded_risk_drawdowns = [
+            self._to_decimal(record.get("risk_drawdown"))
+            for record in records
+            if record.get("risk_drawdown") is not None
+        ]
+
         fills_count = sum(
             self._to_int(record.get("fills_count"))
             for record in records
@@ -266,6 +319,16 @@ class PaperRunAnalyzer:
                 max(unchanged_durations) if unchanged_durations else None
             ),
             freshness_reason_counts=freshness_reason_counts,
+            risk_allowed_count=risk_allowed_count,
+            risk_blocked_count=risk_blocked_count,
+            unknown_risk_count=unknown_risk_count,
+            kill_switch_triggered=kill_switch_triggered,
+            risk_reason_counts=risk_reason_counts,
+            maximum_recorded_drawdown=(
+                max(recorded_risk_drawdowns)
+                if recorded_risk_drawdowns
+                else None
+            ),
             fills_count=fills_count,
             submitted_orders_count=submitted_orders_count,
             final_cash_balance=self._to_decimal(

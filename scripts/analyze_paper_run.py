@@ -32,6 +32,13 @@ def fmt_percentage(value: Decimal) -> str:
     return f"{fmt_decimal(percentage)}%"
 
 
+def fmt_optional_percentage(value: Decimal | None) -> str:
+    if value is None:
+        return "n/a"
+
+    return fmt_percentage(value)
+
+
 def format_duration(seconds: int) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, remaining_seconds = divmod(remainder, 60)
@@ -100,6 +107,23 @@ def print_summary(
         print("  Reasons:")
 
         for reason, count in sorted(summary.freshness_reason_counts.items()):
+            print(f"    {reason}: {count}")
+
+    print()
+    print("Portfolio risk:")
+    print(f"  Allowed records          : {summary.risk_allowed_count}")
+    print(f"  Blocked records          : {summary.risk_blocked_count}")
+    print(f"  Unknown records          : {summary.unknown_risk_count}")
+    print(f"  Kill switch triggered    : {summary.kill_switch_triggered}")
+    print(
+        "  Maximum recorded drawdown: "
+        f"{fmt_optional_percentage(summary.maximum_recorded_drawdown)}"
+    )
+
+    if summary.risk_reason_counts:
+        print("  Reasons:")
+
+        for reason, count in sorted(summary.risk_reason_counts.items()):
             print(f"    {reason}: {count}")
 
     print()

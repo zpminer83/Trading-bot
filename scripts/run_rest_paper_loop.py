@@ -17,12 +17,16 @@ from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
 from bot.portfolio.portfolio_manager import PortfolioManager
+from bot.risk.portfolio_risk_guard import (
+    PortfolioRiskGuard,
+    PortfolioRiskLimits,
+)
 from bot.risk.market_freshness import (
     MarketFreshnessGuard,
     MarketFreshnessLimits,
 )
 from bot.risk.market_safety import MarketSafety, MarketSafetyLimits
-from bot.risk.risk_manager import RiskManager
+from bot.risk.risk_manager import RiskLimits, RiskManager
 from bot.strategy.passive_market_maker import PassiveMarketMakerStrategy
 from scripts.check_dreamdex_orderbook_rest import (
     DEFAULT_BASE_URL,
@@ -184,9 +188,13 @@ def build_engine(
     min_best_bid_quantity: Decimal,
     min_best_ask_quantity: Decimal,
     market_freshness_limits: MarketFreshnessLimits | None = None,
+    portfolio_risk_limits: PortfolioRiskLimits | None = None,
 ) -> ConservativePaperTradingEngine:
+    resolved_risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
     portfolio = PortfolioManager(initial_cash=initial_cash)
-    risk = RiskManager()
+    risk = RiskManager(
+        limits=RiskLimits(max_drawdown=resolved_risk_limits.max_drawdown)
+    )
     execution = ExecutionManager(portfolio=portfolio, risk_manager=risk)
     broker = ConservativePaperBroker(portfolio=portfolio)
 
@@ -216,6 +224,11 @@ def build_engine(
         limits=market_freshness_limits,
     )
 
+    portfolio_risk_guard = PortfolioRiskGuard(
+        limits=resolved_risk_limits,
+        risk_manager=risk,
+    )
+
     strategy = PassiveMarketMakerStrategy(
         symbol=symbol,
         order_size_usd=order_size_usd,
@@ -232,6 +245,7 @@ def build_engine(
         competition=competition,
         market_safety=market_safety,
         market_freshness=market_freshness,
+        portfolio_risk_guard=portfolio_risk_guard,
     )
 
 
@@ -249,8 +263,10 @@ def print_header(
     min_best_ask_quantity: Decimal,
     output_path: Path,
     market_freshness_limits: MarketFreshnessLimits | None = None,
+    portfolio_risk_limits: PortfolioRiskLimits | None = None,
 ) -> None:
     freshness_limits = market_freshness_limits or MarketFreshnessLimits()
+    risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
 
     print("=" * 80)
     print("DREAMDEX REST PAPER LOOP")
@@ -287,6 +303,12 @@ def print_header(
     print(
         "Max future skew  : "
         f"{fmt_decimal(freshness_limits.max_future_skew_seconds)}s"
+    )
+    print()
+    print("Portfolio risk limit:")
+    print(
+        "Max drawdown : "
+        f"{fmt_decimal(risk_limits.max_drawdown * Decimal('100'))}%"
     )
     print("=" * 80)
 
@@ -354,6 +376,33 @@ def print_market_freshness(result) -> None:
         "  Unchanged time : "
         f"{fmt_seconds(decision.unchanged_seconds)}"
     )
+
+
+def print_portfolio_risk(result) -> None:
+    decision = getattr(result, "portfolio_risk_decision", None)
+
+    print("Portfolio risk:")
+
+    if decision is None:
+        print("  Status       : not evaluated")
+        return
+
+    print(f"  Allowed      : {decision.allowed}")
+    print(f"  Reason       : {decision.reason}")
+    print(f"  Latched      : {decision.latched}")
+    print(
+        "  Drawdown     : "
+        f"{fmt_decimal(decision.drawdown * Decimal('100'))}%"
+    )
+    print(
+        "  Max drawdown : "
+        f"{fmt_decimal(decision.max_drawdown * Decimal('100'))}%"
+    )
+    print(f"  Equity       : {fmt_decimal(decision.equity)}")
+    print(f"  Peak equity  : {fmt_decimal(decision.peak_equity)}")
+
+    if decision.latched:
+        print("  KILL SWITCH  : LATCHED")
 
 
 def print_fills(result) -> None:
@@ -483,6 +532,7 @@ def build_record(
     competition = engine.competition
     market_safety = result.market_safety_decision
     market_freshness = result.market_freshness_decision
+    portfolio_risk = getattr(result, "portfolio_risk_decision", None)
 
     return PaperRunRecord(
         timestamp=timestamp,
@@ -515,6 +565,21 @@ def build_record(
             market_freshness.unchanged_seconds
             if market_freshness is not None
             else None
+        ),
+        portfolio_risk_allowed=(
+            portfolio_risk.allowed if portfolio_risk is not None else None
+        ),
+        portfolio_risk_reason=(
+            portfolio_risk.reason if portfolio_risk is not None else None
+        ),
+        portfolio_risk_latched=(
+            portfolio_risk.latched if portfolio_risk is not None else None
+        ),
+        risk_drawdown=(
+            portfolio_risk.drawdown if portfolio_risk is not None else None
+        ),
+        risk_max_drawdown=(
+            portfolio_risk.max_drawdown if portfolio_risk is not None else None
         ),
         intents_count=len(result.intents),
         decisions_count=len(result.decisions),
@@ -659,6 +724,7 @@ def run_iteration(
     print_market_snapshot(snapshot)
     print_market_freshness(result)
     print_market_safety(result)
+    print_portfolio_risk(result)
     print_fills(result)
     print_decisions(result)
     print_open_orders(engine)
@@ -721,6 +787,10 @@ def main() -> None:
         ),
     )
 
+    portfolio_risk_limits = PortfolioRiskLimits(
+        max_drawdown=env_decimal("PAPER_MAX_DRAWDOWN_RATIO", "0.10")
+    )
+
     url = build_orderbook_url(
         base_url=base_url,
         symbol=symbol,
@@ -741,6 +811,7 @@ def main() -> None:
         min_best_bid_quantity=min_best_bid_quantity,
         min_best_ask_quantity=min_best_ask_quantity,
         market_freshness_limits=market_freshness_limits,
+        portfolio_risk_limits=portfolio_risk_limits,
     )
 
     print_header(
@@ -757,6 +828,7 @@ def main() -> None:
         min_best_ask_quantity=min_best_ask_quantity,
         output_path=output_path,
         market_freshness_limits=market_freshness_limits,
+        portfolio_risk_limits=portfolio_risk_limits,
     )
 
     consecutive_failures = 0

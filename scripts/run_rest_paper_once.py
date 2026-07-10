@@ -12,12 +12,16 @@ from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
 from bot.portfolio.portfolio_manager import PortfolioManager
+from bot.risk.portfolio_risk_guard import (
+    PortfolioRiskGuard,
+    PortfolioRiskLimits,
+)
 from bot.risk.market_freshness import (
     MarketFreshnessGuard,
     MarketFreshnessLimits,
 )
 from bot.risk.market_safety import MarketSafety, MarketSafetyLimits
-from bot.risk.risk_manager import RiskManager
+from bot.risk.risk_manager import RiskLimits, RiskManager
 from bot.strategy.passive_market_maker import PassiveMarketMakerStrategy
 from scripts.check_dreamdex_orderbook_rest import (
     DEFAULT_BASE_URL,
@@ -65,9 +69,13 @@ def build_engine(
     min_best_bid_quantity: Decimal,
     min_best_ask_quantity: Decimal,
     market_freshness_limits: MarketFreshnessLimits | None = None,
+    portfolio_risk_limits: PortfolioRiskLimits | None = None,
 ) -> ConservativePaperTradingEngine:
+    resolved_risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
     portfolio = PortfolioManager(initial_cash=initial_cash)
-    risk = RiskManager()
+    risk = RiskManager(
+        limits=RiskLimits(max_drawdown=resolved_risk_limits.max_drawdown)
+    )
     execution = ExecutionManager(portfolio=portfolio, risk_manager=risk)
     broker = ConservativePaperBroker(portfolio=portfolio)
 
@@ -97,6 +105,11 @@ def build_engine(
         limits=market_freshness_limits,
     )
 
+    portfolio_risk_guard = PortfolioRiskGuard(
+        limits=resolved_risk_limits,
+        risk_manager=risk,
+    )
+
     strategy = PassiveMarketMakerStrategy(
         symbol=symbol,
         order_size_usd=order_size_usd,
@@ -113,6 +126,7 @@ def build_engine(
         competition=competition,
         market_safety=market_safety,
         market_freshness=market_freshness,
+        portfolio_risk_guard=portfolio_risk_guard,
     )
 
 
@@ -189,6 +203,34 @@ def print_market_freshness(result) -> None:
         "Unchanged time : "
         f"{fmt_seconds(decision.unchanged_seconds)}"
     )
+
+
+def print_portfolio_risk(result) -> None:
+    decision = getattr(result, "portfolio_risk_decision", None)
+
+    print()
+    print("Portfolio risk:")
+
+    if decision is None:
+        print("Status       : not evaluated")
+        return
+
+    print(f"Allowed      : {decision.allowed}")
+    print(f"Reason       : {decision.reason}")
+    print(f"Latched      : {decision.latched}")
+    print(
+        "Drawdown     : "
+        f"{fmt_decimal(decision.drawdown * Decimal('100'))}%"
+    )
+    print(
+        "Max drawdown : "
+        f"{fmt_decimal(decision.max_drawdown * Decimal('100'))}%"
+    )
+    print(f"Equity       : {fmt_decimal(decision.equity)}")
+    print(f"Peak equity  : {fmt_decimal(decision.peak_equity)}")
+
+    if decision.latched:
+        print("KILL SWITCH  : LATCHED")
 
 
 def print_decisions(result) -> None:
@@ -290,6 +332,10 @@ def main() -> None:
         ),
     )
 
+    portfolio_risk_limits = PortfolioRiskLimits(
+        max_drawdown=env_decimal("PAPER_MAX_DRAWDOWN_RATIO", "0.10")
+    )
+
     url = build_orderbook_url(
         base_url=base_url,
         symbol=symbol,
@@ -329,6 +375,12 @@ def main() -> None:
         "Max future skew  : "
         f"{fmt_decimal(market_freshness_limits.max_future_skew_seconds)}s"
     )
+    print()
+    print("Portfolio risk limit:")
+    print(
+        "Max drawdown : "
+        f"{fmt_decimal(portfolio_risk_limits.max_drawdown * Decimal('100'))}%"
+    )
     print("=" * 70)
 
     response = fetch_json(url)
@@ -357,6 +409,7 @@ def main() -> None:
         min_best_bid_quantity=min_best_bid_quantity,
         min_best_ask_quantity=min_best_ask_quantity,
         market_freshness_limits=market_freshness_limits,
+        portfolio_risk_limits=portfolio_risk_limits,
     )
 
     result = engine.step(
@@ -366,6 +419,7 @@ def main() -> None:
     print_market_snapshot(snapshot)
     print_market_freshness(result)
     print_market_safety(result)
+    print_portfolio_risk(result)
     print_decisions(result)
     print_submitted_orders(engine)
     print_portfolio(engine)

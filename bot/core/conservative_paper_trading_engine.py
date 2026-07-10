@@ -16,6 +16,11 @@ from bot.execution.order_manager import OrderManager
 from bot.execution.paper_broker import PaperFill
 from bot.market.market_cache import MarketCache
 from bot.portfolio.portfolio_manager import PortfolioManager
+from bot.risk.portfolio_risk_guard import (
+    PortfolioRiskDecision,
+    PortfolioRiskGuard,
+    PortfolioRiskLimits,
+)
 from bot.risk.market_freshness import (
     MarketFreshnessDecision,
     MarketFreshnessGuard,
@@ -40,6 +45,7 @@ class ConservativePaperTradingStepResult:
     competition_snapshot: CompetitionSnapshot | None = None
     market_safety_decision: MarketSafetyDecision | None = None
     market_freshness_decision: MarketFreshnessDecision | None = None
+    portfolio_risk_decision: PortfolioRiskDecision | None = None
 
 
 class ConservativePaperTradingEngine:
@@ -51,11 +57,12 @@ class ConservativePaperTradingEngine:
     1. check market-data freshness
     2. check market safety
     3. update portfolio mark price
-    4. process existing paper orders
-    5. record fills in competition tracker
-    6. generate strategy intents
-    7. run execution and risk checks
-    8. replace stale orders with approved new orders
+    4. evaluate the latched portfolio risk guard
+    5. process existing paper orders
+    6. record fills in competition tracker
+    7. generate strategy intents
+    8. run execution and risk checks
+    9. replace stale orders with approved new orders
 
     If freshness or safety checks fail:
     - existing open orders are cancelled
@@ -75,6 +82,7 @@ class ConservativePaperTradingEngine:
         competition: CompetitionTracker | None = None,
         market_safety: MarketSafety | None = None,
         market_freshness: MarketFreshnessGuard | None = None,
+        portfolio_risk_guard: PortfolioRiskGuard | None = None,
     ):
         self.symbol = symbol
         self.market = market
@@ -86,6 +94,12 @@ class ConservativePaperTradingEngine:
         self.competition = competition
         self.market_safety = market_safety
         self.market_freshness = market_freshness
+        self.portfolio_risk_guard = portfolio_risk_guard or PortfolioRiskGuard(
+            limits=PortfolioRiskLimits(
+                max_drawdown=execution.risk_manager.limits.max_drawdown
+            ),
+            risk_manager=execution.risk_manager,
+        )
 
     def step(
         self,
@@ -121,6 +135,21 @@ class ConservativePaperTradingEngine:
         if mid_price is not None:
             self.portfolio.update_market_price(mid_price)
 
+        portfolio_risk_decision = self.portfolio_risk_guard.evaluate(
+            self.portfolio
+        )
+
+        if not portfolio_risk_decision.allowed:
+            self.order_manager.cancel_all()
+
+            return ConservativePaperTradingStepResult(
+                mid_price=mid_price,
+                competition_snapshot=self._competition_snapshot(),
+                market_safety_decision=safety_decision,
+                market_freshness_decision=freshness_decision,
+                portfolio_risk_decision=portfolio_risk_decision,
+            )
+
         fills = self.broker.process_market(self.market)
 
         if self.competition is not None:
@@ -154,6 +183,7 @@ class ConservativePaperTradingEngine:
             competition_snapshot=self._competition_snapshot(),
             market_safety_decision=safety_decision,
             market_freshness_decision=freshness_decision,
+            portfolio_risk_decision=portfolio_risk_decision,
         )
 
     def _evaluate_market_freshness(

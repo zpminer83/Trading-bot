@@ -147,6 +147,7 @@ def test_engine_blocks_new_orders_when_spread_is_too_wide():
     assert result.market_safety_decision is not None
     assert result.market_safety_decision.safe is False
     assert result.market_safety_decision.reason == "spread_too_wide"
+    assert result.portfolio_risk_decision is None
 
     assert result.intents == []
     assert result.decisions == []

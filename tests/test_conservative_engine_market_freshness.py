@@ -179,6 +179,7 @@ def test_engine_blocks_orders_when_timestamp_is_stale():
     assert result.market_freshness_decision is not None
     assert result.market_freshness_decision.fresh is False
     assert result.market_freshness_decision.reason == "stale_timestamp"
+    assert result.portfolio_risk_decision is None
 
     assert result.intents == []
     assert result.decisions == []
