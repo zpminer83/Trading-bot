@@ -117,3 +117,71 @@ def test_paper_run_recorder_writes_jsonl(tmp_path):
 
     assert second["timestamp"] == "2026-07-13T12:01:00+00:00"
     assert second["best_bid"] == "0.1040"
+
+
+def test_append_jsonl_creates_directories_and_appends_records_in_order(tmp_path):
+    recorder = PaperRunRecorder()
+    first_record = PaperRunRecord(
+        timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        symbol="SOMI:USDso",
+        iteration_index=1,
+    )
+    second_record = PaperRunRecord(
+        timestamp=datetime(2026, 7, 13, 12, 1, tzinfo=timezone.utc),
+        symbol="SOMI:USDso",
+        iteration_index=2,
+    )
+    output_path = tmp_path / "missing" / "paper_runs" / "paper_run.jsonl"
+
+    first_result = recorder.append_jsonl(output_path, first_record)
+    second_result = recorder.append_jsonl(output_path, second_record)
+
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+
+    assert first_result == output_path
+    assert second_result == output_path
+    assert len(lines) == 2
+    assert json.loads(lines[0])["iteration_index"] == 1
+    assert json.loads(lines[1])["iteration_index"] == 2
+    assert recorder.count == 2
+    assert recorder.latest == second_record
+
+
+def test_append_jsonl_does_not_fsync_by_default(tmp_path, monkeypatch):
+    recorder = PaperRunRecorder()
+    record = PaperRunRecord(
+        timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        symbol="SOMI:USDso",
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        "bot.analytics.paper_run_recorder.os.fsync",
+        lambda file_descriptor: calls.append(file_descriptor),
+    )
+
+    recorder.append_jsonl(tmp_path / "paper_run.jsonl", record)
+
+    assert calls == []
+
+
+def test_append_jsonl_fsyncs_when_requested(tmp_path, monkeypatch):
+    recorder = PaperRunRecorder()
+    record = PaperRunRecord(
+        timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        symbol="SOMI:USDso",
+    )
+    calls = []
+
+    monkeypatch.setattr(
+        "bot.analytics.paper_run_recorder.os.fsync",
+        lambda file_descriptor: calls.append(file_descriptor),
+    )
+
+    recorder.append_jsonl(
+        tmp_path / "paper_run.jsonl",
+        record,
+        sync_to_disk=True,
+    )
+
+    assert len(calls) == 1

@@ -1,4 +1,5 @@
 import json
+import os
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
@@ -123,6 +124,28 @@ class PaperRunRecorder:
 
     def append(self, record: PaperRunRecord) -> None:
         self.records.append(record)
+
+    def append_jsonl(
+        self,
+        path: str | Path,
+        record: PaperRunRecord,
+        *,
+        sync_to_disk: bool = False,
+    ) -> Path:
+        output_path = Path(path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with output_path.open("a", encoding="utf-8") as file:
+            file.write(json.dumps(record.to_dict(), ensure_ascii=False))
+            file.write("\n")
+            file.flush()
+
+            if sync_to_disk:
+                os.fsync(file.fileno())
+
+        self.records.append(record)
+
+        return output_path
 
     def write_jsonl(self, path: str | Path) -> Path:
         output_path = Path(path)

@@ -46,6 +46,13 @@ def disable_iteration_prints(monkeypatch):
         monkeypatch.setattr(run_rest_paper_loop, name, lambda *args: None)
 
 
+@pytest.mark.parametrize("value", ["1", "TRUE", "Yes", "on"])
+def test_paper_run_fsync_accepts_true_values(value, monkeypatch):
+    monkeypatch.setenv("PAPER_RUN_FSYNC", value)
+
+    assert run_rest_paper_loop.env_bool("PAPER_RUN_FSYNC") is True
+
+
 @pytest.mark.parametrize(
     "build_engine",
     [
@@ -164,6 +171,11 @@ def test_successful_loop_iteration_is_persisted_immediately(
         "extract_orderbook_payload",
         lambda response, symbol: {},
     )
+    monkeypatch.setattr(
+        recorder,
+        "write_jsonl",
+        lambda path: pytest.fail("loop must not rewrite the JSONL file"),
+    )
     disable_iteration_prints(monkeypatch)
 
     run_rest_paper_loop.run_iteration(
@@ -182,6 +194,8 @@ def test_successful_loop_iteration_is_persisted_immediately(
     ]
 
     assert len(records) == 1
+    assert recorder.count == 1
+    assert recorder.latest is not None
     assert records[0]["iteration_index"] == 3
     assert records[0]["iteration_ok"] is True
     assert records[0]["error_type"] is None
@@ -195,19 +209,27 @@ def test_failed_loop_iterations_are_recorded_and_persisted(
     output_path = tmp_path / "paper_run.jsonl"
     engine = make_loop_engine()
     persisted_counts = []
-    original_write_jsonl = run_rest_paper_loop.PaperRunRecorder.write_jsonl
+    sync_values = []
+    original_append_jsonl = run_rest_paper_loop.PaperRunRecorder.append_jsonl
 
     def fail_iteration(**kwargs):
         raise RuntimeError("request failed")
 
-    def track_write(recorder, path):
-        result = original_write_jsonl(recorder, path)
+    def track_append(recorder, path, record, *, sync_to_disk=False):
+        result = original_append_jsonl(
+            recorder,
+            path,
+            record,
+            sync_to_disk=sync_to_disk,
+        )
         persisted_counts.append(recorder.count)
+        sync_values.append(sync_to_disk)
         return result
 
     monkeypatch.setenv("PAPER_RUN_OUTPUT", str(output_path))
     monkeypatch.setenv("PAPER_LOOP_ITERATIONS", "2")
     monkeypatch.setenv("PAPER_LOOP_INTERVAL_SECONDS", "0")
+    monkeypatch.setenv("PAPER_RUN_FSYNC", "YeS")
     monkeypatch.setattr(run_rest_paper_loop, "build_engine", lambda **kwargs: engine)
     monkeypatch.setattr(run_rest_paper_loop, "run_iteration", fail_iteration)
     monkeypatch.setattr(run_rest_paper_loop, "print_header", lambda **kwargs: None)
@@ -218,8 +240,15 @@ def test_failed_loop_iterations_are_recorded_and_persisted(
     )
     monkeypatch.setattr(
         run_rest_paper_loop.PaperRunRecorder,
+        "append_jsonl",
+        track_append,
+    )
+    monkeypatch.setattr(
+        run_rest_paper_loop.PaperRunRecorder,
         "write_jsonl",
-        track_write,
+        lambda *args, **kwargs: pytest.fail(
+            "loop must not rewrite the JSONL file"
+        ),
     )
 
     run_rest_paper_loop.main()
@@ -230,6 +259,7 @@ def test_failed_loop_iterations_are_recorded_and_persisted(
     ]
 
     assert persisted_counts == [1, 2]
+    assert sync_values == [True, True]
     assert [record["iteration_index"] for record in records] == [1, 2]
     assert all(record["iteration_ok"] is False for record in records)
     assert all(record["error_type"] == "RuntimeError" for record in records)

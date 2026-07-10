@@ -62,6 +62,15 @@ def env_int(name: str, default: int) -> int:
     return int(os.getenv(name, str(default)))
 
 
+def env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+
+    if value is None:
+        return default
+
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def fmt_decimal(value: Decimal | None, places: str = "0.000000") -> str:
     if value is None:
         return "n/a"
@@ -526,9 +535,14 @@ def persist_record(
     recorder: PaperRunRecorder,
     record: PaperRunRecord,
     output_path: Path,
+    *,
+    sync_to_disk: bool = False,
 ) -> None:
-    recorder.append(record)
-    recorder.write_jsonl(output_path)
+    recorder.append_jsonl(
+        output_path,
+        record,
+        sync_to_disk=sync_to_disk,
+    )
 
 
 def run_iteration(
@@ -538,7 +552,9 @@ def run_iteration(
     market_data: MarketDataService,
     engine: ConservativePaperTradingEngine,
     recorder: PaperRunRecorder,
-    output_path: Path | None = None,
+    output_path: Path,
+    *,
+    sync_to_disk: bool = False,
 ) -> None:
     now = datetime.now(timezone.utc)
 
@@ -570,14 +586,12 @@ def run_iteration(
         iteration_index=index,
     )
 
-    if output_path is None:
-        recorder.append(record)
-    else:
-        persist_record(
-            recorder=recorder,
-            record=record,
-            output_path=output_path,
-        )
+    persist_record(
+        recorder=recorder,
+        record=record,
+        output_path=output_path,
+        sync_to_disk=sync_to_disk,
+    )
 
     print_market_snapshot(snapshot)
     print_market_freshness(result)
@@ -600,6 +614,7 @@ def main() -> None:
 
     iterations = env_int("PAPER_LOOP_ITERATIONS", 5)
     interval_seconds = env_int("PAPER_LOOP_INTERVAL_SECONDS", 10)
+    sync_to_disk = env_bool("PAPER_RUN_FSYNC")
 
     initial_cash = env_decimal("PAPER_INITIAL_CASH", "150")
     order_size_usd = env_decimal("PAPER_ORDER_SIZE_USD", "5")
@@ -673,6 +688,7 @@ def main() -> None:
                 engine=engine,
                 recorder=recorder,
                 output_path=output_path,
+                sync_to_disk=sync_to_disk,
             )
         except KeyboardInterrupt:
             print()
@@ -690,6 +706,7 @@ def main() -> None:
                 recorder=recorder,
                 record=failed_record,
                 output_path=output_path,
+                sync_to_disk=sync_to_disk,
             )
 
             print()
