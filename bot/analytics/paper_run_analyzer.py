@@ -14,6 +14,11 @@ class PaperRunSummary:
     last_timestamp: datetime
     duration_seconds: int
 
+    successful_iterations: int
+    failed_iterations: int
+    success_rate: Decimal
+    error_type_counts: dict[str, int]
+
     safe_market_count: int
     unsafe_market_count: int
     unknown_market_count: int
@@ -116,6 +121,35 @@ class PaperRunAnalyzer:
             int((last_timestamp - first_timestamp).total_seconds()),
         )
 
+        failed_iterations = sum(
+            1
+            for record in records
+            if record.get("iteration_ok") is False
+        )
+
+        successful_iterations = len(records) - failed_iterations
+        success_rate = Decimal(successful_iterations) / Decimal(len(records))
+
+        error_type_counts: dict[str, int] = {}
+
+        for record in records:
+            if record.get("iteration_ok") is not False:
+                continue
+
+            error_type = record.get("error_type")
+
+            if error_type is None:
+                continue
+
+            error_type_text = str(error_type).strip()
+
+            if not error_type_text:
+                continue
+
+            error_type_counts[error_type_text] = (
+                error_type_counts.get(error_type_text, 0) + 1
+            )
+
         safe_market_count = sum(
             1
             for record in records
@@ -205,6 +239,10 @@ class PaperRunAnalyzer:
             first_timestamp=first_timestamp,
             last_timestamp=last_timestamp,
             duration_seconds=duration_seconds,
+            successful_iterations=successful_iterations,
+            failed_iterations=failed_iterations,
+            success_rate=success_rate,
+            error_type_counts=error_type_counts,
             safe_market_count=safe_market_count,
             unsafe_market_count=unsafe_market_count,
             unknown_market_count=unknown_market_count,

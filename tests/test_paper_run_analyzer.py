@@ -128,6 +128,55 @@ def test_analyzer_counts_market_safety_states():
     assert summary.unknown_market_count == 1
 
 
+def test_analyzer_summarizes_run_reliability(capsys):
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00"),
+        make_record("2026-07-13T12:02:00+00:00"),
+    ]
+    records[0].update(iteration_ok=True)
+    records[1].update(
+        iteration_ok=False,
+        error_type="TimeoutError",
+        error_message="request timed out",
+    )
+    records[2].update(
+        iteration_ok=False,
+        error_type="TimeoutError",
+        error_message="request timed out again",
+    )
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.successful_iterations == 1
+    assert summary.failed_iterations == 2
+    assert summary.success_rate == Decimal("1") / Decimal("3")
+    assert summary.error_type_counts == {"TimeoutError": 2}
+
+    print_summary(Path("paper_run.jsonl"), summary)
+    output = capsys.readouterr().out
+
+    assert "Run reliability:" in output
+    assert "Successful iterations: 1" in output
+    assert "Failed iterations    : 2" in output
+    assert "Success rate         : 33.33%" in output
+    assert "TimeoutError: 2" in output
+
+
+def test_analyzer_treats_old_records_as_successful_iterations():
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00"),
+    ]
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.successful_iterations == 2
+    assert summary.failed_iterations == 0
+    assert summary.success_rate == Decimal("1")
+    assert summary.error_type_counts == {}
+
+
 def test_analyzer_summarizes_market_freshness(capsys):
     records = [
         make_record("2026-07-13T12:00:00+00:00"),

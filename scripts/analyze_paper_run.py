@@ -27,6 +27,11 @@ def fmt_seconds(value: Decimal | None) -> str:
     return f"{fmt_decimal(value)}s"
 
 
+def fmt_percentage(value: Decimal) -> str:
+    percentage = (value * Decimal("100")).quantize(Decimal("0.01"))
+    return f"{fmt_decimal(percentage)}%"
+
+
 def format_duration(seconds: int) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, remaining_seconds = divmod(remainder, 60)
@@ -52,6 +57,18 @@ def print_summary(
     print(f"First timestamp   : {summary.first_timestamp.isoformat()}")
     print(f"Last timestamp    : {summary.last_timestamp.isoformat()}")
     print(f"Duration          : {format_duration(summary.duration_seconds)}")
+
+    print()
+    print("Run reliability:")
+    print(f"  Successful iterations: {summary.successful_iterations}")
+    print(f"  Failed iterations    : {summary.failed_iterations}")
+    print(f"  Success rate         : {fmt_percentage(summary.success_rate)}")
+
+    if summary.error_type_counts:
+        print("  Error types:")
+
+        for error_type, count in sorted(summary.error_type_counts.items()):
+            print(f"    {error_type}: {count}")
 
     print()
     print("Market safety:")

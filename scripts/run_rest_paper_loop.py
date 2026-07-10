@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -30,6 +31,26 @@ from scripts.check_dreamdex_orderbook_rest import (
     build_orderbook_url,
     extract_orderbook_payload,
     fetch_json,
+)
+
+
+MAX_ERROR_MESSAGE_LENGTH = 500
+REQUEST_HEADERS_PATTERN = re.compile(
+    r"(?is)\b(?:request[_ -]?headers?|headers?)\b\s*[:=]\s*"
+    r"(?:\{.*?\}|[^\r\n]*)"
+)
+PRIVATE_KEY_BLOCK_PATTERN = re.compile(
+    r"(?is)-----BEGIN [^-\r\n]*PRIVATE KEY-----.*?"
+    r"-----END [^-\r\n]*PRIVATE KEY-----"
+)
+AUTHORIZATION_PATTERN = re.compile(
+    r"(?i)\bauthorization\b\s*[:=]\s*[^\r\n,;]+"
+)
+BEARER_PATTERN = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
+SENSITIVE_VALUE_PATTERN = re.compile(
+    r"(?i)\b(api[-_ ]?key|private[-_ ]?key|jwt|token|secret|cookie|"
+    r"password|passphrase)\b\s*[:=]\s*"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;]+)"
 )
 
 
@@ -67,6 +88,20 @@ def build_output_path(started_at: datetime) -> Path:
     filename = f"paper_run_{started_at.strftime('%Y%m%d_%H%M%S')}.jsonl"
 
     return Path("data") / "paper_runs" / filename
+
+
+def safe_error_message(exc: Exception) -> str:
+    message = str(exc)
+    message = REQUEST_HEADERS_PATTERN.sub("headers=[REDACTED]", message)
+    message = PRIVATE_KEY_BLOCK_PATTERN.sub("[REDACTED PRIVATE KEY]", message)
+    message = AUTHORIZATION_PATTERN.sub("authorization=[REDACTED]", message)
+    message = BEARER_PATTERN.sub("Bearer [REDACTED]", message)
+    message = SENSITIVE_VALUE_PATTERN.sub(
+        lambda match: f"{match.group(1)}=[REDACTED]",
+        message,
+    )
+
+    return message[:MAX_ERROR_MESSAGE_LENGTH]
 
 
 def build_engine(
@@ -373,6 +408,7 @@ def build_record(
     snapshot,
     result,
     engine: ConservativePaperTradingEngine,
+    iteration_index: int = 0,
 ) -> PaperRunRecord:
     portfolio = engine.portfolio
     competition = engine.competition
@@ -382,6 +418,10 @@ def build_record(
     return PaperRunRecord(
         timestamp=timestamp,
         symbol=symbol,
+        iteration_index=iteration_index,
+        iteration_ok=True,
+        error_type=None,
+        error_message=None,
         best_bid=snapshot.best_bid.price if snapshot.best_bid is not None else None,
         best_ask=snapshot.best_ask.price if snapshot.best_ask is not None else None,
         mid_price=snapshot.mid_price,
@@ -428,6 +468,69 @@ def build_record(
     )
 
 
+def build_failed_record(
+    timestamp: datetime,
+    symbol: str,
+    iteration_index: int,
+    exc: Exception,
+    engine: ConservativePaperTradingEngine,
+) -> PaperRunRecord:
+    values: dict[str, Any] = {}
+    portfolio = getattr(engine, "portfolio", None)
+    competition = getattr(engine, "competition", None)
+    broker = getattr(engine, "broker", None)
+
+    if portfolio is not None:
+        for field_name in (
+            "cash_balance",
+            "base_position",
+            "equity",
+            "realized_pnl",
+            "unrealized_pnl",
+            "drawdown",
+            "total_volume",
+        ):
+            field_value = getattr(portfolio, field_name, None)
+
+            if field_value is not None:
+                values[field_name] = field_value
+
+    if competition is not None:
+        for field_name in (
+            "weekly_volume",
+            "estimated_score",
+            "raffle_tickets",
+        ):
+            field_value = getattr(competition, field_name, None)
+
+            if field_value is not None:
+                values[field_name] = field_value
+
+    open_orders = getattr(broker, "open_orders", None)
+
+    if open_orders is not None:
+        values["open_orders_count"] = len(open_orders)
+
+    return PaperRunRecord(
+        timestamp=timestamp,
+        symbol=symbol,
+        iteration_index=iteration_index,
+        iteration_ok=False,
+        error_type=type(exc).__name__,
+        error_message=safe_error_message(exc),
+        **values,
+    )
+
+
+def persist_record(
+    recorder: PaperRunRecorder,
+    record: PaperRunRecord,
+    output_path: Path,
+) -> None:
+    recorder.append(record)
+    recorder.write_jsonl(output_path)
+
+
 def run_iteration(
     index: int,
     url: str,
@@ -435,6 +538,7 @@ def run_iteration(
     market_data: MarketDataService,
     engine: ConservativePaperTradingEngine,
     recorder: PaperRunRecorder,
+    output_path: Path | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
 
@@ -463,9 +567,17 @@ def run_iteration(
         snapshot=snapshot,
         result=result,
         engine=engine,
+        iteration_index=index,
     )
 
-    recorder.append(record)
+    if output_path is None:
+        recorder.append(record)
+    else:
+        persist_record(
+            recorder=recorder,
+            record=record,
+            output_path=output_path,
+        )
 
     print_market_snapshot(snapshot)
     print_market_freshness(result)
@@ -560,24 +672,35 @@ def main() -> None:
                 market_data=market_data,
                 engine=engine,
                 recorder=recorder,
+                output_path=output_path,
             )
         except KeyboardInterrupt:
             print()
             print("Interrupted by user.")
             break
         except Exception as exc:
+            failed_record = build_failed_record(
+                timestamp=datetime.now(timezone.utc),
+                symbol=symbol,
+                iteration_index=index,
+                exc=exc,
+                engine=engine,
+            )
+            persist_record(
+                recorder=recorder,
+                record=failed_record,
+                output_path=output_path,
+            )
+
             print()
             print("=" * 80)
             print(f"LOOP {index} FAILED")
             print("=" * 80)
-            print(f"Error: {exc}")
+            print(f"Error: {failed_record.error_message}")
             print("=" * 80)
 
         if index < iterations:
             time.sleep(interval_seconds)
-
-    if recorder.count > 0:
-        recorder.write_jsonl(output_path)
 
     print_final_summary(
         engine=engine,

@@ -12,6 +12,10 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     record = PaperRunRecord(
         timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
         symbol="SOMI:USDso",
+        iteration_index=7,
+        iteration_ok=False,
+        error_type="TimeoutError",
+        error_message="request timed out",
         best_bid=Decimal("0.1039"),
         best_ask=Decimal("0.1041"),
         mid_price=Decimal("0.1040"),
@@ -32,6 +36,10 @@ def test_paper_run_record_serializes_decimal_and_datetime():
 
     assert data["timestamp"] == "2026-07-13T12:00:00+00:00"
     assert data["symbol"] == "SOMI:USDso"
+    assert data["iteration_index"] == 7
+    assert data["iteration_ok"] is False
+    assert data["error_type"] == "TimeoutError"
+    assert data["error_message"] == "request timed out"
     assert data["best_bid"] == "0.1039"
     assert data["best_ask"] == "0.1041"
     assert data["weekly_volume"] == "10.10"
