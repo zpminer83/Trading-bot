@@ -8,6 +8,7 @@ from bot.competition.confirmed_fill_ledger import (
     ConfirmedFillLedgerLimits,
 )
 from bot.competition.fair_play_guard import FairPlayGuard, FairPlayLimits
+from bot.competition.trade_intent_ledger import TradeIntentLedger
 from bot.core.conservative_paper_trading_engine import (
     ConservativePaperTradingEngine,
 )
@@ -124,6 +125,7 @@ def build_engine(
     )
     confirmed_fill_ledger = None
     fair_play_guard = None
+    trade_intent_ledger = TradeIntentLedger()
     if fair_play_limits is not None:
         confirmed_fill_ledger = ConfirmedFillLedger(
             limits=ConfirmedFillLedgerLimits(
@@ -156,6 +158,7 @@ def build_engine(
         portfolio_risk_guard=portfolio_risk_guard,
         confirmed_fill_ledger=confirmed_fill_ledger,
         fair_play_guard=fair_play_guard,
+        trade_intent_ledger=trade_intent_ledger,
     )
 
 
@@ -305,6 +308,43 @@ def print_fair_play(result) -> None:
     )
     if getattr(result, "fair_play_latched", False):
         print("WARNING: FAIR-PLAY GUARD LATCHED")
+
+
+def print_trade_intent_audit(result) -> None:
+    events = getattr(result, "trade_intent_events", [])
+    print()
+    print("Trade intent audit:")
+    if not events:
+        print("No generated intents.")
+        return
+    for event in events:
+        print(
+            f"#{event.sequence_number} {event.side.upper()} "
+            f"price={fmt_decimal(event.price)} qty={fmt_decimal(event.quantity)} "
+            f"purpose={event.purpose} strategy={event.strategy_name} "
+            f"fair-play={event.fair_play_allowed}:{event.fair_play_reason} "
+            f"execution={event.execution_approved}:{event.execution_reason} "
+            f"submitted={event.submitted} order_id={event.resulting_order_id}"
+        )
+
+
+def print_purpose_summary(result) -> None:
+    purpose_counts = getattr(result, "purpose_counts", {})
+    print()
+    print("Intent purpose summary:")
+    if not purpose_counts:
+        print("No generated purposes.")
+        return
+    for purpose, count in sorted(purpose_counts.items()):
+        print(f"{purpose}: {count}")
+    confirmed_counts: dict[str, int] = {}
+    for event in getattr(result, "confirmed_fill_events", []):
+        purpose = str(getattr(event, "purpose", "unknown") or "unknown")
+        confirmed_counts[purpose] = confirmed_counts.get(purpose, 0) + 1
+    if confirmed_counts:
+        print("Confirmed fills:")
+        for purpose, count in sorted(confirmed_counts.items()):
+            print(f"  {purpose}: {count}")
 
 
 def print_decisions(result) -> None:
@@ -551,6 +591,8 @@ def main() -> None:
     print_portfolio_risk(result)
     print_confirmed_fill_events(result)
     print_fair_play(result)
+    print_trade_intent_audit(result)
+    print_purpose_summary(result)
     print_decisions(result)
     print_submitted_orders(engine)
     print_portfolio(engine)

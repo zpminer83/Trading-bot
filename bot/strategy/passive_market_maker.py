@@ -1,6 +1,6 @@
 from decimal import Decimal
 
-from bot.execution.order import OrderIntent
+from bot.execution.order import OrderIntent, OrderPurpose
 from bot.market.market_cache import MarketCache
 from bot.portfolio.portfolio_manager import PortfolioManager
 
@@ -46,6 +46,13 @@ class PassiveMarketMakerStrategy:
                 order_type="limit",
                 price=best_bid.price,
                 quantity=buy_quantity,
+                purpose=OrderPurpose.ENTRY,
+                strategy_name="passive_market_maker",
+                rationale=(
+                    "passive bid to establish inventory"
+                    if portfolio.base_position == 0
+                    else "passive bid to replenish inventory"
+                ),
             )
         )
 
@@ -62,8 +69,11 @@ class PassiveMarketMakerStrategy:
                         symbol=self.symbol,
                         side="sell",
                         order_type="limit",
-                        price=best_ask.price,
-                        quantity=sell_quantity,
+                    price=best_ask.price,
+                    quantity=sell_quantity,
+                    purpose=OrderPurpose.INVENTORY_REBALANCE,
+                    strategy_name="passive_market_maker",
+                    rationale="passive ask to rebalance existing inventory",
                     )
                 )
 

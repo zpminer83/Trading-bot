@@ -33,6 +33,7 @@ class ConservativePaperBroker:
         self.portfolio = portfolio
         self.open_orders: list[PaperOrder] = []
         self.fills: list[PaperFill] = []
+        self._source_order_by_fill_id: dict[int, PaperOrder] = {}
         self._next_order_id = 1
 
     def submit(self, decision: OrderDecision) -> PaperOrder | None:
@@ -62,11 +63,16 @@ class ConservativePaperBroker:
 
             order.status = "filled"
             self.fills.append(fill)
+            self._source_order_by_fill_id[id(fill)] = order
             new_fills.append(fill)
 
         self.open_orders = still_open
 
         return new_fills
+
+    def source_order_for_fill(self, fill: PaperFill) -> PaperOrder | None:
+        """Returns the actual filled paper order that produced ``fill``."""
+        return self._source_order_by_fill_id.get(id(fill))
 
     def cancel_all(self) -> None:
         for order in self.open_orders:

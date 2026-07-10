@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Iterable
+from typing import Iterable, Mapping
 
+from bot.execution.conservative_paper_broker import PaperOrder
 from bot.execution.paper_broker import PaperFill
 
 
@@ -72,6 +73,11 @@ class ConfirmedFillEvent:
     short_window_round_trip: bool
     near_flat_cycle_completed: bool
     near_flat_cycle_count: int
+    purpose: str = "unknown"
+    strategy_name: str = "unknown"
+    rationale: str | None = None
+    signal_id: str | None = None
+    source_order_id: str | int | None = None
 
 
 @dataclass
@@ -110,6 +116,7 @@ class ConfirmedFillLedger:
         fills: Iterable[PaperFill],
         starting_position: Decimal,
         timestamp: datetime | None = None,
+        source_orders_by_fill_id: Mapping[int, PaperOrder] | None = None,
     ) -> list[ConfirmedFillEvent]:
         observed_at = _utc_timestamp(timestamp)
         initial_position = _as_decimal(starting_position)
@@ -168,6 +175,14 @@ class ConfirmedFillLedger:
                 position_after=position_after,
                 price=price,
             )
+            source_order = (
+                source_orders_by_fill_id.get(id(fill))
+                if source_orders_by_fill_id is not None
+                else None
+            )
+            source_intent = None
+            if isinstance(source_order, PaperOrder) and source_order.status == "filled":
+                source_intent = source_order.intent
             event = ConfirmedFillEvent(
                 sequence_number=self._next_sequence_number,
                 timestamp=observed_at,
@@ -188,6 +203,17 @@ class ConfirmedFillLedger:
                 short_window_round_trip=short_window_round_trip,
                 near_flat_cycle_completed=cycle_completed,
                 near_flat_cycle_count=state.near_flat_cycle_count,
+                purpose=(
+                    source_intent.purpose.value if source_intent is not None else "unknown"
+                ),
+                strategy_name=(
+                    source_intent.strategy_name if source_intent is not None else "unknown"
+                ),
+                rationale=(source_intent.rationale if source_intent is not None else None),
+                signal_id=(source_intent.signal_id if source_intent is not None else None),
+                source_order_id=(
+                    source_order.order_id if source_intent is not None else None
+                ),
             )
             self._next_sequence_number += 1
             self._events.append(event)

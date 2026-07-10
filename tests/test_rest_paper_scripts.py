@@ -56,6 +56,8 @@ def disable_iteration_prints(monkeypatch):
         "print_passive_fill_evidence",
         "print_confirmed_fill_events",
         "print_fair_play",
+        "print_trade_intent_audit",
+        "print_purpose_summary",
         "print_fills",
         "print_decisions",
         "print_open_orders",

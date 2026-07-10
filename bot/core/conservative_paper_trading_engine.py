@@ -15,6 +15,10 @@ from bot.competition.fair_play_guard import (
     FairPlayDecision,
     FairPlayGuard,
 )
+from bot.competition.trade_intent_ledger import (
+    TradeIntentEvent,
+    TradeIntentLedger,
+)
 from bot.execution.conservative_paper_broker import (
     ConservativePaperBroker,
     PaperOrder,
@@ -63,6 +67,8 @@ class ConservativePaperTradingStepResult:
     fair_play_blocked_intents_count: int = 0
     short_window_round_trip_count: int = 0
     near_flat_cycle_count: int = 0
+    trade_intent_events: list[TradeIntentEvent] = field(default_factory=list)
+    purpose_counts: dict[str, int] = field(default_factory=dict)
 
 
 class ConservativePaperTradingEngine:
@@ -105,6 +111,7 @@ class ConservativePaperTradingEngine:
         portfolio_risk_guard: PortfolioRiskGuard | None = None,
         confirmed_fill_ledger: ConfirmedFillLedger | None = None,
         fair_play_guard: FairPlayGuard | None = None,
+        trade_intent_ledger: TradeIntentLedger | None = None,
     ):
         self.symbol = symbol
         self.market = market
@@ -117,6 +124,7 @@ class ConservativePaperTradingEngine:
         self.market_safety = market_safety
         self.market_freshness = market_freshness
         self.fair_play_guard = fair_play_guard
+        self.trade_intent_ledger = trade_intent_ledger
         self.confirmed_fill_ledger = confirmed_fill_ledger
         if self.confirmed_fill_ledger is None and fair_play_guard is not None:
             self.confirmed_fill_ledger = ConfirmedFillLedger(
@@ -200,10 +208,18 @@ class ConservativePaperTradingEngine:
 
         confirmed_fill_events: list[ConfirmedFillEvent] = []
         if self.confirmed_fill_ledger is not None:
+            source_orders_by_fill_id = {
+                id(fill): source_order
+                for fill in fills
+                if (
+                    source_order := self.broker.source_order_for_fill(fill)
+                ) is not None
+            }
             confirmed_fill_events = self.confirmed_fill_ledger.record_fills(
                 fills=fills,
                 starting_position=position_before_fills,
                 timestamp=timestamp,
+                source_orders_by_fill_id=source_orders_by_fill_id,
             )
 
         fair_play_status: FairPlayDecision | None = None
@@ -258,6 +274,33 @@ class ConservativePaperTradingEngine:
             decisions,
         )
 
+        fair_play_by_intent_id = {
+            id(intent): decision
+            for intent, decision in zip(intents, fair_play_decisions)
+        }
+        execution_by_intent_id = {
+            id(decision.intent): decision for decision in decisions
+        }
+        submitted_by_intent_id = {
+            id(order.intent): order for order in submitted_orders
+        }
+        trade_intent_events: list[TradeIntentEvent] = []
+        if self.trade_intent_ledger is not None:
+            trade_intent_events = [
+                self.trade_intent_ledger.record_intent(
+                    intent,
+                    timestamp=timestamp,
+                    fair_play_decision=fair_play_by_intent_id.get(id(intent)),
+                    execution_decision=execution_by_intent_id.get(id(intent)),
+                    submitted_order=submitted_by_intent_id.get(id(intent)),
+                )
+                for intent in intents
+            ]
+        purpose_counts: dict[str, int] = {}
+        for intent in intents:
+            purpose = intent.purpose.value
+            purpose_counts[purpose] = purpose_counts.get(purpose, 0) + 1
+
         return ConservativePaperTradingStepResult(
             mid_price=mid_price,
             intents=intents,
@@ -302,6 +345,8 @@ class ConservativePaperTradingEngine:
             near_flat_cycle_count=(
                 0 if fair_play_status is None else fair_play_status.near_flat_cycle_count
             ),
+            trade_intent_events=trade_intent_events,
+            purpose_counts=purpose_counts,
         )
 
     def _evaluate_market_freshness(

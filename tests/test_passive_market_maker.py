@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+from bot.execution.order import OrderPurpose
 from bot.market.market_cache import MarketCache
 from bot.market.models import OrderBook, OrderBookLevel
 from bot.portfolio.portfolio_manager import PortfolioManager
@@ -44,6 +45,9 @@ def test_strategy_generates_buy_order_without_inventory():
     assert buy_order.order_type == "limit"
     assert buy_order.price == Decimal("1.00")
     assert buy_order.notional == Decimal("5")
+    assert buy_order.purpose is OrderPurpose.ENTRY
+    assert buy_order.strategy_name == "passive_market_maker"
+    assert buy_order.rationale == "passive bid to establish inventory"
 
 
 def test_strategy_generates_buy_and_sell_with_inventory():
@@ -72,6 +76,10 @@ def test_strategy_generates_buy_and_sell_with_inventory():
 
     assert buy_order.notional == Decimal("5")
     assert sell_order.notional <= Decimal("5")
+    assert buy_order.purpose is OrderPurpose.ENTRY
+    assert sell_order.purpose is OrderPurpose.INVENTORY_REBALANCE
+    assert sell_order.strategy_name == "passive_market_maker"
+    assert sell_order.rationale == "passive ask to rebalance existing inventory"
 
 
 def test_strategy_returns_no_orders_without_orderbook():

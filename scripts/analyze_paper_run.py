@@ -191,6 +191,35 @@ def print_summary(
     )
 
     print()
+    print("Trade intent audit:")
+    print(f"  Generated intents        : {summary.generated_intent_count}")
+    print(f"  Submitted intents        : {summary.submitted_intent_count}")
+    print(
+        "  Fair-play rejected intents: "
+        f"{summary.fair_play_rejected_intent_count}"
+    )
+    print(
+        "  Execution rejected intents: "
+        f"{summary.execution_rejected_intent_count}"
+    )
+    print(
+        "  Unknown-purpose intents  : "
+        f"{summary.unknown_purpose_intent_count}"
+    )
+    print(
+        "  Unknown-purpose fills    : "
+        f"{summary.unknown_purpose_fill_count}"
+    )
+    if summary.generated_intent_purpose_counts:
+        print("  Generated purposes:")
+        for purpose, count in sorted(summary.generated_intent_purpose_counts.items()):
+            print(f"    {purpose}: {count}")
+    if summary.confirmed_fill_purpose_counts:
+        print("  Confirmed-fill purposes:")
+        for purpose, count in sorted(summary.confirmed_fill_purpose_counts.items()):
+            print(f"    {purpose}: {count}")
+
+    print()
     print("Trading activity:")
     print(f"  Fills           : {summary.fills_count}")
     print(f"  Orders submitted: {summary.submitted_orders_count}")

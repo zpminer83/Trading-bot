@@ -4,6 +4,7 @@ from decimal import Decimal
 from bot.competition.competition_tracker import CompetitionTracker
 from bot.competition.confirmed_fill_ledger import ConfirmedFillLedger
 from bot.competition.fair_play_guard import FairPlayGuard
+from bot.competition.trade_intent_ledger import TradeIntentLedger
 from bot.core.conservative_paper_trading_engine import (
     ConservativePaperTradingEngine,
 )
@@ -309,3 +310,42 @@ def test_engine_latched_fair_play_guard_cancels_orders_without_new_intents():
     assert result.intents == []
     assert result.decisions == []
     assert engine.order_manager.open_order_count == 0
+
+
+def test_engine_records_one_trade_intent_event_per_generated_intent():
+    engine = make_engine()
+    engine.trade_intent_ledger = TradeIntentLedger()
+    set_market(engine.market, "1.00", "1.02", timestamp=1)
+
+    result = engine.step(timestamp=utc_dt(2026, 7, 13, 12))
+
+    assert len(result.trade_intent_events) == len(result.intents) == 1
+    event = result.trade_intent_events[0]
+    assert event.purpose == "entry"
+    assert event.execution_approved is True
+    assert event.submitted is True
+    assert event.resulting_order_id == result.submitted_orders[0].order_id
+    assert result.purpose_counts == {"entry": 1}
+
+
+def test_engine_audits_fair_play_blocked_intent_without_submitting_it():
+    engine = make_engine()
+    engine.confirmed_fill_ledger = ConfirmedFillLedger()
+    engine.fair_play_guard = FairPlayGuard()
+    engine.trade_intent_ledger = TradeIntentLedger()
+    set_market(engine.market, "1.00", "1.02", timestamp=1)
+    engine.step(timestamp=utc_dt(2026, 7, 13, 12))
+    set_market(engine.market, "0.99", "1.00", timestamp=2)
+
+    result = engine.step(timestamp=utc_dt(2026, 7, 13, 12, 1))
+    blocked = [
+        event
+        for event in result.trade_intent_events
+        if event.fair_play_allowed is False
+    ]
+
+    assert len(blocked) == 1
+    assert blocked[0].fair_play_reason == "opposite_side_cooldown"
+    assert blocked[0].execution_approved is None
+    assert blocked[0].submitted is False
+    assert all(order.intent.side != "sell" for order in result.submitted_orders)

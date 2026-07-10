@@ -59,6 +59,15 @@ class PaperRunSummary:
     maximum_opposite_fill_delay_seconds: Decimal | None
     fair_play_reason_counts: dict[str, int]
 
+    generated_intent_count: int
+    submitted_intent_count: int
+    fair_play_rejected_intent_count: int
+    execution_rejected_intent_count: int
+    generated_intent_purpose_counts: dict[str, int]
+    confirmed_fill_purpose_counts: dict[str, int]
+    unknown_purpose_intent_count: int
+    unknown_purpose_fill_count: int
+
     fills_count: int
     submitted_orders_count: int
 
@@ -388,6 +397,43 @@ class PaperRunAnalyzer:
                     fair_play_reason_counts.get(reason_text, 0) + 1
                 )
 
+        trade_intent_events: list[dict[str, Any]] = []
+        for record in records:
+            raw_events = record.get("trade_intent_events")
+            if raw_events is None:
+                continue
+            if not isinstance(raw_events, list):
+                raise ValueError("trade_intent_events must be a list")
+            for event in raw_events:
+                if not isinstance(event, dict):
+                    raise ValueError("trade intent event must be a JSON object")
+                trade_intent_events.append(event)
+
+        generated_intent_purpose_counts: dict[str, int] = {}
+        for event in trade_intent_events:
+            purpose = str(event.get("purpose") or "unknown").strip() or "unknown"
+            generated_intent_purpose_counts[purpose] = (
+                generated_intent_purpose_counts.get(purpose, 0) + 1
+            )
+        confirmed_fill_purpose_counts: dict[str, int] = {}
+        for event in confirmed_fill_events:
+            purpose = str(event.get("purpose") or "unknown").strip() or "unknown"
+            confirmed_fill_purpose_counts[purpose] = (
+                confirmed_fill_purpose_counts.get(purpose, 0) + 1
+            )
+        generated_intent_count = len(trade_intent_events)
+        submitted_intent_count = sum(
+            event.get("submitted") is True for event in trade_intent_events
+        )
+        fair_play_rejected_intent_count = sum(
+            event.get("fair_play_allowed") is False
+            for event in trade_intent_events
+        )
+        execution_rejected_intent_count = sum(
+            event.get("execution_approved") is False
+            for event in trade_intent_events
+        )
+
         fills_count = sum(
             self._to_int(record.get("fills_count"))
             for record in records
@@ -469,6 +515,20 @@ class PaperRunAnalyzer:
                 max(opposite_fill_delays) if opposite_fill_delays else None
             ),
             fair_play_reason_counts=fair_play_reason_counts,
+            generated_intent_count=generated_intent_count,
+            submitted_intent_count=submitted_intent_count,
+            fair_play_rejected_intent_count=fair_play_rejected_intent_count,
+            execution_rejected_intent_count=execution_rejected_intent_count,
+            generated_intent_purpose_counts=generated_intent_purpose_counts,
+            confirmed_fill_purpose_counts=confirmed_fill_purpose_counts,
+            unknown_purpose_intent_count=generated_intent_purpose_counts.get(
+                "unknown",
+                0,
+            ),
+            unknown_purpose_fill_count=confirmed_fill_purpose_counts.get(
+                "unknown",
+                0,
+            ),
             fills_count=fills_count,
             submitted_orders_count=submitted_orders_count,
             final_cash_balance=self._to_decimal(

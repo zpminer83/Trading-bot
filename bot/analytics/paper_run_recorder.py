@@ -71,6 +71,10 @@ class PaperRunRecord:
     short_window_round_trip_count: int = 0
     near_flat_cycle_count: int = 0
 
+    trade_intent_events: list[dict[str, Any]] = field(default_factory=list)
+    generated_intent_purpose_counts: dict[str, int] = field(default_factory=dict)
+    confirmed_fill_purpose_counts: dict[str, int] = field(default_factory=dict)
+
     intents_count: int = 0
     decisions_count: int = 0
     fills_count: int = 0
@@ -135,6 +139,13 @@ class PaperRunRecord:
                     self.short_window_round_trip_count
                 ),
                 "near_flat_cycle_count": self.near_flat_cycle_count,
+                "trade_intent_events": self.trade_intent_events,
+                "generated_intent_purpose_counts": (
+                    self.generated_intent_purpose_counts
+                ),
+                "confirmed_fill_purpose_counts": (
+                    self.confirmed_fill_purpose_counts
+                ),
                 "intents_count": self.intents_count,
                 "decisions_count": self.decisions_count,
                 "fills_count": self.fills_count,
