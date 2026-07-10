@@ -75,6 +75,19 @@ class PaperRunRecord:
     generated_intent_purpose_counts: dict[str, int] = field(default_factory=dict)
     confirmed_fill_purpose_counts: dict[str, int] = field(default_factory=dict)
 
+    signal_state: str | None = None
+    signal_reason: str | None = None
+    signal_sample_count: int = 0
+    signal_spread_bps: Decimal | None = None
+    signal_bid_depth: Decimal | None = None
+    signal_ask_depth: Decimal | None = None
+    signal_depth_imbalance: Decimal | None = None
+    signal_microprice: Decimal | None = None
+    signal_microprice_edge_bps: Decimal | None = None
+    signal_one_step_return_bps: Decimal | None = None
+    signal_rolling_momentum_bps: Decimal | None = None
+    signal_confidence: Decimal | None = None
+
     intents_count: int = 0
     decisions_count: int = 0
     fills_count: int = 0
@@ -146,6 +159,18 @@ class PaperRunRecord:
                 "confirmed_fill_purpose_counts": (
                     self.confirmed_fill_purpose_counts
                 ),
+                "signal_state": self.signal_state,
+                "signal_reason": self.signal_reason,
+                "signal_sample_count": self.signal_sample_count,
+                "signal_spread_bps": self.signal_spread_bps,
+                "signal_bid_depth": self.signal_bid_depth,
+                "signal_ask_depth": self.signal_ask_depth,
+                "signal_depth_imbalance": self.signal_depth_imbalance,
+                "signal_microprice": self.signal_microprice,
+                "signal_microprice_edge_bps": self.signal_microprice_edge_bps,
+                "signal_one_step_return_bps": self.signal_one_step_return_bps,
+                "signal_rolling_momentum_bps": self.signal_rolling_momentum_bps,
+                "signal_confidence": self.signal_confidence,
                 "intents_count": self.intents_count,
                 "decisions_count": self.decisions_count,
                 "fills_count": self.fills_count,

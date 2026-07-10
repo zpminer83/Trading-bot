@@ -220,6 +220,45 @@ def print_summary(
             print(f"    {purpose}: {count}")
 
     print()
+    print("Order-book signal:")
+    print(f"  Bullish records     : {summary.bullish_signal_count}")
+    print(f"  Bearish records     : {summary.bearish_signal_count}")
+    print(f"  Neutral records     : {summary.neutral_signal_count}")
+    print(f"  Warming-up records  : {summary.warming_up_signal_count}")
+    print(f"  Unavailable records : {summary.unavailable_signal_count}")
+    print(f"  Unknown records     : {summary.unknown_signal_count}")
+    print(
+        "  Maximum confidence  : "
+        f"{fmt_decimal(summary.maximum_signal_confidence)}"
+    )
+    print(
+        "  Average confidence  : "
+        f"{fmt_decimal(summary.average_signal_confidence)}"
+    )
+    print(
+        "  Imbalance range     : "
+        f"{fmt_decimal(summary.minimum_depth_imbalance)} to "
+        f"{fmt_decimal(summary.maximum_depth_imbalance)}"
+    )
+    print(
+        "  Momentum range      : "
+        f"{fmt_decimal(summary.minimum_rolling_momentum_bps)} to "
+        f"{fmt_decimal(summary.maximum_rolling_momentum_bps)} bps"
+    )
+    print(
+        "  Average spread bps  : "
+        f"{fmt_decimal(summary.average_spread_bps)}"
+    )
+    if summary.signal_reason_counts:
+        print("  Reason counts:")
+        for reason, count in sorted(summary.signal_reason_counts.items()):
+            print(f"    {reason}: {count}")
+    print(
+        "  Signal confidence is an uncalibrated diagnostic score and is not "
+        "an estimated probability of profit."
+    )
+
+    print()
     print("Trading activity:")
     print(f"  Fills           : {summary.fills_count}")
     print(f"  Orders submitted: {summary.submitted_orders_count}")

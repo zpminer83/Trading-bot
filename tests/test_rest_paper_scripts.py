@@ -11,6 +11,12 @@ from bot.competition.fair_play_guard import FairPlayLimits
 from bot.execution.order import OrderIntent
 from bot.execution.passive_fill_evidence import PassiveFillEvidenceTracker
 from bot.market.models import OrderBook, OrderBookLevel
+from bot.market.orderbook_signal import (
+    OrderBookSignalEngine,
+    OrderBookSignalLimits,
+    OrderBookSignalSnapshot,
+    OrderBookSignalState,
+)
 from bot.risk.market_freshness import (
     MarketFreshnessDecision,
     MarketFreshnessGuard,
@@ -52,6 +58,7 @@ def disable_iteration_prints(monkeypatch):
         "print_market_snapshot",
         "print_market_freshness",
         "print_market_safety",
+        "print_orderbook_signal",
         "print_portfolio_risk",
         "print_passive_fill_evidence",
         "print_confirmed_fill_events",
@@ -162,6 +169,28 @@ def test_rest_paper_engine_can_enable_fair_play(build_engine):
 
 
 @pytest.mark.parametrize(
+    "build_engine",
+    [run_rest_paper_once.build_engine, run_rest_paper_loop.build_engine],
+)
+def test_rest_paper_engine_can_enable_orderbook_signal(build_engine):
+    limits = OrderBookSignalLimits(top_levels=3, rolling_window=6, minimum_samples=3)
+    engine = build_engine(
+        symbol="SOMI:USDso",
+        market_cache=run_rest_paper_loop.MarketCache(),
+        initial_cash=Decimal("150"),
+        order_size_usd=Decimal("5"),
+        max_open_orders=2,
+        pair_boost=Decimal("1"),
+        max_spread_percent=Decimal("0.02"),
+        min_best_bid_quantity=Decimal("1"),
+        min_best_ask_quantity=Decimal("1"),
+        signal_limits=limits,
+    )
+    assert isinstance(engine.orderbook_signal_engine, OrderBookSignalEngine)
+    assert engine.orderbook_signal_engine.limits == limits
+
+
+@pytest.mark.parametrize(
     "script",
     [run_rest_paper_once, run_rest_paper_loop],
 )
@@ -193,6 +222,19 @@ def test_rest_paper_rejects_invalid_fair_play_environment(script, monkeypatch):
     )
 
     with pytest.raises(ValueError, match="opposite_side_cooldown_seconds"):
+        script.main()
+
+
+@pytest.mark.parametrize("script", [run_rest_paper_once, run_rest_paper_loop])
+def test_rest_paper_rejects_invalid_signal_environment(script, monkeypatch):
+    monkeypatch.setenv("PAPER_SIGNAL_ROLLING_WINDOW", "2")
+    monkeypatch.setenv("PAPER_SIGNAL_MINIMUM_SAMPLES", "3")
+    monkeypatch.setattr(
+        script,
+        "fetch_json",
+        lambda url: pytest.fail("invalid config must fail before network fetch"),
+    )
+    with pytest.raises(ValueError, match="minimum_samples"):
         script.main()
 
 
@@ -318,6 +360,46 @@ def test_loop_build_record_serializes_fair_play_telemetry():
     assert data["confirmed_fill_events"][0]["quantity"] == "5"
     assert data["fair_play_allowed"] is False
     assert data["fair_play_blocked_intents_count"] == 1
+
+
+def test_loop_build_record_serializes_orderbook_signal():
+    signal = OrderBookSignalSnapshot(
+        timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        symbol="SOMI:USDso",
+        state=OrderBookSignalState.BULLISH,
+        reason="bullish_confirmation",
+        sample_count=4,
+        best_bid=Decimal("100"),
+        best_ask=Decimal("100.1"),
+        mid_price=Decimal("100.05"),
+        spread_bps=Decimal("9.995"),
+        bid_depth=Decimal("30"),
+        ask_depth=Decimal("10"),
+        depth_imbalance=Decimal("0.5"),
+        microprice=Decimal("100.075"),
+        microprice_edge_bps=Decimal("2.49"),
+        one_step_return_bps=Decimal("3"),
+        rolling_momentum_bps=Decimal("4"),
+        confidence=Decimal("0.8"),
+    )
+    result = SimpleNamespace(
+        market_safety_decision=None,
+        market_freshness_decision=None,
+        portfolio_risk_decision=None,
+        orderbook_signal=signal,
+        intents=[], decisions=[], fills=[], submitted_orders=[],
+    )
+    snapshot = SimpleNamespace(best_bid=None, best_ask=None, mid_price=None, spread=None)
+    record = run_rest_paper_loop.build_record(
+        timestamp=signal.timestamp,
+        symbol=signal.symbol,
+        snapshot=snapshot,
+        result=result,
+        engine=make_loop_engine(),
+    ).to_dict()
+    assert record["signal_state"] == "bullish"
+    assert record["signal_depth_imbalance"] == "0.5"
+    assert record["signal_confidence"] == "0.8"
 
 
 def test_successful_loop_iteration_is_persisted_immediately(

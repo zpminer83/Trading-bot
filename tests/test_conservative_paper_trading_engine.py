@@ -13,6 +13,7 @@ from bot.execution.execution_manager import ExecutionManager
 from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.models import OrderBook, OrderBookLevel
+from bot.market.orderbook_signal import OrderBookSignalEngine, OrderBookSignalLimits
 from bot.portfolio.portfolio_manager import PortfolioManager
 from bot.risk.risk_manager import RiskManager
 from bot.strategy.passive_market_maker import PassiveMarketMakerStrategy
@@ -349,3 +350,25 @@ def test_engine_audits_fair_play_blocked_intent_without_submitting_it():
     assert blocked[0].execution_approved is None
     assert blocked[0].submitted is False
     assert all(order.intent.side != "sell" for order in result.submitted_orders)
+
+
+def test_orderbook_signal_is_telemetry_only_and_preserves_orders():
+    baseline = make_engine()
+    signaled = make_engine()
+    signaled.orderbook_signal_engine = OrderBookSignalEngine(
+        OrderBookSignalLimits(rolling_window=3, minimum_samples=2)
+    )
+    set_market(baseline.market, "1.00", "1.02", timestamp=1)
+    set_market(signaled.market, "1.00", "1.02", timestamp=1)
+
+    baseline_result = baseline.step(timestamp=utc_dt(2026, 7, 13, 12))
+    signaled_result = signaled.step(timestamp=utc_dt(2026, 7, 13, 12))
+
+    assert signaled_result.orderbook_signal is not None
+    assert signaled_result.orderbook_signal.state.value == "warming_up"
+    assert signaled_result.intents == baseline_result.intents
+    assert signaled_result.decisions == baseline_result.decisions
+    assert [order.intent for order in signaled_result.submitted_orders] == [
+        order.intent for order in baseline_result.submitted_orders
+    ]
+    assert signaled_result.fills == baseline_result.fills == []

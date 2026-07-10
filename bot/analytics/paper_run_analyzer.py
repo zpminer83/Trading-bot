@@ -68,6 +68,21 @@ class PaperRunSummary:
     unknown_purpose_intent_count: int
     unknown_purpose_fill_count: int
 
+    bullish_signal_count: int
+    bearish_signal_count: int
+    neutral_signal_count: int
+    warming_up_signal_count: int
+    unavailable_signal_count: int
+    unknown_signal_count: int
+    maximum_signal_confidence: Decimal | None
+    average_signal_confidence: Decimal | None
+    minimum_depth_imbalance: Decimal | None
+    maximum_depth_imbalance: Decimal | None
+    minimum_rolling_momentum_bps: Decimal | None
+    maximum_rolling_momentum_bps: Decimal | None
+    average_spread_bps: Decimal | None
+    signal_reason_counts: dict[str, int]
+
     fills_count: int
     submitted_orders_count: int
 
@@ -434,6 +449,51 @@ class PaperRunAnalyzer:
             for event in trade_intent_events
         )
 
+        signal_state_counts = {
+            state: sum(
+                str(record.get("signal_state", "")).lower() == state
+                for record in records
+            )
+            for state in (
+                "bullish",
+                "bearish",
+                "neutral",
+                "warming_up",
+                "unavailable",
+            )
+        }
+        known_signal_count = sum(signal_state_counts.values())
+        signal_confidences = [
+            self._to_decimal(record.get("signal_confidence"))
+            for record in records
+            if record.get("signal_confidence") is not None
+        ]
+        depth_imbalances = [
+            self._to_decimal(record.get("signal_depth_imbalance"))
+            for record in records
+            if record.get("signal_depth_imbalance") is not None
+        ]
+        rolling_momentums = [
+            self._to_decimal(record.get("signal_rolling_momentum_bps"))
+            for record in records
+            if record.get("signal_rolling_momentum_bps") is not None
+        ]
+        signal_spreads = [
+            self._to_decimal(record.get("signal_spread_bps"))
+            for record in records
+            if record.get("signal_spread_bps") is not None
+        ]
+        signal_reason_counts: dict[str, int] = {}
+        for record in records:
+            reason = record.get("signal_reason")
+            if reason is None:
+                continue
+            reason_text = str(reason).strip()
+            if reason_text:
+                signal_reason_counts[reason_text] = (
+                    signal_reason_counts.get(reason_text, 0) + 1
+                )
+
         fills_count = sum(
             self._to_int(record.get("fills_count"))
             for record in records
@@ -529,6 +589,38 @@ class PaperRunAnalyzer:
                 "unknown",
                 0,
             ),
+            bullish_signal_count=signal_state_counts["bullish"],
+            bearish_signal_count=signal_state_counts["bearish"],
+            neutral_signal_count=signal_state_counts["neutral"],
+            warming_up_signal_count=signal_state_counts["warming_up"],
+            unavailable_signal_count=signal_state_counts["unavailable"],
+            unknown_signal_count=len(records) - known_signal_count,
+            maximum_signal_confidence=(
+                max(signal_confidences) if signal_confidences else None
+            ),
+            average_signal_confidence=(
+                sum(signal_confidences, Decimal("0")) / Decimal(len(signal_confidences))
+                if signal_confidences
+                else None
+            ),
+            minimum_depth_imbalance=(
+                min(depth_imbalances) if depth_imbalances else None
+            ),
+            maximum_depth_imbalance=(
+                max(depth_imbalances) if depth_imbalances else None
+            ),
+            minimum_rolling_momentum_bps=(
+                min(rolling_momentums) if rolling_momentums else None
+            ),
+            maximum_rolling_momentum_bps=(
+                max(rolling_momentums) if rolling_momentums else None
+            ),
+            average_spread_bps=(
+                sum(signal_spreads, Decimal("0")) / Decimal(len(signal_spreads))
+                if signal_spreads
+                else None
+            ),
+            signal_reason_counts=signal_reason_counts,
             fills_count=fills_count,
             submitted_orders_count=submitted_orders_count,
             final_cash_balance=self._to_decimal(

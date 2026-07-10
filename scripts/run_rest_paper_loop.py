@@ -27,6 +27,10 @@ from bot.execution.passive_fill_evidence import (
 )
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
+from bot.market.orderbook_signal import (
+    OrderBookSignalEngine,
+    OrderBookSignalLimits,
+)
 from bot.portfolio.portfolio_manager import PortfolioManager
 from bot.risk.portfolio_risk_guard import (
     PortfolioRiskGuard,
@@ -201,6 +205,7 @@ def build_engine(
     market_freshness_limits: MarketFreshnessLimits | None = None,
     portfolio_risk_limits: PortfolioRiskLimits | None = None,
     fair_play_limits: FairPlayLimits | None = None,
+    signal_limits: OrderBookSignalLimits | None = None,
 ) -> ConservativePaperTradingEngine:
     resolved_risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
     portfolio = PortfolioManager(initial_cash=initial_cash)
@@ -243,6 +248,11 @@ def build_engine(
     confirmed_fill_ledger = None
     fair_play_guard = None
     trade_intent_ledger = TradeIntentLedger()
+    orderbook_signal_engine = (
+        OrderBookSignalEngine(limits=signal_limits)
+        if signal_limits is not None
+        else None
+    )
     if fair_play_limits is not None:
         confirmed_fill_ledger = ConfirmedFillLedger(
             limits=ConfirmedFillLedgerLimits(
@@ -276,6 +286,7 @@ def build_engine(
         confirmed_fill_ledger=confirmed_fill_ledger,
         fair_play_guard=fair_play_guard,
         trade_intent_ledger=trade_intent_ledger,
+        orderbook_signal_engine=orderbook_signal_engine,
     )
 
 
@@ -295,6 +306,7 @@ def print_header(
     market_freshness_limits: MarketFreshnessLimits | None = None,
     portfolio_risk_limits: PortfolioRiskLimits | None = None,
     fair_play_limits: FairPlayLimits | None = None,
+    signal_limits: OrderBookSignalLimits | None = None,
 ) -> None:
     freshness_limits = market_freshness_limits or MarketFreshnessLimits()
     risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
@@ -367,6 +379,27 @@ def print_header(
             "  Max near-flat cycles: "
             f"{fair_play_limits.max_completed_near_flat_cycles}"
         )
+    print()
+    print("Order-book signal limits:")
+    if signal_limits is None:
+        print("  Status                 : disabled")
+    else:
+        print(f"  Top levels             : {signal_limits.top_levels}")
+        print(f"  Rolling window         : {signal_limits.rolling_window}")
+        print(f"  Minimum samples        : {signal_limits.minimum_samples}")
+        print(f"  Imbalance threshold    : {fmt_decimal(signal_limits.imbalance_threshold)}")
+        print(
+            "  Microprice edge bps    : "
+            f"{fmt_decimal(signal_limits.microprice_edge_threshold_bps)}"
+        )
+        print(
+            "  Momentum threshold bps : "
+            f"{fmt_decimal(signal_limits.momentum_threshold_bps)}"
+        )
+        print(
+            "  Maximum spread bps     : "
+            f"{fmt_decimal(signal_limits.maximum_signal_spread_bps)}"
+        )
     print("=" * 80)
 
 
@@ -433,6 +466,27 @@ def print_market_freshness(result) -> None:
         "  Unchanged time : "
         f"{fmt_seconds(decision.unchanged_seconds)}"
     )
+
+
+def print_orderbook_signal(result) -> None:
+    signal = getattr(result, "orderbook_signal", None)
+    print("Order-book signal:")
+    if signal is None:
+        print("  Status                 : not evaluated")
+        return
+    print(f"  State                  : {signal.state.value}")
+    print(f"  Reason                 : {signal.reason}")
+    print(f"  Samples                : {signal.sample_count}")
+    print(f"  Spread bps             : {fmt_decimal(signal.spread_bps)}")
+    print(f"  Bid depth              : {fmt_decimal(signal.bid_depth)}")
+    print(f"  Ask depth              : {fmt_decimal(signal.ask_depth)}")
+    print(f"  Depth imbalance        : {fmt_decimal(signal.depth_imbalance)}")
+    print(f"  Microprice             : {fmt_decimal(signal.microprice)}")
+    print(f"  Microprice edge bps    : {fmt_decimal(signal.microprice_edge_bps)}")
+    print(f"  One-step return bps    : {fmt_decimal(signal.one_step_return_bps)}")
+    print(f"  Rolling momentum bps   : {fmt_decimal(signal.rolling_momentum_bps)}")
+    print(f"  Confidence             : {fmt_decimal(signal.confidence)}")
+    print("  Note: confidence is an uncalibrated diagnostic score.")
 
 
 def print_portfolio_risk(result) -> None:
@@ -712,6 +766,7 @@ def build_record(
     market_safety = result.market_safety_decision
     market_freshness = result.market_freshness_decision
     portfolio_risk = getattr(result, "portfolio_risk_decision", None)
+    signal = getattr(result, "orderbook_signal", None)
     evidence = passive_fill_evidence or []
 
     return PaperRunRecord(
@@ -800,6 +855,26 @@ def build_record(
             getattr(result, "purpose_counts", {})
         ),
         confirmed_fill_purpose_counts=_confirmed_fill_purpose_counts(result),
+        signal_state=signal.state.value if signal is not None else None,
+        signal_reason=signal.reason if signal is not None else None,
+        signal_sample_count=signal.sample_count if signal is not None else 0,
+        signal_spread_bps=signal.spread_bps if signal is not None else None,
+        signal_bid_depth=signal.bid_depth if signal is not None else None,
+        signal_ask_depth=signal.ask_depth if signal is not None else None,
+        signal_depth_imbalance=(
+            signal.depth_imbalance if signal is not None else None
+        ),
+        signal_microprice=signal.microprice if signal is not None else None,
+        signal_microprice_edge_bps=(
+            signal.microprice_edge_bps if signal is not None else None
+        ),
+        signal_one_step_return_bps=(
+            signal.one_step_return_bps if signal is not None else None
+        ),
+        signal_rolling_momentum_bps=(
+            signal.rolling_momentum_bps if signal is not None else None
+        ),
+        signal_confidence=signal.confidence if signal is not None else None,
         intents_count=len(result.intents),
         decisions_count=len(result.decisions),
         fills_count=len(result.fills),
@@ -962,6 +1037,7 @@ def run_iteration(
     print_market_snapshot(snapshot)
     print_market_freshness(result)
     print_market_safety(result)
+    print_orderbook_signal(result)
     print_portfolio_risk(result)
     print_passive_fill_evidence(evidence)
     print_confirmed_fill_events(result)
@@ -1061,6 +1137,23 @@ def main() -> None:
                 2,
             ),
         )
+    signal_limits = None
+    if env_bool("PAPER_SIGNAL_ENABLED", True):
+        signal_limits = OrderBookSignalLimits(
+            top_levels=env_int("PAPER_SIGNAL_TOP_LEVELS", 5),
+            rolling_window=env_int("PAPER_SIGNAL_ROLLING_WINDOW", 12),
+            minimum_samples=env_int("PAPER_SIGNAL_MINIMUM_SAMPLES", 4),
+            imbalance_threshold=env_decimal(
+                "PAPER_SIGNAL_IMBALANCE_THRESHOLD",
+                "0.20",
+            ),
+            microprice_edge_threshold_bps=env_decimal(
+                "PAPER_SIGNAL_MICROPRICE_EDGE_BPS",
+                "1",
+            ),
+            momentum_threshold_bps=env_decimal("PAPER_SIGNAL_MOMENTUM_BPS", "2"),
+            maximum_signal_spread_bps=env_decimal("PAPER_SIGNAL_MAX_SPREAD_BPS", "30"),
+        )
 
     url = build_orderbook_url(
         base_url=base_url,
@@ -1085,6 +1178,7 @@ def main() -> None:
         market_freshness_limits=market_freshness_limits,
         portfolio_risk_limits=portfolio_risk_limits,
         fair_play_limits=fair_play_limits,
+        signal_limits=signal_limits,
     )
 
     print_header(
@@ -1103,6 +1197,7 @@ def main() -> None:
         market_freshness_limits=market_freshness_limits,
         portfolio_risk_limits=portfolio_risk_limits,
         fair_play_limits=fair_play_limits,
+        signal_limits=signal_limits,
     )
 
     consecutive_failures = 0

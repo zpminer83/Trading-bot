@@ -10,6 +10,7 @@ from bot.execution.execution_manager import ExecutionManager
 from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.models import OrderBook, OrderBookLevel
+from bot.market.orderbook_signal import OrderBookSignalEngine
 from bot.portfolio.portfolio_manager import PortfolioManager
 from bot.risk.market_safety import MarketSafety, MarketSafetyLimits
 from bot.risk.risk_manager import RiskManager
@@ -135,6 +136,7 @@ def test_engine_blocks_new_orders_when_spread_is_too_wide():
     engine = make_engine(
         max_spread_percent=Decimal("0.02"),
     )
+    engine.orderbook_signal_engine = OrderBookSignalEngine()
 
     set_market(
         market=engine.market,
@@ -148,6 +150,7 @@ def test_engine_blocks_new_orders_when_spread_is_too_wide():
     assert result.market_safety_decision.safe is False
     assert result.market_safety_decision.reason == "spread_too_wide"
     assert result.portfolio_risk_decision is None
+    assert result.orderbook_signal is None
 
     assert result.intents == []
     assert result.decisions == []

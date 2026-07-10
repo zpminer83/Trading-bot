@@ -12,6 +12,7 @@ from bot.execution.execution_manager import ExecutionManager
 from bot.execution.order_manager import OrderManager
 from bot.market.market_cache import MarketCache
 from bot.market.models import OrderBook, OrderBookLevel
+from bot.market.orderbook_signal import OrderBookSignalEngine
 from bot.portfolio.portfolio_manager import PortfolioManager
 from bot.risk.market_freshness import (
     MarketFreshnessGuard,
@@ -165,6 +166,7 @@ def test_engine_blocks_orders_when_timestamp_is_stale():
     engine = make_engine(
         max_exchange_age_seconds=Decimal("5"),
     )
+    engine.orderbook_signal_engine = OrderBookSignalEngine()
 
     set_market(
         engine.market,
@@ -180,6 +182,7 @@ def test_engine_blocks_orders_when_timestamp_is_stale():
     assert result.market_freshness_decision.fresh is False
     assert result.market_freshness_decision.reason == "stale_timestamp"
     assert result.portfolio_risk_decision is None
+    assert result.orderbook_signal is None
 
     assert result.intents == []
     assert result.decisions == []

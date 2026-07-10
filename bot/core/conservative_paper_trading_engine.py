@@ -28,6 +28,10 @@ from bot.execution.order import OrderDecision, OrderIntent
 from bot.execution.order_manager import OrderManager
 from bot.execution.paper_broker import PaperFill
 from bot.market.market_cache import MarketCache
+from bot.market.orderbook_signal import (
+    OrderBookSignalEngine,
+    OrderBookSignalSnapshot,
+)
 from bot.portfolio.portfolio_manager import PortfolioManager
 from bot.risk.portfolio_risk_guard import (
     PortfolioRiskDecision,
@@ -69,6 +73,7 @@ class ConservativePaperTradingStepResult:
     near_flat_cycle_count: int = 0
     trade_intent_events: list[TradeIntentEvent] = field(default_factory=list)
     purpose_counts: dict[str, int] = field(default_factory=dict)
+    orderbook_signal: OrderBookSignalSnapshot | None = None
 
 
 class ConservativePaperTradingEngine:
@@ -112,6 +117,7 @@ class ConservativePaperTradingEngine:
         confirmed_fill_ledger: ConfirmedFillLedger | None = None,
         fair_play_guard: FairPlayGuard | None = None,
         trade_intent_ledger: TradeIntentLedger | None = None,
+        orderbook_signal_engine: OrderBookSignalEngine | None = None,
     ):
         self.symbol = symbol
         self.market = market
@@ -125,6 +131,7 @@ class ConservativePaperTradingEngine:
         self.market_freshness = market_freshness
         self.fair_play_guard = fair_play_guard
         self.trade_intent_ledger = trade_intent_ledger
+        self.orderbook_signal_engine = orderbook_signal_engine
         self.confirmed_fill_ledger = confirmed_fill_ledger
         if self.confirmed_fill_ledger is None and fair_play_guard is not None:
             self.confirmed_fill_ledger = ConfirmedFillLedger(
@@ -177,6 +184,15 @@ class ConservativePaperTradingEngine:
                 market_freshness_decision=freshness_decision,
             )
 
+        orderbook_signal: OrderBookSignalSnapshot | None = None
+        if self.orderbook_signal_engine is not None:
+            orderbook = self.market.get_orderbook(self.symbol)
+            if orderbook is not None:
+                orderbook_signal = self.orderbook_signal_engine.evaluate(
+                    orderbook,
+                    observed_at=timestamp,
+                )
+
         if mid_price is not None:
             self.portfolio.update_market_price(mid_price)
 
@@ -193,6 +209,7 @@ class ConservativePaperTradingEngine:
                 market_safety_decision=safety_decision,
                 market_freshness_decision=freshness_decision,
                 portfolio_risk_decision=portfolio_risk_decision,
+                orderbook_signal=orderbook_signal,
             )
 
         position_before_fills = self.portfolio.base_position
@@ -242,6 +259,7 @@ class ConservativePaperTradingEngine:
                         fair_play_status.short_window_round_trip_count
                     ),
                     near_flat_cycle_count=fair_play_status.near_flat_cycle_count,
+                    orderbook_signal=orderbook_signal,
                 )
 
         intents = self.strategy.generate_orders(
@@ -347,6 +365,7 @@ class ConservativePaperTradingEngine:
             ),
             trade_intent_events=trade_intent_events,
             purpose_counts=purpose_counts,
+            orderbook_signal=orderbook_signal,
         )
 
     def _evaluate_market_freshness(
