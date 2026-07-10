@@ -20,6 +20,13 @@ def fmt_decimal(value: Decimal | None) -> str:
     return text or "0"
 
 
+def fmt_seconds(value: Decimal | None) -> str:
+    if value is None:
+        return "n/a"
+
+    return f"{fmt_decimal(value)}s"
+
+
 def format_duration(seconds: int) -> str:
     hours, remainder = divmod(seconds, 3600)
     minutes, remaining_seconds = divmod(remainder, 60)
@@ -53,6 +60,26 @@ def print_summary(
     print(f"  Unknown records : {summary.unknown_market_count}")
     print(f"  Min mid price   : {fmt_decimal(summary.min_mid_price)}")
     print(f"  Max mid price   : {fmt_decimal(summary.max_mid_price)}")
+
+    print()
+    print("Market freshness:")
+    print(f"  Fresh records   : {summary.fresh_market_count}")
+    print(f"  Stale records   : {summary.stale_market_count}")
+    print(f"  Unknown records : {summary.unknown_freshness_count}")
+    print(
+        "  Max exchange age: "
+        f"{fmt_seconds(summary.max_exchange_age_seconds)}"
+    )
+    print(
+        "  Max unchanged time: "
+        f"{fmt_seconds(summary.max_unchanged_seconds)}"
+    )
+
+    if summary.freshness_reason_counts:
+        print("  Reasons:")
+
+        for reason, count in sorted(summary.freshness_reason_counts.items()):
+            print(f"    {reason}: {count}")
 
     print()
     print("Trading activity:")

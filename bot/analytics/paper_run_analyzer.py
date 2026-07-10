@@ -18,6 +18,13 @@ class PaperRunSummary:
     unsafe_market_count: int
     unknown_market_count: int
 
+    fresh_market_count: int
+    stale_market_count: int
+    unknown_freshness_count: int
+    max_exchange_age_seconds: Decimal | None
+    max_unchanged_seconds: Decimal | None
+    freshness_reason_counts: dict[str, int]
+
     fills_count: int
     submitted_orders_count: int
 
@@ -127,6 +134,49 @@ class PaperRunAnalyzer:
             - unsafe_market_count
         )
 
+        fresh_market_count = sum(
+            1
+            for record in records
+            if record.get("market_fresh") is True
+        )
+
+        stale_market_count = sum(
+            1
+            for record in records
+            if record.get("market_fresh") is False
+        )
+
+        unknown_freshness_count = (
+            len(records)
+            - fresh_market_count
+            - stale_market_count
+        )
+
+        exchange_ages = [
+            self._to_decimal(record.get("exchange_age_seconds"))
+            for record in records
+            if record.get("exchange_age_seconds") is not None
+        ]
+
+        unchanged_durations = [
+            self._to_decimal(record.get("unchanged_seconds"))
+            for record in records
+            if record.get("unchanged_seconds") is not None
+        ]
+
+        freshness_reason_counts: dict[str, int] = {}
+
+        for record in records:
+            reason = record.get("market_freshness_reason")
+
+            if reason is None:
+                continue
+
+            reason_text = str(reason)
+            freshness_reason_counts[reason_text] = (
+                freshness_reason_counts.get(reason_text, 0) + 1
+            )
+
         fills_count = sum(
             self._to_int(record.get("fills_count"))
             for record in records
@@ -158,6 +208,16 @@ class PaperRunAnalyzer:
             safe_market_count=safe_market_count,
             unsafe_market_count=unsafe_market_count,
             unknown_market_count=unknown_market_count,
+            fresh_market_count=fresh_market_count,
+            stale_market_count=stale_market_count,
+            unknown_freshness_count=unknown_freshness_count,
+            max_exchange_age_seconds=(
+                max(exchange_ages) if exchange_ages else None
+            ),
+            max_unchanged_seconds=(
+                max(unchanged_durations) if unchanged_durations else None
+            ),
+            freshness_reason_counts=freshness_reason_counts,
             fills_count=fills_count,
             submitted_orders_count=submitted_orders_count,
             final_cash_balance=self._to_decimal(

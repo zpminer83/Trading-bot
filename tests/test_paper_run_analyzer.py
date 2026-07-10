@@ -1,10 +1,12 @@
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from bot.analytics.paper_run_analyzer import PaperRunAnalyzer
+from scripts.analyze_paper_run import print_summary
 
 
 def make_record(
@@ -124,6 +126,79 @@ def test_analyzer_counts_market_safety_states():
     assert summary.safe_market_count == 1
     assert summary.unsafe_market_count == 1
     assert summary.unknown_market_count == 1
+
+
+def test_analyzer_summarizes_market_freshness(capsys):
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00"),
+        make_record("2026-07-13T12:02:00+00:00"),
+        make_record("2026-07-13T12:03:00+00:00"),
+    ]
+
+    records[0].update(
+        market_fresh=True,
+        market_freshness_reason="ok",
+        exchange_age_seconds="1.25",
+        unchanged_seconds="0",
+    )
+    records[1].update(
+        market_fresh=False,
+        market_freshness_reason="repeated_snapshot",
+        exchange_age_seconds="4.5",
+        unchanged_seconds="31.75",
+    )
+    records[2].update(
+        market_fresh=False,
+        market_freshness_reason="repeated_snapshot",
+        exchange_age_seconds=None,
+        unchanged_seconds="35",
+    )
+    records[3].update(
+        market_fresh=None,
+        market_freshness_reason=None,
+        exchange_age_seconds=None,
+        unchanged_seconds=None,
+    )
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.fresh_market_count == 1
+    assert summary.stale_market_count == 2
+    assert summary.unknown_freshness_count == 1
+    assert summary.max_exchange_age_seconds == Decimal("4.5")
+    assert summary.max_unchanged_seconds == Decimal("35")
+    assert summary.freshness_reason_counts == {
+        "ok": 1,
+        "repeated_snapshot": 2,
+    }
+
+    print_summary(Path("paper_run.jsonl"), summary)
+    output = capsys.readouterr().out
+
+    assert "Market freshness:" in output
+    assert "Fresh records   : 1" in output
+    assert "Stale records   : 2" in output
+    assert "Unknown records : 1" in output
+    assert "Max exchange age: 4.5s" in output
+    assert "Max unchanged time: 35s" in output
+    assert "repeated_snapshot: 2" in output
+
+
+def test_analyzer_supports_records_without_freshness_fields():
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00"),
+    ]
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.fresh_market_count == 0
+    assert summary.stale_market_count == 0
+    assert summary.unknown_freshness_count == 2
+    assert summary.max_exchange_age_seconds is None
+    assert summary.max_unchanged_seconds is None
+    assert summary.freshness_reason_counts == {}
 
 
 def test_analyzer_calculates_max_drawdown_and_price_range():
