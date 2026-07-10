@@ -18,6 +18,7 @@ class PaperRunSummary:
     failed_iterations: int
     success_rate: Decimal
     error_type_counts: dict[str, int]
+    max_consecutive_failures: int
 
     safe_market_count: int
     unsafe_market_count: int
@@ -150,6 +151,14 @@ class PaperRunAnalyzer:
                 error_type_counts.get(error_type_text, 0) + 1
             )
 
+        max_consecutive_failures = max(
+            (
+                self._to_int(record.get("consecutive_failures"))
+                for record in records
+            ),
+            default=0,
+        )
+
         safe_market_count = sum(
             1
             for record in records
@@ -243,6 +252,7 @@ class PaperRunAnalyzer:
             failed_iterations=failed_iterations,
             success_rate=success_rate,
             error_type_counts=error_type_counts,
+            max_consecutive_failures=max_consecutive_failures,
             safe_market_count=safe_market_count,
             unsafe_market_count=unsafe_market_count,
             unknown_market_count=unknown_market_count,

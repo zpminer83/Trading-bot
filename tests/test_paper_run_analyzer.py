@@ -134,16 +134,18 @@ def test_analyzer_summarizes_run_reliability(capsys):
         make_record("2026-07-13T12:01:00+00:00"),
         make_record("2026-07-13T12:02:00+00:00"),
     ]
-    records[0].update(iteration_ok=True)
+    records[0].update(iteration_ok=True, consecutive_failures=0)
     records[1].update(
         iteration_ok=False,
         error_type="TimeoutError",
         error_message="request timed out",
+        consecutive_failures=1,
     )
     records[2].update(
         iteration_ok=False,
         error_type="TimeoutError",
         error_message="request timed out again",
+        consecutive_failures=2,
     )
 
     summary = PaperRunAnalyzer().analyze_records(records)
@@ -152,6 +154,7 @@ def test_analyzer_summarizes_run_reliability(capsys):
     assert summary.failed_iterations == 2
     assert summary.success_rate == Decimal("1") / Decimal("3")
     assert summary.error_type_counts == {"TimeoutError": 2}
+    assert summary.max_consecutive_failures == 2
 
     print_summary(Path("paper_run.jsonl"), summary)
     output = capsys.readouterr().out
@@ -160,6 +163,7 @@ def test_analyzer_summarizes_run_reliability(capsys):
     assert "Successful iterations: 1" in output
     assert "Failed iterations    : 2" in output
     assert "Success rate         : 33.33%" in output
+    assert "Max consecutive failures: 2" in output
     assert "TimeoutError: 2" in output
 
 
@@ -175,6 +179,7 @@ def test_analyzer_treats_old_records_as_successful_iterations():
     assert summary.failed_iterations == 0
     assert summary.success_rate == Decimal("1")
     assert summary.error_type_counts == {}
+    assert summary.max_consecutive_failures == 0
 
 
 def test_analyzer_summarizes_market_freshness(capsys):

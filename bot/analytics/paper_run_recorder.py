@@ -35,6 +35,7 @@ class PaperRunRecord:
     iteration_ok: bool = True
     error_type: str | None = None
     error_message: str | None = None
+    consecutive_failures: int = 0
 
     best_bid: Decimal | None = None
     best_ask: Decimal | None = None
@@ -78,6 +79,7 @@ class PaperRunRecord:
                 "iteration_ok": self.iteration_ok,
                 "error_type": self.error_type,
                 "error_message": self.error_message,
+                "consecutive_failures": self.consecutive_failures,
                 "best_bid": self.best_bid,
                 "best_ask": self.best_ask,
                 "mid_price": self.mid_price,

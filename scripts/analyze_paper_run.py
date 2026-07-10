@@ -63,6 +63,10 @@ def print_summary(
     print(f"  Successful iterations: {summary.successful_iterations}")
     print(f"  Failed iterations    : {summary.failed_iterations}")
     print(f"  Success rate         : {fmt_percentage(summary.success_rate)}")
+    print(
+        "  Max consecutive failures: "
+        f"{summary.max_consecutive_failures}"
+    )
 
     if summary.error_type_counts:
         print("  Error types:")

@@ -62,6 +62,10 @@ def env_int(name: str, default: int) -> int:
     return int(os.getenv(name, str(default)))
 
 
+def env_float(name: str, default: float) -> float:
+    return float(os.getenv(name, str(default)))
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     value = os.getenv(name)
 
@@ -69,6 +73,62 @@ def env_bool(name: str, default: bool = False) -> bool:
         return default
 
     return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def validate_failure_configuration(
+    max_consecutive_failures: int,
+    base_seconds: float,
+    max_seconds: float,
+) -> None:
+    if max_consecutive_failures < 1:
+        raise ValueError("PAPER_MAX_CONSECUTIVE_FAILURES must be >= 1")
+
+    if not base_seconds >= 0:
+        raise ValueError("PAPER_ERROR_BACKOFF_BASE_SECONDS must be >= 0")
+
+    if not max_seconds >= base_seconds:
+        raise ValueError(
+            "PAPER_ERROR_BACKOFF_MAX_SECONDS must be >= "
+            "PAPER_ERROR_BACKOFF_BASE_SECONDS"
+        )
+
+
+def calculate_error_backoff(
+    consecutive_failures: int,
+    base_seconds: float,
+    max_seconds: float,
+) -> float:
+    if consecutive_failures < 1:
+        raise ValueError("consecutive_failures must be >= 1")
+
+    if not base_seconds >= 0:
+        raise ValueError("base_seconds must be >= 0")
+
+    if not max_seconds >= base_seconds:
+        raise ValueError("max_seconds must be >= base_seconds")
+
+    if base_seconds == 0:
+        return 0.0
+
+    backoff_seconds = float(base_seconds)
+
+    for _ in range(consecutive_failures - 1):
+        backoff_seconds *= 2
+
+        if backoff_seconds >= max_seconds:
+            return float(max_seconds)
+
+    return float(min(backoff_seconds, max_seconds))
+
+
+def cancel_all_paper_orders(
+    engine: ConservativePaperTradingEngine,
+) -> None:
+    order_manager = getattr(engine, "order_manager", None)
+    cancel_all = getattr(order_manager, "cancel_all", None)
+
+    if callable(cancel_all):
+        cancel_all()
 
 
 def fmt_decimal(value: Decimal | None, places: str = "0.000000") -> str:
@@ -431,6 +491,7 @@ def build_record(
         iteration_ok=True,
         error_type=None,
         error_message=None,
+        consecutive_failures=0,
         best_bid=snapshot.best_bid.price if snapshot.best_bid is not None else None,
         best_ask=snapshot.best_ask.price if snapshot.best_ask is not None else None,
         mid_price=snapshot.mid_price,
@@ -483,6 +544,7 @@ def build_failed_record(
     iteration_index: int,
     exc: Exception,
     engine: ConservativePaperTradingEngine,
+    consecutive_failures: int = 1,
 ) -> PaperRunRecord:
     values: dict[str, Any] = {}
     portfolio = getattr(engine, "portfolio", None)
@@ -527,6 +589,7 @@ def build_failed_record(
         iteration_ok=False,
         error_type=type(exc).__name__,
         error_message=safe_error_message(exc),
+        consecutive_failures=consecutive_failures,
         **values,
     )
 
@@ -615,6 +678,24 @@ def main() -> None:
     iterations = env_int("PAPER_LOOP_ITERATIONS", 5)
     interval_seconds = env_int("PAPER_LOOP_INTERVAL_SECONDS", 10)
     sync_to_disk = env_bool("PAPER_RUN_FSYNC")
+    max_consecutive_failures = env_int(
+        "PAPER_MAX_CONSECUTIVE_FAILURES",
+        5,
+    )
+    error_backoff_base_seconds = env_float(
+        "PAPER_ERROR_BACKOFF_BASE_SECONDS",
+        2,
+    )
+    error_backoff_max_seconds = env_float(
+        "PAPER_ERROR_BACKOFF_MAX_SECONDS",
+        30,
+    )
+
+    validate_failure_configuration(
+        max_consecutive_failures=max_consecutive_failures,
+        base_seconds=error_backoff_base_seconds,
+        max_seconds=error_backoff_max_seconds,
+    )
 
     initial_cash = env_decimal("PAPER_INITIAL_CASH", "150")
     order_size_usd = env_decimal("PAPER_ORDER_SIZE_USD", "5")
@@ -678,46 +759,78 @@ def main() -> None:
         market_freshness_limits=market_freshness_limits,
     )
 
-    for index in range(1, iterations + 1):
-        try:
-            run_iteration(
-                index=index,
-                url=url,
-                symbol=symbol,
-                market_data=market_data,
-                engine=engine,
-                recorder=recorder,
-                output_path=output_path,
-                sync_to_disk=sync_to_disk,
-            )
-        except KeyboardInterrupt:
-            print()
-            print("Interrupted by user.")
-            break
-        except Exception as exc:
-            failed_record = build_failed_record(
-                timestamp=datetime.now(timezone.utc),
-                symbol=symbol,
-                iteration_index=index,
-                exc=exc,
-                engine=engine,
-            )
-            persist_record(
-                recorder=recorder,
-                record=failed_record,
-                output_path=output_path,
-                sync_to_disk=sync_to_disk,
-            )
+    consecutive_failures = 0
 
-            print()
-            print("=" * 80)
-            print(f"LOOP {index} FAILED")
-            print("=" * 80)
-            print(f"Error: {failed_record.error_message}")
-            print("=" * 80)
+    try:
+        for index in range(1, iterations + 1):
+            try:
+                run_iteration(
+                    index=index,
+                    url=url,
+                    symbol=symbol,
+                    market_data=market_data,
+                    engine=engine,
+                    recorder=recorder,
+                    output_path=output_path,
+                    sync_to_disk=sync_to_disk,
+                )
+            except Exception as exc:
+                consecutive_failures += 1
 
-        if index < iterations:
-            time.sleep(interval_seconds)
+                failed_record = build_failed_record(
+                    timestamp=datetime.now(timezone.utc),
+                    symbol=symbol,
+                    iteration_index=index,
+                    exc=exc,
+                    engine=engine,
+                    consecutive_failures=consecutive_failures,
+                )
+                persist_record(
+                    recorder=recorder,
+                    record=failed_record,
+                    output_path=output_path,
+                    sync_to_disk=sync_to_disk,
+                )
+
+                print()
+                print("=" * 80)
+                print(f"LOOP {index} FAILED")
+                print("=" * 80)
+                print(f"Error: {failed_record.error_message}")
+                print("=" * 80)
+
+                if consecutive_failures >= max_consecutive_failures:
+                    cancel_all_paper_orders(engine)
+                    print()
+                    print("=" * 80)
+                    print(
+                        "CIRCUIT BREAKER: "
+                        f"{consecutive_failures} consecutive failures reached "
+                        f"the configured limit of {max_consecutive_failures}."
+                    )
+                    print("Open paper orders cancelled. Stopping paper loop.")
+                    print("=" * 80)
+                    break
+
+                if index < iterations:
+                    backoff_seconds = calculate_error_backoff(
+                        consecutive_failures=consecutive_failures,
+                        base_seconds=error_backoff_base_seconds,
+                        max_seconds=error_backoff_max_seconds,
+                    )
+                    print(f"Retry backoff: {backoff_seconds:g}s")
+                    time.sleep(backoff_seconds)
+
+                continue
+
+            consecutive_failures = 0
+
+            if index < iterations:
+                time.sleep(interval_seconds)
+    except KeyboardInterrupt:
+        cancel_all_paper_orders(engine)
+        print()
+        print("Interrupted by user. Open paper orders cancelled.")
 
     print_final_summary(
         engine=engine,

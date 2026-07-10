@@ -16,6 +16,7 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         iteration_ok=False,
         error_type="TimeoutError",
         error_message="request timed out",
+        consecutive_failures=3,
         best_bid=Decimal("0.1039"),
         best_ask=Decimal("0.1041"),
         mid_price=Decimal("0.1040"),
@@ -40,6 +41,7 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["iteration_ok"] is False
     assert data["error_type"] == "TimeoutError"
     assert data["error_message"] == "request timed out"
+    assert data["consecutive_failures"] == 3
     assert data["best_bid"] == "0.1039"
     assert data["best_ask"] == "0.1041"
     assert data["weekly_volume"] == "10.10"

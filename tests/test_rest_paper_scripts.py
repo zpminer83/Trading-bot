@@ -14,6 +14,7 @@ from scripts import run_rest_paper_loop, run_rest_paper_once
 
 
 def make_loop_engine():
+    cancellations = []
     portfolio = SimpleNamespace(
         cash_balance=Decimal("150"),
         base_position=Decimal("0"),
@@ -29,6 +30,10 @@ def make_loop_engine():
         portfolio=portfolio,
         competition=None,
         broker=SimpleNamespace(open_orders=[]),
+        order_manager=SimpleNamespace(
+            cancel_all=lambda: cancellations.append(True),
+        ),
+        cancellations=cancellations,
     )
 
 
@@ -51,6 +56,35 @@ def test_paper_run_fsync_accepts_true_values(value, monkeypatch):
     monkeypatch.setenv("PAPER_RUN_FSYNC", value)
 
     assert run_rest_paper_loop.env_bool("PAPER_RUN_FSYNC") is True
+
+
+def test_calculate_error_backoff_is_exponential_and_capped():
+    assert run_rest_paper_loop.calculate_error_backoff(1, 2, 5) == 2.0
+    assert run_rest_paper_loop.calculate_error_backoff(2, 2, 5) == 4.0
+    assert run_rest_paper_loop.calculate_error_backoff(3, 2, 5) == 5.0
+    assert run_rest_paper_loop.calculate_error_backoff(10_000, 2, 5) == 5.0
+
+
+@pytest.mark.parametrize(
+    ("max_failures", "base_seconds", "max_seconds", "message"),
+    [
+        (0, 2, 30, "PAPER_MAX_CONSECUTIVE_FAILURES"),
+        (5, -1, 30, "PAPER_ERROR_BACKOFF_BASE_SECONDS"),
+        (5, 3, 2, "PAPER_ERROR_BACKOFF_MAX_SECONDS"),
+    ],
+)
+def test_failure_configuration_validation(
+    max_failures,
+    base_seconds,
+    max_seconds,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        run_rest_paper_loop.validate_failure_configuration(
+            max_consecutive_failures=max_failures,
+            base_seconds=base_seconds,
+            max_seconds=max_seconds,
+        )
 
 
 @pytest.mark.parametrize(
@@ -200,6 +234,7 @@ def test_successful_loop_iteration_is_persisted_immediately(
     assert records[0]["iteration_ok"] is True
     assert records[0]["error_type"] is None
     assert records[0]["error_message"] is None
+    assert records[0]["consecutive_failures"] == 0
 
 
 def test_failed_loop_iterations_are_recorded_and_persisted(
@@ -230,6 +265,8 @@ def test_failed_loop_iterations_are_recorded_and_persisted(
     monkeypatch.setenv("PAPER_LOOP_ITERATIONS", "2")
     monkeypatch.setenv("PAPER_LOOP_INTERVAL_SECONDS", "0")
     monkeypatch.setenv("PAPER_RUN_FSYNC", "YeS")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_BASE_SECONDS", "0")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_MAX_SECONDS", "0")
     monkeypatch.setattr(run_rest_paper_loop, "build_engine", lambda **kwargs: engine)
     monkeypatch.setattr(run_rest_paper_loop, "run_iteration", fail_iteration)
     monkeypatch.setattr(run_rest_paper_loop, "print_header", lambda **kwargs: None)
@@ -264,8 +301,144 @@ def test_failed_loop_iterations_are_recorded_and_persisted(
     assert all(record["iteration_ok"] is False for record in records)
     assert all(record["error_type"] == "RuntimeError" for record in records)
     assert all(record["error_message"] == "request failed" for record in records)
+    assert [record["consecutive_failures"] for record in records] == [1, 2]
     assert all(record["cash_balance"] == "150" for record in records)
     assert all(record["equity"] == "150" for record in records)
+
+
+def test_main_fails_fast_for_invalid_failure_configuration(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("PAPER_RUN_OUTPUT", str(tmp_path / "paper_run.jsonl"))
+    monkeypatch.setenv("PAPER_MAX_CONSECUTIVE_FAILURES", "0")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_BASE_SECONDS", "2")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_MAX_SECONDS", "30")
+    monkeypatch.setattr(
+        run_rest_paper_loop,
+        "build_engine",
+        lambda **kwargs: pytest.fail("engine must not be built"),
+    )
+
+    with pytest.raises(ValueError, match="PAPER_MAX_CONSECUTIVE_FAILURES"):
+        run_rest_paper_loop.main()
+
+
+def test_success_resets_failure_counter_and_selects_correct_sleep(
+    tmp_path,
+    monkeypatch,
+):
+    output_path = tmp_path / "paper_run.jsonl"
+    engine = make_loop_engine()
+    sleep_calls = []
+    failing_iterations = {1, 3}
+
+    def scripted_iteration(
+        index,
+        symbol,
+        recorder,
+        output_path,
+        sync_to_disk,
+        **kwargs,
+    ):
+        if index in failing_iterations:
+            raise RuntimeError(f"failure {index}")
+
+        record = run_rest_paper_loop.PaperRunRecord(
+            timestamp=datetime(2026, 7, 13, 12, index, tzinfo=timezone.utc),
+            symbol=symbol,
+            iteration_index=index,
+            iteration_ok=True,
+            consecutive_failures=0,
+        )
+        run_rest_paper_loop.persist_record(
+            recorder=recorder,
+            record=record,
+            output_path=output_path,
+            sync_to_disk=sync_to_disk,
+        )
+
+    monkeypatch.setenv("PAPER_RUN_OUTPUT", str(output_path))
+    monkeypatch.setenv("PAPER_LOOP_ITERATIONS", "4")
+    monkeypatch.setenv("PAPER_LOOP_INTERVAL_SECONDS", "7")
+    monkeypatch.setenv("PAPER_MAX_CONSECUTIVE_FAILURES", "5")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_BASE_SECONDS", "2")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_MAX_SECONDS", "30")
+    monkeypatch.setattr(run_rest_paper_loop, "build_engine", lambda **kwargs: engine)
+    monkeypatch.setattr(run_rest_paper_loop, "run_iteration", scripted_iteration)
+    monkeypatch.setattr(run_rest_paper_loop, "print_header", lambda **kwargs: None)
+    monkeypatch.setattr(
+        run_rest_paper_loop,
+        "print_final_summary",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        run_rest_paper_loop.time,
+        "sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    run_rest_paper_loop.main()
+
+    records = [
+        json.loads(line)
+        for line in output_path.read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert [record["iteration_index"] for record in records] == [1, 2, 3, 4]
+    assert [record["consecutive_failures"] for record in records] == [1, 0, 1, 0]
+    assert sleep_calls == [2.0, 7, 2.0]
+    assert engine.cancellations == []
+
+
+def test_circuit_breaker_caps_backoff_cancels_orders_and_stops(
+    tmp_path,
+    monkeypatch,
+    capsys,
+):
+    output_path = tmp_path / "paper_run.jsonl"
+    engine = make_loop_engine()
+    attempted_iterations = []
+    sleep_calls = []
+
+    def fail_iteration(index, **kwargs):
+        attempted_iterations.append(index)
+        raise RuntimeError("request failed")
+
+    monkeypatch.setenv("PAPER_RUN_OUTPUT", str(output_path))
+    monkeypatch.setenv("PAPER_LOOP_ITERATIONS", "10")
+    monkeypatch.setenv("PAPER_LOOP_INTERVAL_SECONDS", "9")
+    monkeypatch.setenv("PAPER_MAX_CONSECUTIVE_FAILURES", "3")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_BASE_SECONDS", "2")
+    monkeypatch.setenv("PAPER_ERROR_BACKOFF_MAX_SECONDS", "3")
+    monkeypatch.setattr(run_rest_paper_loop, "build_engine", lambda **kwargs: engine)
+    monkeypatch.setattr(run_rest_paper_loop, "run_iteration", fail_iteration)
+    monkeypatch.setattr(run_rest_paper_loop, "print_header", lambda **kwargs: None)
+    monkeypatch.setattr(
+        run_rest_paper_loop,
+        "print_final_summary",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        run_rest_paper_loop.time,
+        "sleep",
+        lambda seconds: sleep_calls.append(seconds),
+    )
+
+    run_rest_paper_loop.main()
+
+    records = [
+        json.loads(line)
+        for line in output_path.read_text(encoding="utf-8").splitlines()
+    ]
+    output = capsys.readouterr().out
+
+    assert attempted_iterations == [1, 2, 3]
+    assert len(records) == 3
+    assert [record["consecutive_failures"] for record in records] == [1, 2, 3]
+    assert sleep_calls == [2.0, 3.0]
+    assert engine.cancellations == [True]
+    assert "CIRCUIT BREAKER" in output
 
 
 def test_keyboard_interrupt_is_not_recorded_as_failure(tmp_path, monkeypatch):
@@ -289,6 +462,7 @@ def test_keyboard_interrupt_is_not_recorded_as_failure(tmp_path, monkeypatch):
     run_rest_paper_loop.main()
 
     assert output_path.exists() is False
+    assert engine.cancellations == [True]
 
 
 def test_failed_record_redacts_sensitive_values_and_truncates_message():
@@ -307,6 +481,7 @@ def test_failed_record_redacts_sensitive_values_and_truncates_message():
         iteration_index=1,
         exc=exc,
         engine=engine,
+        consecutive_failures=4,
     )
 
     assert record.error_message is not None
@@ -317,3 +492,4 @@ def test_failed_record_redacts_sensitive_values_and_truncates_message():
     assert "headers=[REDACTED]" in record.error_message
     assert "[REDACTED PRIVATE KEY]" in record.error_message
     assert len(record.error_message) == 500
+    assert record.consecutive_failures == 4
