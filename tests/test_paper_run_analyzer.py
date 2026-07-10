@@ -186,6 +186,12 @@ def test_analyzer_treats_old_records_as_successful_iterations():
     assert summary.kill_switch_triggered is False
     assert summary.risk_reason_counts == {}
     assert summary.maximum_recorded_drawdown is None
+    assert summary.evaluated_open_orders_count == 0
+    assert summary.orders_at_touch_count == 0
+    assert summary.crossed_order_count == 0
+    assert summary.level_quantity_decreased_count == 0
+    assert summary.level_disappeared_count == 0
+    assert summary.maximum_open_order_age_seconds is None
 
 
 def test_analyzer_summarizes_portfolio_risk(capsys):
@@ -240,6 +246,52 @@ def test_analyzer_summarizes_portfolio_risk(capsys):
     assert "Kill switch triggered    : True" in output
     assert "Maximum recorded drawdown: 10%" in output
     assert "max_drawdown_reached: 1" in output
+
+
+def test_analyzer_aggregates_passive_fill_evidence(capsys):
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00", fills_count=1),
+        make_record("2026-07-13T12:02:00+00:00"),
+    ]
+    records[0].update(
+        evaluated_open_orders_count=2,
+        orders_at_touch_count=1,
+        crossed_order_count=0,
+        level_quantity_decreased_count=1,
+        level_disappeared_count=0,
+        max_open_order_age_seconds="4.5",
+    )
+    records[1].update(
+        evaluated_open_orders_count=1,
+        orders_at_touch_count=1,
+        crossed_order_count=1,
+        level_quantity_decreased_count=0,
+        level_disappeared_count=1,
+        max_open_order_age_seconds="7.25",
+    )
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.evaluated_open_orders_count == 3
+    assert summary.orders_at_touch_count == 2
+    assert summary.crossed_order_count == 1
+    assert summary.level_quantity_decreased_count == 1
+    assert summary.level_disappeared_count == 1
+    assert summary.maximum_open_order_age_seconds == Decimal("7.25")
+
+    print_summary(Path("paper_run.jsonl"), summary)
+    output = capsys.readouterr().out
+
+    assert "Passive fill evidence:" in output
+    assert "Evaluated open orders: 3" in output
+    assert "Orders at touch       : 2" in output
+    assert "Crossed orders        : 1" in output
+    assert "Quantity decreases    : 1" in output
+    assert "Level disappearances  : 1" in output
+    assert "Maximum order age     : 7.25s" in output
+    assert "Confirmed fills       : 1" in output
+    assert "trades or cancellations" in output
 
 
 def test_analyzer_summarizes_market_freshness(capsys):

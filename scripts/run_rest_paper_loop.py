@@ -14,6 +14,10 @@ from bot.core.conservative_paper_trading_engine import (
 from bot.execution.conservative_paper_broker import ConservativePaperBroker
 from bot.execution.execution_manager import ExecutionManager
 from bot.execution.order_manager import OrderManager
+from bot.execution.passive_fill_evidence import (
+    PassiveFillEvidence,
+    PassiveFillEvidenceTracker,
+)
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
 from bot.portfolio.portfolio_manager import PortfolioManager
@@ -405,6 +409,39 @@ def print_portfolio_risk(result) -> None:
         print("  KILL SWITCH  : LATCHED")
 
 
+def print_passive_fill_evidence(
+    evidence: list[PassiveFillEvidence],
+) -> None:
+    maximum_age = max(
+        (item.age_seconds for item in evidence),
+        default=None,
+    )
+
+    print("Passive fill evidence:")
+    print(f"  Evaluated orders                    : {len(evidence)}")
+    print(
+        "  At touch                            : "
+        f"{sum(item.at_touch for item in evidence)}"
+    )
+    print(
+        "  Crossed                             : "
+        f"{sum(item.crossed for item in evidence)}"
+    )
+    print(
+        "  Level quantity decreased (ambiguous): "
+        f"{sum(item.level_quantity_decreased for item in evidence)}"
+    )
+    print(
+        "  Level disappeared (ambiguous)       : "
+        f"{sum(item.level_disappeared for item in evidence)}"
+    )
+    print(f"  Maximum open-order age              : {fmt_seconds(maximum_age)}")
+    print(
+        "  Note: quantity changes may be trades or cancellations; "
+        "they are not confirmed fills."
+    )
+
+
 def print_fills(result) -> None:
     print("Fills:")
 
@@ -527,12 +564,14 @@ def build_record(
     result,
     engine: ConservativePaperTradingEngine,
     iteration_index: int = 0,
+    passive_fill_evidence: list[PassiveFillEvidence] | None = None,
 ) -> PaperRunRecord:
     portfolio = engine.portfolio
     competition = engine.competition
     market_safety = result.market_safety_decision
     market_freshness = result.market_freshness_decision
     portfolio_risk = getattr(result, "portfolio_risk_decision", None)
+    evidence = passive_fill_evidence or []
 
     return PaperRunRecord(
         timestamp=timestamp,
@@ -580,6 +619,19 @@ def build_record(
         ),
         risk_max_drawdown=(
             portfolio_risk.max_drawdown if portfolio_risk is not None else None
+        ),
+        evaluated_open_orders_count=len(evidence),
+        orders_at_touch_count=sum(item.at_touch for item in evidence),
+        crossed_order_count=sum(item.crossed for item in evidence),
+        level_quantity_decreased_count=sum(
+            item.level_quantity_decreased for item in evidence
+        ),
+        level_disappeared_count=sum(
+            item.level_disappeared for item in evidence
+        ),
+        max_open_order_age_seconds=max(
+            (item.age_seconds for item in evidence),
+            default=None,
         ),
         intents_count=len(result.intents),
         decisions_count=len(result.decisions),
@@ -683,6 +735,7 @@ def run_iteration(
     output_path: Path,
     *,
     sync_to_disk: bool = False,
+    fill_evidence_tracker: PassiveFillEvidenceTracker | None = None,
 ) -> None:
     now = datetime.now(timezone.utc)
 
@@ -703,7 +756,24 @@ def run_iteration(
         default_symbol=symbol,
     )
 
+    evidence: list[PassiveFillEvidence] = []
+
+    if fill_evidence_tracker is not None:
+        open_orders_before_step = tuple(engine.broker.open_orders)
+        evidence = fill_evidence_tracker.observe(
+            orders=open_orders_before_step,
+            orderbook=snapshot.orderbook,
+            observed_at=now,
+        )
+
     result = engine.step(timestamp=now)
+
+    if fill_evidence_tracker is not None:
+        fill_evidence_tracker.synchronize(
+            orders=tuple(engine.broker.open_orders),
+            orderbook=snapshot.orderbook,
+            observed_at=now,
+        )
 
     record = build_record(
         timestamp=now,
@@ -712,6 +782,7 @@ def run_iteration(
         result=result,
         engine=engine,
         iteration_index=index,
+        passive_fill_evidence=evidence,
     )
 
     persist_record(
@@ -725,6 +796,7 @@ def run_iteration(
     print_market_freshness(result)
     print_market_safety(result)
     print_portfolio_risk(result)
+    print_passive_fill_evidence(evidence)
     print_fills(result)
     print_decisions(result)
     print_open_orders(engine)
@@ -799,6 +871,7 @@ def main() -> None:
 
     market_cache = MarketCache()
     market_data = MarketDataService(market_cache=market_cache)
+    fill_evidence_tracker = PassiveFillEvidenceTracker()
 
     engine = build_engine(
         symbol=symbol,
@@ -845,6 +918,7 @@ def main() -> None:
                     recorder=recorder,
                     output_path=output_path,
                     sync_to_disk=sync_to_disk,
+                    fill_evidence_tracker=fill_evidence_tracker,
                 )
             except Exception as exc:
                 consecutive_failures += 1

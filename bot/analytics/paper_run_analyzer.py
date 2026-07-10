@@ -38,6 +38,13 @@ class PaperRunSummary:
     risk_reason_counts: dict[str, int]
     maximum_recorded_drawdown: Decimal | None
 
+    evaluated_open_orders_count: int
+    orders_at_touch_count: int
+    crossed_order_count: int
+    level_quantity_decreased_count: int
+    level_disappeared_count: int
+    maximum_open_order_age_seconds: Decimal | None
+
     fills_count: int
     submitted_orders_count: int
 
@@ -273,6 +280,32 @@ class PaperRunAnalyzer:
             if record.get("risk_drawdown") is not None
         ]
 
+        evaluated_open_orders_count = sum(
+            self._to_int(record.get("evaluated_open_orders_count"))
+            for record in records
+        )
+        orders_at_touch_count = sum(
+            self._to_int(record.get("orders_at_touch_count"))
+            for record in records
+        )
+        crossed_order_count = sum(
+            self._to_int(record.get("crossed_order_count"))
+            for record in records
+        )
+        level_quantity_decreased_count = sum(
+            self._to_int(record.get("level_quantity_decreased_count"))
+            for record in records
+        )
+        level_disappeared_count = sum(
+            self._to_int(record.get("level_disappeared_count"))
+            for record in records
+        )
+        open_order_ages = [
+            self._to_decimal(record.get("max_open_order_age_seconds"))
+            for record in records
+            if record.get("max_open_order_age_seconds") is not None
+        ]
+
         fills_count = sum(
             self._to_int(record.get("fills_count"))
             for record in records
@@ -328,6 +361,14 @@ class PaperRunAnalyzer:
                 max(recorded_risk_drawdowns)
                 if recorded_risk_drawdowns
                 else None
+            ),
+            evaluated_open_orders_count=evaluated_open_orders_count,
+            orders_at_touch_count=orders_at_touch_count,
+            crossed_order_count=crossed_order_count,
+            level_quantity_decreased_count=level_quantity_decreased_count,
+            level_disappeared_count=level_disappeared_count,
+            maximum_open_order_age_seconds=(
+                max(open_order_ages) if open_order_ages else None
             ),
             fills_count=fills_count,
             submitted_orders_count=submitted_orders_count,

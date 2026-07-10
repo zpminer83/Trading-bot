@@ -32,6 +32,12 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         portfolio_risk_latched=True,
         risk_drawdown=Decimal("0.10"),
         risk_max_drawdown=Decimal("0.10"),
+        evaluated_open_orders_count=2,
+        orders_at_touch_count=1,
+        crossed_order_count=1,
+        level_quantity_decreased_count=1,
+        level_disappeared_count=0,
+        max_open_order_age_seconds=Decimal("12.5"),
         cash_balance=Decimal("150"),
         equity=Decimal("150"),
         weekly_volume=Decimal("10.10"),
@@ -62,6 +68,12 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["portfolio_risk_latched"] is True
     assert data["risk_drawdown"] == "0.10"
     assert data["risk_max_drawdown"] == "0.10"
+    assert data["evaluated_open_orders_count"] == 2
+    assert data["orders_at_touch_count"] == 1
+    assert data["crossed_order_count"] == 1
+    assert data["level_quantity_decreased_count"] == 1
+    assert data["level_disappeared_count"] == 0
+    assert data["max_open_order_age_seconds"] == "12.5"
 
 
 def test_paper_run_recorder_appends_records():

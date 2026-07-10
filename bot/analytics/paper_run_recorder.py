@@ -56,6 +56,13 @@ class PaperRunRecord:
     risk_drawdown: Decimal | None = None
     risk_max_drawdown: Decimal | None = None
 
+    evaluated_open_orders_count: int = 0
+    orders_at_touch_count: int = 0
+    crossed_order_count: int = 0
+    level_quantity_decreased_count: int = 0
+    level_disappeared_count: int = 0
+    max_open_order_age_seconds: Decimal | None = None
+
     intents_count: int = 0
     decisions_count: int = 0
     fills_count: int = 0
@@ -101,6 +108,14 @@ class PaperRunRecord:
                 "portfolio_risk_latched": self.portfolio_risk_latched,
                 "risk_drawdown": self.risk_drawdown,
                 "risk_max_drawdown": self.risk_max_drawdown,
+                "evaluated_open_orders_count": self.evaluated_open_orders_count,
+                "orders_at_touch_count": self.orders_at_touch_count,
+                "crossed_order_count": self.crossed_order_count,
+                "level_quantity_decreased_count": (
+                    self.level_quantity_decreased_count
+                ),
+                "level_disappeared_count": self.level_disappeared_count,
+                "max_open_order_age_seconds": self.max_open_order_age_seconds,
                 "intents_count": self.intents_count,
                 "decisions_count": self.decisions_count,
                 "fills_count": self.fills_count,

@@ -1,10 +1,14 @@
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
+from bot.execution.conservative_paper_broker import PaperOrder
+from bot.execution.order import OrderIntent
+from bot.execution.passive_fill_evidence import PassiveFillEvidenceTracker
+from bot.market.models import OrderBook, OrderBookLevel
 from bot.risk.market_freshness import (
     MarketFreshnessDecision,
     MarketFreshnessGuard,
@@ -47,6 +51,7 @@ def disable_iteration_prints(monkeypatch):
         "print_market_freshness",
         "print_market_safety",
         "print_portfolio_risk",
+        "print_passive_fill_evidence",
         "print_fills",
         "print_decisions",
         "print_open_orders",
@@ -292,6 +297,102 @@ def test_successful_loop_iteration_is_persisted_immediately(
     assert records[0]["portfolio_risk_latched"] is False
     assert records[0]["risk_drawdown"] == "0"
     assert records[0]["risk_max_drawdown"] == "0.10"
+
+
+def test_rest_loop_records_passive_fill_evidence_without_creating_fill(
+    tmp_path,
+    monkeypatch,
+):
+    order = PaperOrder(
+        order_id=1,
+        intent=OrderIntent(
+            symbol="SOMI:USDso",
+            side="buy",
+            order_type="limit",
+            price=Decimal("100"),
+            quantity=Decimal("1"),
+        ),
+    )
+    initial_book = OrderBook(
+        symbol="SOMI:USDso",
+        bids=[OrderBookLevel(price=Decimal("100"), quantity=Decimal("10"))],
+        asks=[OrderBookLevel(price=Decimal("101"), quantity=Decimal("10"))],
+    )
+    current_book = OrderBook(
+        symbol="SOMI:USDso",
+        bids=[OrderBookLevel(price=Decimal("100"), quantity=Decimal("6"))],
+        asks=[OrderBookLevel(price=Decimal("101"), quantity=Decimal("10"))],
+    )
+    snapshot = SimpleNamespace(
+        orderbook=current_book,
+        best_bid=current_book.bids[0],
+        best_ask=current_book.asks[0],
+        mid_price=Decimal("100.5"),
+        spread=Decimal("1"),
+    )
+    result = SimpleNamespace(
+        market_safety_decision=None,
+        market_freshness_decision=None,
+        portfolio_risk_decision=None,
+        intents=[],
+        decisions=[],
+        fills=[],
+        submitted_orders=[],
+    )
+    market_data = SimpleNamespace(
+        handle_orderbook_payload=lambda **kwargs: snapshot,
+    )
+    engine = make_loop_engine()
+    engine.broker.open_orders.append(order)
+    engine.step = lambda timestamp: result
+    tracker = PassiveFillEvidenceTracker()
+    tracker.synchronize(
+        [order],
+        initial_book,
+        datetime.now(timezone.utc) - timedelta(seconds=1),
+    )
+    recorder = run_rest_paper_loop.PaperRunRecorder()
+    output_path = tmp_path / "paper_run.jsonl"
+    starting_portfolio = (
+        engine.portfolio.cash_balance,
+        engine.portfolio.base_position,
+        engine.portfolio.total_volume,
+    )
+
+    monkeypatch.setattr(run_rest_paper_loop, "fetch_json", lambda url: {})
+    monkeypatch.setattr(
+        run_rest_paper_loop,
+        "extract_orderbook_payload",
+        lambda response, symbol: {},
+    )
+    disable_iteration_prints(monkeypatch)
+
+    run_rest_paper_loop.run_iteration(
+        index=2,
+        url="https://example.invalid/orderbook",
+        symbol="SOMI:USDso",
+        market_data=market_data,
+        engine=engine,
+        recorder=recorder,
+        output_path=output_path,
+        fill_evidence_tracker=tracker,
+    )
+
+    record = json.loads(output_path.read_text(encoding="utf-8").splitlines()[0])
+
+    assert record["evaluated_open_orders_count"] == 1
+    assert record["orders_at_touch_count"] == 1
+    assert record["crossed_order_count"] == 0
+    assert record["level_quantity_decreased_count"] == 1
+    assert record["level_disappeared_count"] == 0
+    assert Decimal(record["max_open_order_age_seconds"]) >= 0
+    assert result.fills == []
+    assert order.status == "open"
+    assert (
+        engine.portfolio.cash_balance,
+        engine.portfolio.base_position,
+        engine.portfolio.total_volume,
+    ) == starting_portfolio
 
 
 def test_failed_loop_iterations_are_recorded_and_persisted(

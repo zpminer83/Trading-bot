@@ -127,6 +127,32 @@ def print_summary(
             print(f"    {reason}: {count}")
 
     print()
+    print("Passive fill evidence:")
+    print(
+        "  Evaluated open orders: "
+        f"{summary.evaluated_open_orders_count}"
+    )
+    print(f"  Orders at touch       : {summary.orders_at_touch_count}")
+    print(f"  Crossed orders        : {summary.crossed_order_count}")
+    print(
+        "  Quantity decreases    : "
+        f"{summary.level_quantity_decreased_count}"
+    )
+    print(
+        "  Level disappearances  : "
+        f"{summary.level_disappeared_count}"
+    )
+    print(
+        "  Maximum order age     : "
+        f"{fmt_seconds(summary.maximum_open_order_age_seconds)}"
+    )
+    print(f"  Confirmed fills       : {summary.fills_count}")
+    print(
+        "  Note: quantity changes may be caused by trades or cancellations; "
+        "they are ambiguous evidence and are not counted as fills."
+    )
+
+    print()
     print("Trading activity:")
     print(f"  Fills           : {summary.fills_count}")
     print(f"  Orders submitted: {summary.submitted_orders_count}")
