@@ -76,6 +76,68 @@ def print_metrics(label: str, metrics: DirectionalThresholdMetrics) -> None:
     )
 
 
+def print_diagnostics(result) -> None:
+    diagnostics = result.diagnostics
+    if diagnostics is None:
+        return
+    print()
+    print("CANDIDATE ELIGIBILITY DIAGNOSTICS")
+    print()
+    print("Rejection reasons")
+    for name, count in diagnostics.rejection_reason_counts.items():
+        print(f"  {name}: {count}")
+
+    print()
+    print("Maximum achievable sample counts")
+    for item in diagnostics.candidate_coverage:
+        print(f"  {item.interpretation}, horizon={item.horizon_records}:")
+        print(f"    Maximum bullish training observations : {item.maximum_bullish_training_observations}")
+        print(f"    Maximum bearish training observations : {item.maximum_bearish_training_observations}")
+        print(f"    Maximum bullish validation observations: {item.maximum_bullish_validation_observations}")
+        print(f"    Maximum bearish validation observations: {item.maximum_bearish_validation_observations}")
+        print(f"    Candidates with any bullish observations: {item.candidates_with_any_bullish_observations}")
+        print(f"    Candidates with any bearish observations: {item.candidates_with_any_bearish_observations}")
+        print(f"    Meeting training requirements only: {item.candidates_meeting_training_requirements_only}")
+        print(f"    Meeting validation requirements only: {item.candidates_meeting_validation_requirements_only}")
+        print(f"    Meeting both requirements: {item.candidates_meeting_both_requirements}")
+
+    print()
+    print("Raw metric distributions")
+    for split_name, distributions in diagnostics.raw_metric_distributions.items():
+        print(f"  {split_name}:")
+        for field_name, distribution in distributions.items():
+            values = (
+                fmt_decimal(distribution.minimum),
+                fmt_decimal(distribution.percentile_10),
+                fmt_decimal(distribution.percentile_25),
+                fmt_decimal(distribution.median),
+                fmt_decimal(distribution.percentile_75),
+                fmt_decimal(distribution.percentile_90),
+                fmt_decimal(distribution.maximum),
+            )
+            print(f"    {field_name} min/p10/p25/median/p75/p90/max: {', '.join(values)}")
+
+    print()
+    print("Directional component alignment")
+    for split_name, counts in diagnostics.directional_component_counts.items():
+        print(f"  {split_name}:")
+        for field_name, value in counts.__dict__.items():
+            if field_name == "spread_passing_each_threshold":
+                print("    Spread passing thresholds: " + ", ".join(f"{key}={count}" for key, count in value.items()))
+            else:
+                print(f"    {field_name}: {value}")
+
+    print()
+    print("Per-file coverage")
+    for item in diagnostics.per_file_coverage:
+        print(f"  {item.source_file}:")
+        print(f"    Valid records: {item.valid_record_count}")
+        print(f"    Candidate bullish matches: {item.candidate_bullish_matches}")
+        print(f"    Candidate bearish matches: {item.candidate_bearish_matches}")
+        print(f"    Earliest timestamp: {item.earliest_timestamp or 'n/a'}")
+        print(f"    Latest timestamp: {item.latest_timestamp or 'n/a'}")
+
+
 def print_result(result) -> None:
     print("SIGNAL THRESHOLD STUDY")
     print()
@@ -147,6 +209,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--split", type=parse_split, default=(60, 20, 20))
     parser.add_argument("--top", type=int, default=5)
     parser.add_argument("--json-output", type=Path)
+    parser.add_argument(
+        "--diagnostics",
+        action="store_true",
+        help="print candidate coverage and rejection diagnostics",
+    )
     return parser
 
 
@@ -168,6 +235,8 @@ def main() -> int:
     except (FileNotFoundError, ValueError) as exc:
         parser.error(str(exc))
     print_result(result)
+    if args.diagnostics:
+        print_diagnostics(result)
     if args.json_output is not None:
         print(f"JSON output: {args.json_output}")
     return 0

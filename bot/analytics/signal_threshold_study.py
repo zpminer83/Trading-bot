@@ -147,6 +147,118 @@ class StudySplitSizes:
 
 
 @dataclass(frozen=True)
+class MetricDistribution:
+    """Descriptive distribution for one raw signal metric."""
+
+    minimum: Decimal | None
+    percentile_10: Decimal | None
+    percentile_25: Decimal | None
+    median: Decimal | None
+    percentile_75: Decimal | None
+    percentile_90: Decimal | None
+    maximum: Decimal | None
+
+    @property
+    def p10(self) -> Decimal | None:
+        return self.percentile_10
+
+    @property
+    def p25(self) -> Decimal | None:
+        return self.percentile_25
+
+    @property
+    def p75(self) -> Decimal | None:
+        return self.percentile_75
+
+    @property
+    def p90(self) -> Decimal | None:
+        return self.percentile_90
+
+
+@dataclass(frozen=True)
+class DirectionalComponentCounts:
+    positive_imbalance: int
+    negative_imbalance: int
+    positive_microprice_edge: int
+    negative_microprice_edge: int
+    positive_momentum: int
+    negative_momentum: int
+    all_three_positive: int
+    all_three_negative: int
+    positive_imbalance_plus_positive_edge: int
+    negative_imbalance_plus_negative_edge: int
+    spread_passing_each_threshold: dict[str, int]
+
+
+@dataclass(frozen=True)
+class CandidateCoverageDiagnostics:
+    interpretation: str
+    horizon_records: int
+    maximum_bullish_training_observations: int
+    maximum_bearish_training_observations: int
+    maximum_bullish_validation_observations: int
+    maximum_bearish_validation_observations: int
+    candidates_with_any_bullish_observations: int
+    candidates_with_any_bearish_observations: int
+    candidates_meeting_training_requirements_only: int
+    candidates_meeting_validation_requirements_only: int
+    candidates_meeting_both_requirements: int
+
+    # Short aliases make the diagnostic object convenient for notebooks.
+    @property
+    def max_bullish_training(self) -> int:
+        return self.maximum_bullish_training_observations
+
+    @property
+    def max_bearish_training(self) -> int:
+        return self.maximum_bearish_training_observations
+
+    @property
+    def max_bullish_validation(self) -> int:
+        return self.maximum_bullish_validation_observations
+
+    @property
+    def max_bearish_validation(self) -> int:
+        return self.maximum_bearish_validation_observations
+
+
+@dataclass(frozen=True)
+class FileCoverageDiagnostics:
+    source_file: Path
+    valid_record_count: int
+    candidate_bullish_matches: int
+    candidate_bearish_matches: int
+    earliest_timestamp: datetime | None
+    latest_timestamp: datetime | None
+
+
+@dataclass(frozen=True)
+class SignalThresholdStudyDiagnostics:
+    rejection_reason_counts: dict[str, int]
+    candidate_coverage: tuple[CandidateCoverageDiagnostics, ...]
+    raw_metric_distributions: dict[str, dict[str, MetricDistribution]]
+    directional_component_counts: dict[str, DirectionalComponentCounts]
+    per_file_coverage: tuple[FileCoverageDiagnostics, ...]
+
+    @property
+    def rejection_counters(self) -> dict[str, int]:
+        return self.rejection_reason_counts
+
+    @property
+    def candidate_coverage_by_interpretation_horizon(
+        self,
+    ) -> dict[tuple[str, int], CandidateCoverageDiagnostics]:
+        return {
+            (item.interpretation, item.horizon_records): item
+            for item in self.candidate_coverage
+        }
+
+    @property
+    def metric_distributions(self) -> dict[str, dict[str, MetricDistribution]]:
+        return self.raw_metric_distributions
+
+
+@dataclass(frozen=True)
 class SignalThresholdStudyResult:
     files: tuple[Path, ...]
     valid_record_count: int
@@ -155,6 +267,11 @@ class SignalThresholdStudyResult:
     candidate_combination_count: int
     eligible_candidate_count: int
     selected_candidates: tuple[SelectedCandidateResult, ...]
+    diagnostics: SignalThresholdStudyDiagnostics | None = None
+
+    @property
+    def rejection_reason_counts(self) -> dict[str, int]:
+        return self.diagnostics.rejection_reason_counts if self.diagnostics else {}
 
 
 @dataclass(frozen=True)
@@ -228,6 +345,7 @@ class SignalThresholdStudy:
         split_records: dict[str, dict[Path, list[_StudyRecord]]] = {
             name: {} for name in SPLIT_NAMES
         }
+        valid_records_by_file: dict[Path, list[_StudyRecord]] = {}
         valid_count = 0
         skipped_count = 0
         for path in files:
@@ -241,6 +359,7 @@ class SignalThresholdStudy:
                     valid_count += 1
                     valid_records.append(parsed)
             valid_records.sort(key=lambda item: item.timestamp)
+            valid_records_by_file[path] = valid_records
             file_splits = self.chronological_split(valid_records)
             for split_name, values in file_splits.items():
                 split_records[split_name][path] = values
@@ -260,6 +379,12 @@ class SignalThresholdStudy:
         )
         development = self._apply_horizon_consistency(development)
         eligible = tuple(item for item in development if item.eligible)
+        diagnostics = self._build_diagnostics(
+            candidates,
+            development,
+            split_records,
+            valid_records_by_file,
+        )
         selected_development = self.select_candidates(eligible)
         selected = tuple(
             self._evaluate_selected_on_test(item, split_records["test"])
@@ -273,7 +398,239 @@ class SignalThresholdStudy:
             candidate_combination_count=len(candidates),
             eligible_candidate_count=len(eligible),
             selected_candidates=selected,
+            diagnostics=diagnostics,
         )
+
+    def _build_diagnostics(
+        self,
+        candidates: tuple[SignalThresholdCandidate, ...],
+        development: tuple[CandidateDevelopmentEvaluation, ...],
+        split_records: dict[str, dict[Path, list[_StudyRecord]]],
+        valid_records_by_file: dict[Path, list[_StudyRecord]],
+    ) -> SignalThresholdStudyDiagnostics:
+        counters = {
+            "insufficient_training_bullish": 0,
+            "insufficient_training_bearish": 0,
+            "insufficient_validation_bullish": 0,
+            "insufficient_validation_bearish": 0,
+            "insufficient_both_directions": 0,
+            "insufficient_file_coverage": 0,
+            "eligible_candidate_count": sum(item.eligible for item in development),
+        }
+        for item in development:
+            training = {metric.direction: metric for metric in item.training_metrics}
+            validation = {metric.direction: metric for metric in item.validation_metrics}
+            train_bullish = training["bullish"].observation_count >= self.config.minimum_training_samples
+            train_bearish = training["bearish"].observation_count >= self.config.minimum_training_samples
+            validation_bullish = validation["bullish"].observation_count >= self.config.minimum_validation_samples
+            validation_bearish = validation["bearish"].observation_count >= self.config.minimum_validation_samples
+            counters["insufficient_training_bullish"] += not train_bullish
+            counters["insufficient_training_bearish"] += not train_bearish
+            counters["insufficient_validation_bullish"] += not validation_bullish
+            counters["insufficient_validation_bearish"] += not validation_bearish
+            bullish_insufficient = not train_bullish or not validation_bullish
+            bearish_insufficient = not train_bearish or not validation_bearish
+            counters["insufficient_both_directions"] += bullish_insufficient and bearish_insufficient
+            # A missing direction is already counted as directional scarcity.
+            # File-coverage diagnostics only flag a direction that has data but
+            # is concentrated in fewer than two source files.
+            if any(
+                metric.observation_count > 0 and metric.contributing_file_count < 2
+                for metric in (*item.training_metrics, *item.validation_metrics)
+            ):
+                counters["insufficient_file_coverage"] += 1
+
+        coverage: list[CandidateCoverageDiagnostics] = []
+        for interpretation in INTERPRETATIONS:
+            for horizon in self.config.horizons:
+                group = tuple(
+                    item for item in development
+                    if item.candidate.interpretation == interpretation
+                    and item.candidate.horizon_records == horizon
+                )
+                if not group:
+                    continue
+                train_by_direction = {
+                    direction: [
+                        item.metrics_for("training", direction).observation_count
+                        for item in group
+                    ]
+                    for direction in DIRECTIONS
+                }
+                validation_by_direction = {
+                    direction: [
+                        item.metrics_for("validation", direction).observation_count
+                        for item in group
+                    ]
+                    for direction in DIRECTIONS
+                }
+                training_ok = [
+                    all(item.metrics_for("training", direction).observation_count >= self.config.minimum_training_samples for direction in DIRECTIONS)
+                    for item in group
+                ]
+                validation_ok = [
+                    all(item.metrics_for("validation", direction).observation_count >= self.config.minimum_validation_samples for direction in DIRECTIONS)
+                    for item in group
+                ]
+                coverage.append(
+                    CandidateCoverageDiagnostics(
+                        interpretation=interpretation,
+                        horizon_records=horizon,
+                        maximum_bullish_training_observations=max(train_by_direction["bullish"]),
+                        maximum_bearish_training_observations=max(train_by_direction["bearish"]),
+                        maximum_bullish_validation_observations=max(validation_by_direction["bullish"]),
+                        maximum_bearish_validation_observations=max(validation_by_direction["bearish"]),
+                        candidates_with_any_bullish_observations=sum(
+                            any(item.metrics_for(split, "bullish").observation_count > 0 for split in ("training", "validation"))
+                            for item in group
+                        ),
+                        candidates_with_any_bearish_observations=sum(
+                            any(item.metrics_for(split, "bearish").observation_count > 0 for split in ("training", "validation"))
+                            for item in group
+                        ),
+                        candidates_meeting_training_requirements_only=sum(
+                            train and not validation for train, validation in zip(training_ok, validation_ok)
+                        ),
+                        candidates_meeting_validation_requirements_only=sum(
+                            validation and not train for train, validation in zip(training_ok, validation_ok)
+                        ),
+                        candidates_meeting_both_requirements=sum(
+                            train and validation for train, validation in zip(training_ok, validation_ok)
+                        ),
+                    )
+                )
+
+        raw_fields = {
+            "signal_depth_imbalance": "depth_imbalance",
+            "signal_microprice_edge_bps": "microprice_edge_bps",
+            "signal_rolling_momentum_bps": "rolling_momentum_bps",
+            "signal_spread_bps": "spread_bps",
+        }
+        raw_distributions = {
+            split_name: {
+                output_name: self._distribution(
+                    [
+                        getattr(record, field_name)
+                        for records in split_records[split_name].values()
+                        for record in records
+                    ]
+                )
+                for output_name, field_name in raw_fields.items()
+            }
+            for split_name in SPLIT_NAMES
+        }
+        directional_counts = {
+            split_name: self._component_counts(
+                [record for records in split_records[split_name].values() for record in records]
+            )
+            for split_name in SPLIT_NAMES
+        }
+        per_file = tuple(
+            self._file_coverage(path, records, candidates)
+            for path, records in valid_records_by_file.items()
+        )
+        return SignalThresholdStudyDiagnostics(
+            rejection_reason_counts=counters,
+            candidate_coverage=tuple(coverage),
+            raw_metric_distributions=raw_distributions,
+            directional_component_counts=directional_counts,
+            per_file_coverage=per_file,
+        )
+
+    def _file_coverage(
+        self,
+        path: Path,
+        records: list[_StudyRecord],
+        candidates: tuple[SignalThresholdCandidate, ...],
+    ) -> FileCoverageDiagnostics:
+        bullish_matches: set[int] = set()
+        bearish_matches: set[int] = set()
+        for index, record in enumerate(records):
+            for candidate in candidates:
+                direction = self.classify(
+                    candidate,
+                    spread_bps=record.spread_bps,
+                    depth_imbalance=record.depth_imbalance,
+                    microprice_edge_bps=record.microprice_edge_bps,
+                    rolling_momentum_bps=record.rolling_momentum_bps,
+                )
+                if direction == "bullish":
+                    bullish_matches.add(index)
+                elif direction == "bearish":
+                    bearish_matches.add(index)
+        return FileCoverageDiagnostics(
+            source_file=path,
+            valid_record_count=len(records),
+            candidate_bullish_matches=len(bullish_matches),
+            candidate_bearish_matches=len(bearish_matches),
+            earliest_timestamp=records[0].timestamp if records else None,
+            latest_timestamp=records[-1].timestamp if records else None,
+        )
+
+    def _component_counts(self, records: list[_StudyRecord]) -> DirectionalComponentCounts:
+        positive_imbalance = sum(record.depth_imbalance > 0 for record in records)
+        negative_imbalance = sum(record.depth_imbalance < 0 for record in records)
+        positive_edge = sum(record.microprice_edge_bps > 0 for record in records)
+        negative_edge = sum(record.microprice_edge_bps < 0 for record in records)
+        positive_momentum = sum(record.rolling_momentum_bps > 0 for record in records)
+        negative_momentum = sum(record.rolling_momentum_bps < 0 for record in records)
+        return DirectionalComponentCounts(
+            positive_imbalance=positive_imbalance,
+            negative_imbalance=negative_imbalance,
+            positive_microprice_edge=positive_edge,
+            negative_microprice_edge=negative_edge,
+            positive_momentum=positive_momentum,
+            negative_momentum=negative_momentum,
+            all_three_positive=sum(
+                record.depth_imbalance > 0
+                and record.microprice_edge_bps > 0
+                and record.rolling_momentum_bps > 0
+                for record in records
+            ),
+            all_three_negative=sum(
+                record.depth_imbalance < 0
+                and record.microprice_edge_bps < 0
+                and record.rolling_momentum_bps < 0
+                for record in records
+            ),
+            positive_imbalance_plus_positive_edge=sum(
+                record.depth_imbalance > 0 and record.microprice_edge_bps > 0
+                for record in records
+            ),
+            negative_imbalance_plus_negative_edge=sum(
+                record.depth_imbalance < 0 and record.microprice_edge_bps < 0
+                for record in records
+            ),
+            spread_passing_each_threshold={
+                str(threshold): sum(record.spread_bps <= threshold for record in records)
+                for threshold in self.config.maximum_spread_thresholds_bps
+            },
+        )
+
+    @classmethod
+    def _distribution(cls, values: list[Decimal]) -> MetricDistribution:
+        if not values:
+            return MetricDistribution(None, None, None, None, None, None, None)
+        ordered = sorted(values)
+        return MetricDistribution(
+            minimum=ordered[0],
+            percentile_10=cls._percentile(ordered, Decimal("0.10")),
+            percentile_25=cls._percentile(ordered, Decimal("0.25")),
+            median=cls._percentile(ordered, Decimal("0.50")),
+            percentile_75=cls._percentile(ordered, Decimal("0.75")),
+            percentile_90=cls._percentile(ordered, Decimal("0.90")),
+            maximum=ordered[-1],
+        )
+
+    @staticmethod
+    def _percentile(ordered: list[Decimal], fraction: Decimal) -> Decimal:
+        if len(ordered) == 1:
+            return ordered[0]
+        position = (Decimal(len(ordered) - 1) * fraction)
+        lower = int(position)
+        upper = min(lower + 1, len(ordered) - 1)
+        weight = position - Decimal(lower)
+        return ordered[lower] + (ordered[upper] - ordered[lower]) * weight
 
     def chronological_split(
         self,

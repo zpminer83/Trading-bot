@@ -8,7 +8,9 @@ import pytest
 
 from bot.analytics.signal_threshold_study import (
     CandidateDevelopmentEvaluation,
+    DirectionalComponentCounts,
     DirectionalThresholdMetrics,
+    MetricDistribution,
     SignalThresholdCandidate,
     SignalThresholdStudy,
     SignalThresholdStudyConfig,
@@ -251,6 +253,83 @@ def test_json_export_missing_fields_and_no_trading_mutation(tmp_path, monkeypatc
     assert exported["skipped_record_count"] == 2
     assert isinstance(exported["selected_candidates"], list)
     assert (portfolio.cash_balance, portfolio.base_position, portfolio.total_volume) == before
+
+
+def test_diagnostics_rejection_counts_coverage_and_old_json_compatibility(tmp_path):
+    first = tmp_path / "first.jsonl"
+    second = tmp_path / "second.jsonl"
+    records = [json_record(index, str(100 + index), 1 if index % 2 == 0 else -1) for index in range(10)]
+    # Missing telemetry fields remain valid only when all required signal fields exist.
+    write_jsonl(first, records)
+    write_jsonl(second, records)
+    study = SignalThresholdStudy(
+        config(minimum_training_samples=7, minimum_validation_samples=3)
+    )
+    result = study.analyze_files([first, second])
+    assert result.eligible_candidate_count == result.diagnostics.rejection_reason_counts["eligible_candidate_count"]
+    assert result.diagnostics.rejection_reason_counts["insufficient_training_bullish"] == 2
+    assert result.diagnostics.rejection_reason_counts["insufficient_training_bearish"] == 2
+    assert result.diagnostics.rejection_reason_counts["insufficient_validation_bullish"] == 2
+    assert result.diagnostics.rejection_reason_counts["insufficient_validation_bearish"] == 2
+    assert result.diagnostics.rejection_reason_counts["insufficient_file_coverage"] == 0
+    coverage = result.diagnostics.candidate_coverage[0]
+    assert coverage.maximum_bullish_training_observations == 6
+    assert coverage.maximum_bearish_training_observations == 4
+    assert coverage.maximum_bullish_validation_observations == 2
+    assert coverage.maximum_bearish_validation_observations == 0
+    assert coverage.candidates_meeting_both_requirements == 0
+    assert len(result.diagnostics.per_file_coverage) == 2
+    assert result.diagnostics.per_file_coverage[0].valid_record_count == 10
+    assert result.diagnostics.per_file_coverage[0].candidate_bullish_matches == 10
+    assert result.diagnostics.per_file_coverage[0].candidate_bearish_matches == 10
+
+
+def test_diagnostics_percentiles_and_directional_component_counts():
+    distribution = SignalThresholdStudy._distribution(
+        [Decimal("0"), Decimal("10"), Decimal("20"), Decimal("30"), Decimal("40")]
+    )
+    assert distribution == MetricDistribution(
+        minimum=Decimal("0"),
+        percentile_10=Decimal("4.0"),
+        percentile_25=Decimal("10.0"),
+        median=Decimal("20"),
+        percentile_75=Decimal("30.0"),
+        percentile_90=Decimal("36.0"),
+        maximum=Decimal("40"),
+    )
+    records = [
+        _StudyRecord(Path("sample.jsonl"), START, "SOMI:USDso", Decimal("100"), Decimal("10"), Decimal("1"), Decimal("1"), Decimal("1")),
+        _StudyRecord(Path("sample.jsonl"), START, "SOMI:USDso", Decimal("100"), Decimal("20"), Decimal("-1"), Decimal("-1"), Decimal("-1")),
+        _StudyRecord(Path("sample.jsonl"), START, "SOMI:USDso", Decimal("100"), Decimal("30"), Decimal("1"), Decimal("1"), Decimal("-1")),
+    ]
+    counts = SignalThresholdStudy(config(maximum_spread_thresholds_bps=(10, 20, 30)))._component_counts(records)
+    assert counts.positive_imbalance == 2
+    assert counts.negative_imbalance == 1
+    assert counts.positive_microprice_edge == 2
+    assert counts.negative_microprice_edge == 1
+    assert counts.positive_momentum == 1
+    assert counts.negative_momentum == 2
+    assert counts.all_three_positive == 1
+    assert counts.all_three_negative == 1
+    assert counts.positive_imbalance_plus_positive_edge == 2
+    assert counts.negative_imbalance_plus_negative_edge == 1
+    assert counts.spread_passing_each_threshold == {"10": 1, "20": 2, "30": 3}
+
+
+def test_diagnostics_do_not_expose_test_metrics_for_ineligible_candidates(tmp_path):
+    path = tmp_path / "study.jsonl"
+    write_jsonl(path, [json_record(index, str(100 + index), 1) for index in range(10)])
+    study = SignalThresholdStudy(
+        config(minimum_training_samples=30, minimum_validation_samples=10)
+    )
+    result = study.analyze_files([path])
+    assert result.eligible_candidate_count == 0
+    assert result.selected_candidates == ()
+    assert result.diagnostics is not None
+    assert all(
+        item.candidates_meeting_both_requirements == 0
+        for item in result.diagnostics.candidate_coverage
+    )
 
 
 @pytest.mark.parametrize(
