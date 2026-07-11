@@ -489,6 +489,24 @@ def print_orderbook_signal(result) -> None:
     print("  Note: confidence is an uncalibrated diagnostic score.")
 
 
+def print_orderbook_depth_diagnostics(result) -> None:
+    diagnostic = getattr(result, "orderbook_depth_diagnostics", None)
+    print("Order-book depth diagnostics:")
+    if diagnostic is None:
+        print("  Status                              : not evaluated")
+        return
+    print(f"  Imbalance L1                       : {fmt_decimal(diagnostic.imbalance_l1)}")
+    print(f"  Imbalance L2                       : {fmt_decimal(diagnostic.imbalance_l2)}")
+    print(f"  Imbalance L3                       : {fmt_decimal(diagnostic.imbalance_l3)}")
+    print(f"  Imbalance L5                       : {fmt_decimal(diagnostic.imbalance_l5)}")
+    print(f"  Imbalance L10                      : {fmt_decimal(diagnostic.imbalance_l10)}")
+    print(f"  L1 / L5 bid depth                  : {fmt_decimal(diagnostic.bid_depth_l1)} / {fmt_decimal(diagnostic.bid_depth_l5)}")
+    print(f"  L1 / L5 ask depth                  : {fmt_decimal(diagnostic.ask_depth_l1)} / {fmt_decimal(diagnostic.ask_depth_l5)}")
+    print(f"  L1-edge sign consistent            : {diagnostic.l1_edge_sign_consistent}")
+    print(f"  Bid depth concentration L2-L5      : {fmt_decimal(diagnostic.bid_depth_concentration_l2_to_l5)}")
+    print(f"  Ask depth concentration L2-L5      : {fmt_decimal(diagnostic.ask_depth_concentration_l2_to_l5)}")
+
+
 def print_portfolio_risk(result) -> None:
     decision = getattr(result, "portfolio_risk_decision", None)
 
@@ -767,6 +785,7 @@ def build_record(
     market_freshness = result.market_freshness_decision
     portfolio_risk = getattr(result, "portfolio_risk_decision", None)
     signal = getattr(result, "orderbook_signal", None)
+    depth_diagnostic = getattr(result, "orderbook_depth_diagnostics", None)
     evidence = passive_fill_evidence or []
 
     return PaperRunRecord(
@@ -875,6 +894,18 @@ def build_record(
             signal.rolling_momentum_bps if signal is not None else None
         ),
         signal_confidence=signal.confidence if signal is not None else None,
+        depth_imbalance_l1=(depth_diagnostic.imbalance_l1 if depth_diagnostic is not None else None),
+        depth_imbalance_l2=(depth_diagnostic.imbalance_l2 if depth_diagnostic is not None else None),
+        depth_imbalance_l3=(depth_diagnostic.imbalance_l3 if depth_diagnostic is not None else None),
+        depth_imbalance_l5=(depth_diagnostic.imbalance_l5 if depth_diagnostic is not None else None),
+        depth_imbalance_l10=(depth_diagnostic.imbalance_l10 if depth_diagnostic is not None else None),
+        depth_bid_l1=(depth_diagnostic.bid_depth_l1 if depth_diagnostic is not None else None),
+        depth_ask_l1=(depth_diagnostic.ask_depth_l1 if depth_diagnostic is not None else None),
+        depth_bid_l5=(depth_diagnostic.bid_depth_l5 if depth_diagnostic is not None else None),
+        depth_ask_l5=(depth_diagnostic.ask_depth_l5 if depth_diagnostic is not None else None),
+        l1_edge_sign_consistent=(depth_diagnostic.l1_edge_sign_consistent if depth_diagnostic is not None else None),
+        ask_depth_concentration_l2_to_l5=(depth_diagnostic.ask_depth_concentration_l2_to_l5 if depth_diagnostic is not None else None),
+        bid_depth_concentration_l2_to_l5=(depth_diagnostic.bid_depth_concentration_l2_to_l5 if depth_diagnostic is not None else None),
         intents_count=len(result.intents),
         decisions_count=len(result.decisions),
         fills_count=len(result.fills),
@@ -1038,6 +1069,7 @@ def run_iteration(
     print_market_freshness(result)
     print_market_safety(result)
     print_orderbook_signal(result)
+    print_orderbook_depth_diagnostics(result)
     print_portfolio_risk(result)
     print_passive_fill_evidence(evidence)
     print_confirmed_fill_events(result)

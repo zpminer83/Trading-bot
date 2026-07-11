@@ -32,6 +32,10 @@ from bot.market.orderbook_signal import (
     OrderBookSignalEngine,
     OrderBookSignalSnapshot,
 )
+from bot.market.orderbook_depth_diagnostics import (
+    OrderBookDepthDiagnostics,
+    calculate_orderbook_depth_diagnostics,
+)
 from bot.portfolio.portfolio_manager import PortfolioManager
 from bot.risk.portfolio_risk_guard import (
     PortfolioRiskDecision,
@@ -74,6 +78,7 @@ class ConservativePaperTradingStepResult:
     trade_intent_events: list[TradeIntentEvent] = field(default_factory=list)
     purpose_counts: dict[str, int] = field(default_factory=dict)
     orderbook_signal: OrderBookSignalSnapshot | None = None
+    orderbook_depth_diagnostics: OrderBookDepthDiagnostics | None = None
 
 
 class ConservativePaperTradingEngine:
@@ -184,9 +189,16 @@ class ConservativePaperTradingEngine:
                 market_freshness_decision=freshness_decision,
             )
 
+        orderbook_depth_diagnostics: OrderBookDepthDiagnostics | None = None
+        orderbook = self.market.get_orderbook(self.symbol)
+        if orderbook is not None:
+            orderbook_depth_diagnostics = calculate_orderbook_depth_diagnostics(
+                orderbook,
+                observed_at=timestamp,
+            )
+
         orderbook_signal: OrderBookSignalSnapshot | None = None
         if self.orderbook_signal_engine is not None:
-            orderbook = self.market.get_orderbook(self.symbol)
             if orderbook is not None:
                 orderbook_signal = self.orderbook_signal_engine.evaluate(
                     orderbook,
@@ -210,6 +222,7 @@ class ConservativePaperTradingEngine:
                 market_freshness_decision=freshness_decision,
                 portfolio_risk_decision=portfolio_risk_decision,
                 orderbook_signal=orderbook_signal,
+                orderbook_depth_diagnostics=orderbook_depth_diagnostics,
             )
 
         position_before_fills = self.portfolio.base_position
@@ -260,6 +273,7 @@ class ConservativePaperTradingEngine:
                     ),
                     near_flat_cycle_count=fair_play_status.near_flat_cycle_count,
                     orderbook_signal=orderbook_signal,
+                    orderbook_depth_diagnostics=orderbook_depth_diagnostics,
                 )
 
         intents = self.strategy.generate_orders(
@@ -366,6 +380,7 @@ class ConservativePaperTradingEngine:
             trade_intent_events=trade_intent_events,
             purpose_counts=purpose_counts,
             orderbook_signal=orderbook_signal,
+            orderbook_depth_diagnostics=orderbook_depth_diagnostics,
         )
 
     def _evaluate_market_freshness(

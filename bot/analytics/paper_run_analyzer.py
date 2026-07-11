@@ -83,6 +83,18 @@ class PaperRunSummary:
     average_spread_bps: Decimal | None
     signal_reason_counts: dict[str, int]
 
+    positive_imbalance_l1_count: int
+    negative_imbalance_l1_count: int
+    positive_imbalance_l5_count: int
+    negative_imbalance_l5_count: int
+    l1_positive_l5_negative_count: int
+    l1_negative_l5_positive_count: int
+    sign_consistency_failure_count: int
+    average_imbalance_l1: Decimal | None
+    average_imbalance_l5: Decimal | None
+    average_bid_depth_concentration_l2_to_l5: Decimal | None
+    average_ask_depth_concentration_l2_to_l5: Decimal | None
+
     fills_count: int
     submitted_orders_count: int
 
@@ -494,6 +506,48 @@ class PaperRunAnalyzer:
                     signal_reason_counts.get(reason_text, 0) + 1
                 )
 
+        depth_l1 = [
+            self._to_decimal(record.get("depth_imbalance_l1"))
+            for record in records
+            if record.get("depth_imbalance_l1") is not None
+        ]
+        depth_l5 = [
+            self._to_decimal(record.get("depth_imbalance_l5"))
+            for record in records
+            if record.get("depth_imbalance_l5") is not None
+        ]
+        bid_concentrations = [
+            self._to_decimal(record.get("bid_depth_concentration_l2_to_l5"))
+            for record in records
+            if record.get("bid_depth_concentration_l2_to_l5") is not None
+        ]
+        ask_concentrations = [
+            self._to_decimal(record.get("ask_depth_concentration_l2_to_l5"))
+            for record in records
+            if record.get("ask_depth_concentration_l2_to_l5") is not None
+        ]
+        positive_imbalance_l1_count = sum(value > 0 for value in depth_l1)
+        negative_imbalance_l1_count = sum(value < 0 for value in depth_l1)
+        positive_imbalance_l5_count = sum(value > 0 for value in depth_l5)
+        negative_imbalance_l5_count = sum(value < 0 for value in depth_l5)
+        l1_positive_l5_negative_count = sum(
+            self._to_decimal(record.get("depth_imbalance_l1")) > 0
+            and self._to_decimal(record.get("depth_imbalance_l5")) < 0
+            for record in records
+            if record.get("depth_imbalance_l1") is not None
+            and record.get("depth_imbalance_l5") is not None
+        )
+        l1_negative_l5_positive_count = sum(
+            self._to_decimal(record.get("depth_imbalance_l1")) < 0
+            and self._to_decimal(record.get("depth_imbalance_l5")) > 0
+            for record in records
+            if record.get("depth_imbalance_l1") is not None
+            and record.get("depth_imbalance_l5") is not None
+        )
+        sign_consistency_failure_count = sum(
+            record.get("l1_edge_sign_consistent") is False for record in records
+        )
+
         fills_count = sum(
             self._to_int(record.get("fills_count"))
             for record in records
@@ -621,6 +675,29 @@ class PaperRunAnalyzer:
                 else None
             ),
             signal_reason_counts=signal_reason_counts,
+            positive_imbalance_l1_count=positive_imbalance_l1_count,
+            negative_imbalance_l1_count=negative_imbalance_l1_count,
+            positive_imbalance_l5_count=positive_imbalance_l5_count,
+            negative_imbalance_l5_count=negative_imbalance_l5_count,
+            l1_positive_l5_negative_count=l1_positive_l5_negative_count,
+            l1_negative_l5_positive_count=l1_negative_l5_positive_count,
+            sign_consistency_failure_count=sign_consistency_failure_count,
+            average_imbalance_l1=(
+                sum(depth_l1, Decimal("0")) / Decimal(len(depth_l1))
+                if depth_l1 else None
+            ),
+            average_imbalance_l5=(
+                sum(depth_l5, Decimal("0")) / Decimal(len(depth_l5))
+                if depth_l5 else None
+            ),
+            average_bid_depth_concentration_l2_to_l5=(
+                sum(bid_concentrations, Decimal("0")) / Decimal(len(bid_concentrations))
+                if bid_concentrations else None
+            ),
+            average_ask_depth_concentration_l2_to_l5=(
+                sum(ask_concentrations, Decimal("0")) / Decimal(len(ask_concentrations))
+                if ask_concentrations else None
+            ),
             fills_count=fills_count,
             submitted_orders_count=submitted_orders_count,
             final_cash_balance=self._to_decimal(

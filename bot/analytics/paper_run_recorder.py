@@ -88,6 +88,19 @@ class PaperRunRecord:
     signal_rolling_momentum_bps: Decimal | None = None
     signal_confidence: Decimal | None = None
 
+    depth_imbalance_l1: Decimal | None = None
+    depth_imbalance_l2: Decimal | None = None
+    depth_imbalance_l3: Decimal | None = None
+    depth_imbalance_l5: Decimal | None = None
+    depth_imbalance_l10: Decimal | None = None
+    depth_bid_l1: Decimal | None = None
+    depth_ask_l1: Decimal | None = None
+    depth_bid_l5: Decimal | None = None
+    depth_ask_l5: Decimal | None = None
+    l1_edge_sign_consistent: bool | None = None
+    ask_depth_concentration_l2_to_l5: Decimal | None = None
+    bid_depth_concentration_l2_to_l5: Decimal | None = None
+
     intents_count: int = 0
     decisions_count: int = 0
     fills_count: int = 0
@@ -171,6 +184,22 @@ class PaperRunRecord:
                 "signal_one_step_return_bps": self.signal_one_step_return_bps,
                 "signal_rolling_momentum_bps": self.signal_rolling_momentum_bps,
                 "signal_confidence": self.signal_confidence,
+                "depth_imbalance_l1": self.depth_imbalance_l1,
+                "depth_imbalance_l2": self.depth_imbalance_l2,
+                "depth_imbalance_l3": self.depth_imbalance_l3,
+                "depth_imbalance_l5": self.depth_imbalance_l5,
+                "depth_imbalance_l10": self.depth_imbalance_l10,
+                "depth_bid_l1": self.depth_bid_l1,
+                "depth_ask_l1": self.depth_ask_l1,
+                "depth_bid_l5": self.depth_bid_l5,
+                "depth_ask_l5": self.depth_ask_l5,
+                "l1_edge_sign_consistent": self.l1_edge_sign_consistent,
+                "ask_depth_concentration_l2_to_l5": (
+                    self.ask_depth_concentration_l2_to_l5
+                ),
+                "bid_depth_concentration_l2_to_l5": (
+                    self.bid_depth_concentration_l2_to_l5
+                ),
                 "intents_count": self.intents_count,
                 "decisions_count": self.decisions_count,
                 "fills_count": self.fills_count,

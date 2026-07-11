@@ -243,6 +243,9 @@ def test_engine_can_run_without_competition_tracker():
     result = engine.step(timestamp=utc_dt(2026, 7, 13, 12))
 
     assert len(result.submitted_orders) == 1
+    assert result.orderbook_depth_diagnostics is not None
+    assert result.orderbook_depth_diagnostics.imbalance_l1 == Decimal("0")
+    assert result.orderbook_depth_diagnostics.microprice_edge_bps == Decimal("0")
     assert result.competition_snapshot is None
 
 

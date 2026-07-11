@@ -259,6 +259,22 @@ def print_summary(
     )
 
     print()
+    print("Order-book depth structure:")
+    print(f"  Positive / negative L1 imbalance: {summary.positive_imbalance_l1_count} / {summary.negative_imbalance_l1_count}")
+    print(f"  Positive / negative L5 imbalance: {summary.positive_imbalance_l5_count} / {summary.negative_imbalance_l5_count}")
+    print(f"  Positive L1 with negative L5    : {summary.l1_positive_l5_negative_count}")
+    print(f"  Negative L1 with positive L5    : {summary.l1_negative_l5_positive_count}")
+    print(f"  L1 / microprice sign inconsistencies: {summary.sign_consistency_failure_count}")
+    print(f"  Average L1 imbalance             : {fmt_decimal(summary.average_imbalance_l1)}")
+    print(f"  Average L5 imbalance             : {fmt_decimal(summary.average_imbalance_l5)}")
+    print(f"  Average bid L2-L5 concentration  : {fmt_decimal(summary.average_bid_depth_concentration_l2_to_l5)}")
+    print(f"  Average ask L2-L5 concentration  : {fmt_decimal(summary.average_ask_depth_concentration_l2_to_l5)}")
+    print(
+        "  Note: displayed depth can reflect cancellations or spoof-like "
+        "behavior and is not proof of future trading direction."
+    )
+
+    print()
     print("Trading activity:")
     print(f"  Fills           : {summary.fills_count}")
     print(f"  Orders submitted: {summary.submitted_orders_count}")
