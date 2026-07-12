@@ -18,6 +18,14 @@ REGIMES = (
     "UNKNOWN",
 )
 L5_MAGNITUDE_BUCKETS = ("mild", "medium", "strong")
+INCLUSIVE_SIGN_PAIRS = (
+    "L1_POSITIVE_L5_NEGATIVE",
+    "L1_NEGATIVE_L5_NEGATIVE",
+    "L1_POSITIVE_L5_POSITIVE",
+    "L1_NEGATIVE_L5_POSITIVE",
+    "L1_OR_L5_ZERO",
+    "UNKNOWN",
+)
 
 
 @dataclass(frozen=True)
@@ -27,6 +35,7 @@ class DepthOutcomeObservation:
     future_timestamp: datetime
     horizon_records: int
     regime: str
+    inclusive_sign_pair: str
     l5_magnitude_bucket: str | None
     current_mid_price: Decimal
     future_mid_price: Decimal
@@ -55,6 +64,10 @@ class DepthOutcomeMetrics:
     median_favorable_excursion_bps: Decimal | None
     average_adverse_excursion_bps: Decimal | None
     median_adverse_excursion_bps: Decimal | None
+    zero_return_rate: Decimal
+    nonzero_observation_count: int
+    average_nonzero_forward_return_bps: Decimal | None
+    median_nonzero_forward_return_bps: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -65,6 +78,29 @@ class DepthOutcomeComparison:
 
 
 @dataclass(frozen=True)
+class InclusiveDepthOutcomeComparison:
+    horizon_records: int
+    positive_l1_negative_l5: DepthOutcomeMetrics
+    negative_l1_negative_l5: DepthOutcomeMetrics
+    average_return_difference_bps: Decimal | None
+    median_return_difference_bps: Decimal | None
+    zero_return_rate_difference: Decimal | None
+    positive_return_count_difference: int
+    negative_return_count_difference: int
+    zero_return_count_difference: int
+    average_favorable_excursion_difference_bps: Decimal | None
+    median_favorable_excursion_difference_bps: Decimal | None
+    average_adverse_excursion_difference_bps: Decimal | None
+    median_adverse_excursion_difference_bps: Decimal | None
+
+
+@dataclass(frozen=True)
+class DepthOutcomeFileInclusiveMetrics:
+    source_file: Path
+    metrics: tuple[DepthOutcomeMetrics, ...]
+
+
+@dataclass(frozen=True)
 class DepthOutcomeAnalysis:
     files: tuple[Path, ...]
     raw_record_count: int
@@ -72,10 +108,14 @@ class DepthOutcomeAnalysis:
     skipped_record_count: int
     horizons: tuple[int, ...]
     regime_counts: dict[str, int]
+    inclusive_sign_pair_counts: dict[str, int]
     observations: tuple[DepthOutcomeObservation, ...]
     metrics_by_regime: tuple[DepthOutcomeMetrics, ...]
     l5_magnitude_metrics: tuple[DepthOutcomeMetrics, ...]
     comparisons: tuple[DepthOutcomeComparison, ...]
+    inclusive_sign_pair_metrics: tuple[DepthOutcomeMetrics, ...]
+    inclusive_comparisons: tuple[InclusiveDepthOutcomeComparison, ...]
+    per_file_inclusive_metrics: tuple[DepthOutcomeFileInclusiveMetrics, ...]
 
     def metrics_for(self, regime: str, horizon_records: int) -> DepthOutcomeMetrics:
         for metrics in self.metrics_by_regime:
@@ -94,6 +134,18 @@ class DepthOutcomeAnalysis:
             if comparison.horizon_records == horizon_records:
                 return comparison
         raise KeyError(f"no comparison at horizon {horizon_records}")
+
+    def inclusive_metrics_for(self, pair: str, horizon_records: int) -> DepthOutcomeMetrics:
+        for metrics in self.inclusive_sign_pair_metrics:
+            if metrics.regime == pair and metrics.horizon_records == horizon_records:
+                return metrics
+        raise KeyError(f"no inclusive metrics for {pair} at horizon {horizon_records}")
+
+    def inclusive_comparison_for(self, horizon_records: int) -> InclusiveDepthOutcomeComparison:
+        for comparison in self.inclusive_comparisons:
+            if comparison.horizon_records == horizon_records:
+                return comparison
+        raise KeyError(f"no inclusive comparison at horizon {horizon_records}")
 
     @property
     def regime_horizon_metrics(self) -> dict[tuple[str, int], DepthOutcomeMetrics]:
@@ -143,6 +195,8 @@ class DepthOutcomeAnalyzer:
         skipped_count = 0
         observations: list[DepthOutcomeObservation] = []
         regime_counts = {regime: 0 for regime in REGIMES}
+        inclusive_counts = {pair: 0 for pair in INCLUSIVE_SIGN_PAIRS}
+        per_file_inclusive_metrics: list[DepthOutcomeFileInclusiveMetrics] = []
         for path in files:
             raw_records = self.load_jsonl(path)
             raw_count += len(raw_records)
@@ -155,8 +209,25 @@ class DepthOutcomeAnalyzer:
                     valid_count += 1
                     timeline.append(parsed)
                     regime_counts[classify_regime(record)] += 1
+                    inclusive_counts[classify_inclusive_sign_pair(record)] += 1
             timeline.sort(key=lambda item: item.timestamp)
-            observations.extend(self._build_observations(timeline, validated_horizons))
+            file_observations = self._build_observations(timeline, validated_horizons)
+            observations.extend(file_observations)
+            per_file_inclusive_metrics.append(
+                DepthOutcomeFileInclusiveMetrics(
+                    source_file=path,
+                    metrics=tuple(
+                        self._aggregate(
+                            tuple(file_observations),
+                            pair,
+                            horizon,
+                            by_inclusive_pair=True,
+                        )
+                        for pair in INCLUSIVE_SIGN_PAIRS
+                        for horizon in validated_horizons
+                    ),
+                )
+            )
         observation_tuple = tuple(observations)
         metrics = tuple(
             self._aggregate(observation_tuple, regime, horizon)
@@ -184,6 +255,20 @@ class DepthOutcomeAnalyzer:
             )
             for horizon in validated_horizons
         )
+        inclusive_metrics = tuple(
+            self._aggregate(
+                observation_tuple,
+                pair,
+                horizon,
+                by_inclusive_pair=True,
+            )
+            for pair in INCLUSIVE_SIGN_PAIRS
+            for horizon in validated_horizons
+        )
+        inclusive_comparisons = tuple(
+            self._inclusive_comparison(observation_tuple, horizon)
+            for horizon in validated_horizons
+        )
         return DepthOutcomeAnalysis(
             files=files,
             raw_record_count=raw_count,
@@ -191,10 +276,14 @@ class DepthOutcomeAnalyzer:
             skipped_record_count=skipped_count,
             horizons=validated_horizons,
             regime_counts=regime_counts,
+            inclusive_sign_pair_counts=inclusive_counts,
             observations=observation_tuple,
             metrics_by_regime=metrics,
             l5_magnitude_metrics=bucket_metrics,
             comparisons=comparisons,
+            inclusive_sign_pair_metrics=inclusive_metrics,
+            inclusive_comparisons=inclusive_comparisons,
+            per_file_inclusive_metrics=tuple(per_file_inclusive_metrics),
         )
 
     def load_jsonl(self, path: str | Path) -> list[dict[str, Any]]:
@@ -281,6 +370,10 @@ class DepthOutcomeAnalyzer:
                         future_timestamp=future.timestamp,
                         horizon_records=horizon,
                         regime=regime,
+                        inclusive_sign_pair=classify_inclusive_sign_pair_from_values(
+                            current.l1,
+                            current.l5,
+                        ),
                         l5_magnitude_bucket=bucket,
                         current_mid_price=current.mid_price,
                         future_mid_price=future.mid_price,
@@ -299,15 +392,26 @@ class DepthOutcomeAnalyzer:
         horizon: int,
         *,
         by_bucket: bool = False,
+        by_inclusive_pair: bool = False,
     ) -> DepthOutcomeMetrics:
         selected = [
             item for item in observations
             if item.horizon_records == horizon
-            and ((item.l5_magnitude_bucket if by_bucket else item.regime) == key)
+            and (
+                (
+                    item.inclusive_sign_pair
+                    if by_inclusive_pair
+                    else item.l5_magnitude_bucket
+                    if by_bucket
+                    else item.regime
+                )
+                == key
+            )
         ]
         returns = [item.forward_return_bps for item in selected]
         favorable = [item.maximum_favorable_excursion_bps for item in selected]
         adverse = [item.maximum_adverse_excursion_bps for item in selected]
+        nonzero_returns = [value for value in returns if value != 0]
         return DepthOutcomeMetrics(
             regime=key,
             horizon_records=horizon,
@@ -326,7 +430,71 @@ class DepthOutcomeAnalyzer:
             median_favorable_excursion_bps=self._median(favorable),
             average_adverse_excursion_bps=self._average(adverse),
             median_adverse_excursion_bps=self._median(adverse),
+            zero_return_rate=(
+                Decimal(sum(value == 0 for value in returns)) / Decimal(len(returns))
+                if returns else Decimal("0")
+            ),
+            nonzero_observation_count=len(nonzero_returns),
+            average_nonzero_forward_return_bps=self._average(nonzero_returns),
+            median_nonzero_forward_return_bps=self._median(nonzero_returns),
         )
+
+    def _inclusive_comparison(
+        self,
+        observations: tuple[DepthOutcomeObservation, ...],
+        horizon: int,
+    ) -> InclusiveDepthOutcomeComparison:
+        positive = self._aggregate(
+            observations, "L1_POSITIVE_L5_NEGATIVE", horizon, by_inclusive_pair=True
+        )
+        negative = self._aggregate(
+            observations, "L1_NEGATIVE_L5_NEGATIVE", horizon, by_inclusive_pair=True
+        )
+        return InclusiveDepthOutcomeComparison(
+            horizon_records=horizon,
+            positive_l1_negative_l5=positive,
+            negative_l1_negative_l5=negative,
+            average_return_difference_bps=self._difference(
+                positive.average_forward_return_bps,
+                negative.average_forward_return_bps,
+            ),
+            median_return_difference_bps=self._difference(
+                positive.median_forward_return_bps,
+                negative.median_forward_return_bps,
+            ),
+            zero_return_rate_difference=positive.zero_return_rate - negative.zero_return_rate,
+            positive_return_count_difference=(
+                positive.positive_return_count - negative.positive_return_count
+            ),
+            negative_return_count_difference=(
+                positive.negative_return_count - negative.negative_return_count
+            ),
+            zero_return_count_difference=(
+                positive.zero_return_count - negative.zero_return_count
+            ),
+            average_favorable_excursion_difference_bps=self._difference(
+                positive.average_favorable_excursion_bps,
+                negative.average_favorable_excursion_bps,
+            ),
+            median_favorable_excursion_difference_bps=self._difference(
+                positive.median_favorable_excursion_bps,
+                negative.median_favorable_excursion_bps,
+            ),
+            average_adverse_excursion_difference_bps=self._difference(
+                positive.average_adverse_excursion_bps,
+                negative.average_adverse_excursion_bps,
+            ),
+            median_adverse_excursion_difference_bps=self._difference(
+                positive.median_adverse_excursion_bps,
+                negative.median_adverse_excursion_bps,
+            ),
+        )
+
+    @staticmethod
+    def _difference(left: Decimal | None, right: Decimal | None) -> Decimal | None:
+        if left is None or right is None:
+            return None
+        return left - right
 
     @staticmethod
     def _return_bps(current: Decimal, future: Decimal) -> Decimal:
@@ -404,6 +572,32 @@ def classify_regime(
 
 
 classify_depth_regime = classify_regime
+
+
+def classify_inclusive_sign_pair(record: dict[str, Any]) -> str:
+    return classify_inclusive_sign_pair_from_values(
+        _module_decimal(record.get("depth_imbalance_l1")),
+        _module_decimal(record.get("depth_imbalance_l5")),
+    )
+
+
+def classify_inclusive_sign_pair_from_values(
+    l1: Decimal | None,
+    l5: Decimal | None,
+) -> str:
+    if l1 is None or l5 is None:
+        return "UNKNOWN"
+    if l1 == 0 or l5 == 0:
+        return "L1_OR_L5_ZERO"
+    if l1 > 0 and l5 < 0:
+        return "L1_POSITIVE_L5_NEGATIVE"
+    if l1 < 0 and l5 < 0:
+        return "L1_NEGATIVE_L5_NEGATIVE"
+    if l1 > 0 and l5 > 0:
+        return "L1_POSITIVE_L5_POSITIVE"
+    if l1 < 0 and l5 > 0:
+        return "L1_NEGATIVE_L5_POSITIVE"
+    return "UNKNOWN"
 
 
 def classify_regime_from_values(

@@ -4,9 +4,11 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from bot.analytics.depth_outcome_analyzer import (
+    INCLUSIVE_SIGN_PAIRS,
     REGIMES,
     DepthOutcomeAnalyzer,
     classify_regime,
+    classify_inclusive_sign_pair,
     l5_magnitude_bucket,
 )
 from bot.portfolio.portfolio_manager import PortfolioManager
@@ -42,6 +44,9 @@ def test_regime_classification_and_l5_buckets():
     assert classify_regime(record(0, 100, "0.1", "0.3", l2="0.2", l3="0.1", l10="0.4")) == "SAME_SIGN_POSITIVE"
     assert classify_regime(record(0, 100, "-0.1", "-0.3", l2="-0.2", l3="-0.1", l10="-0.4")) == "SAME_SIGN_NEGATIVE"
     assert classify_regime(record(0, 100, "0", "0")) == "UNKNOWN"
+    assert classify_inclusive_sign_pair(record(0, 100, "0.1", "-0.3", l2="0.2", l3="0.2", l10="0.2")) == "L1_POSITIVE_L5_NEGATIVE"
+    assert classify_inclusive_sign_pair(record(0, 100, "-0.1", "-0.3", l2="0.2", l3="0.2", l10="0.2")) == "L1_NEGATIVE_L5_NEGATIVE"
+    assert classify_inclusive_sign_pair(record(0, 100, "0", "-0.3")) == "L1_OR_L5_ZERO"
     assert l5_magnitude_bucket(Decimal("0.19")) == "mild"
     assert l5_magnitude_bucket(Decimal("0.20")) == "medium"
     assert l5_magnitude_bucket(Decimal("0.399")) == "medium"
@@ -69,6 +74,10 @@ def test_forward_returns_horizons_and_excursions(tmp_path):
     assert horizon1.maximum_forward_return_bps > 0
     assert horizon1.maximum_favorable_excursion_bps > 0
     assert horizon1.maximum_adverse_excursion_bps > 0
+    assert horizon1.zero_return_rate == Decimal("0")
+    assert horizon1.nonzero_observation_count == 4
+    assert horizon1.average_nonzero_forward_return_bps == horizon1.average_forward_return_bps
+    assert horizon1.median_nonzero_forward_return_bps == horizon1.median_forward_return_bps
     assert analysis.metrics_for("L1_POSITIVE_L5_NEGATIVE", 3).observation_count == 2
     assert analysis.observations[0].elapsed_seconds == Decimal("1.0")
 
@@ -114,9 +123,26 @@ def test_regime_counts_comparison_and_old_json_compatibility(tmp_path, monkeypat
     assert analysis.regime_counts["SAME_SIGN_POSITIVE"] == 1
     assert analysis.regime_counts["SAME_SIGN_NEGATIVE"] == 1
     assert analysis.regime_counts["UNKNOWN"] == 1
+    assert analysis.inclusive_sign_pair_counts["L1_NEGATIVE_L5_NEGATIVE"] == 2
+    assert analysis.regime_counts["L1_NEGATIVE_L5_NEGATIVE"] == 1
+    assert analysis.inclusive_metrics_for("L1_NEGATIVE_L5_NEGATIVE", 1).observation_count == 2
+    assert len(analysis.per_file_inclusive_metrics) == 1
+    assert len(analysis.per_file_inclusive_metrics[0].metrics) == len(INCLUSIVE_SIGN_PAIRS)
     comparison = analysis.comparisons[0]
     assert comparison.positive_l1_negative_l5.observation_count == 1
     assert comparison.negative_l1_negative_l5.observation_count == 1
+    inclusive_comparison = analysis.inclusive_comparisons[0]
+    assert inclusive_comparison.negative_l1_negative_l5.observation_count == 2
+    assert inclusive_comparison.average_return_difference_bps is not None
+
+    same_prices = tmp_path / "same.jsonl"
+    write_jsonl(same_prices, [record(index, 100, "0.1", "-0.3") for index in range(4)])
+    same_analysis = DepthOutcomeAnalyzer().analyze_files([same_prices], horizons=(1,))
+    same_metrics = same_analysis.inclusive_metrics_for("L1_POSITIVE_L5_NEGATIVE", 1)
+    assert same_metrics.zero_return_rate == Decimal("1")
+    assert same_metrics.nonzero_observation_count == 0
+    assert same_metrics.average_nonzero_forward_return_bps is None
+    assert same_metrics.median_nonzero_forward_return_bps is None
 
     old = tmp_path / "old.jsonl"
     write_jsonl(old, [{"timestamp": START.isoformat(), "mid_price": "100"}])
