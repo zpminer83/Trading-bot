@@ -34,4 +34,6 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "Authenticated open orders: unavailable" in output
     assert "Authenticated fills: unavailable" in output
     assert "Authenticated pagination complete: NO" in output
+    assert "On-chain fills source: unconfigured" in output
+    assert "On-chain fills authoritative: NO" in output
     assert "authenticated_account_state_unavailable" in output

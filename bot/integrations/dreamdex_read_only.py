@@ -23,6 +23,10 @@ from bot.integrations.dreamdex_auth_models import (
     AuthenticatedReadOnlyTransport,
     UnconfiguredAuthenticatedReadOnlyTransport,
 )
+from bot.integrations.dreamdex_fill_events import (
+    FillEventPage,
+    OrderFilledEventIndexer,
+)
 
 
 def _dec(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -693,6 +697,7 @@ class AccountSnapshot:
     trading_diagnostics: AddressReadOnlyDiagnostics | None = None
     account_address_semantics: str = "unresolved"
     authenticated: AuthenticatedAccountSnapshot = field(default_factory=AuthenticatedAccountSnapshot.unavailable)
+    onchain_fills: FillEventPage = field(default_factory=FillEventPage.unavailable)
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
@@ -727,6 +732,16 @@ class AccountSnapshot:
             "fills_status": self.fills_status,
             "authenticated_account_source": "available" if self.authenticated.available else (self.authenticated.balances_status.reason or "unavailable"),
             "authenticated_pagination_complete": self.authenticated.pagination_complete,
+            "onchain_fills_source": self.onchain_fills.source_status.status,
+            "onchain_fills_reason": self.onchain_fills.source_status.reason,
+            "onchain_fills_error_code": self.onchain_fills.source_status.error_code,
+            "onchain_latest_block": self.onchain_fills.source_status.latest_block,
+            "onchain_confirmed_through_block": self.onchain_fills.source_status.confirmed_through_block,
+            "onchain_decoded_fill_count": self.onchain_fills.source_status.decoded_fill_count,
+            "onchain_duplicate_count": self.onchain_fills.source_status.duplicate_count,
+            "onchain_fills_pagination_complete": self.onchain_fills.pagination_complete,
+            "onchain_fills_reorg_status": self.onchain_fills.source_status.reorg_status,
+            "onchain_fills_account_match_status": self.onchain_fills.source_status.account_match_status,
             "observed_at": self.observed_at.isoformat(),
             "source": self.source,
         }
@@ -742,6 +757,7 @@ class ReadOnlySnapshot:
     recent_trades: tuple[Mapping[str, Any], ...] = ()
     owner_diagnostics: AddressReadOnlyDiagnostics | None = None
     trading_diagnostics: AddressReadOnlyDiagnostics | None = None
+    onchain_fills: FillEventPage = field(default_factory=FillEventPage.unavailable)
 
 
 @dataclass(frozen=True)
@@ -767,7 +783,7 @@ class ReconciliationReport:
 class DreamDexReadOnlyAdapter:
     """Compose confirmed market, vault and RPC sources; never mutates state."""
 
-    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None) -> None:
+    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None, fill_event_indexer: OrderFilledEventIndexer | None = None) -> None:
         if not owner or not str(owner).strip() or not _is_address(owner):
             raise ValueError("owner must be a public address")
         if trading_address is not None and not _is_address(trading_address):
@@ -776,6 +792,7 @@ class DreamDexReadOnlyAdapter:
             raise ValueError("market symbol must be BASE:QUOTE")
         self.owner, self.trading_address, self.symbol, self.clock = str(owner), (str(trading_address) if trading_address else None), symbol, clock or (lambda: datetime.now(timezone.utc))
         self.authenticated_transport = authenticated_transport or UnconfiguredAuthenticatedReadOnlyTransport()
+        self.fill_event_indexer = fill_event_indexer
         self.market_source = MarketReadOnlySource(transport, symbol, self.clock)
         self._transport, self._rpc_transport = transport, rpc_transport
 
@@ -850,6 +867,9 @@ class DreamDexReadOnlyAdapter:
             unavailable = lambda source: rpc_source._error(source, observed, "unavailable")
             rpc = RpcAccountReadOnlySnapshot("", unavailable("rpc_pool_vault"), unavailable("rpc_pool_vault"), unavailable("rpc_erc20_balance"), unavailable("rpc_erc20_balance"), owner_diagnostics.native_gas, observed, self.owner)
         authenticated = self._fetch_authenticated_account()
+        onchain_fills = self.fill_event_indexer.fetch() if self.fill_event_indexer is not None else FillEventPage.unavailable()
+        onchain_account_match = onchain_fills.source_status.account_match_status
+        onchain_authoritative = onchain_fills.source_status.authoritative and onchain_account_match == "matched"
         authenticated_authoritative = authenticated.authoritative_for(self.trading_address, now=self.clock())
         authenticated_balances = {item.asset: item for item in authenticated.balances}
         base_auth = authenticated_balances.get(base_asset)
@@ -861,15 +881,16 @@ class DreamDexReadOnlyAdapter:
         account = AccountSnapshot(
             self.trading_address or self.owner, balances, vault, rpc,
             "confirmed" if authenticated.open_orders_status.available else "source_unavailable",
-            "confirmed" if authenticated.fills_status.available else "source_unavailable",
+            "confirmed" if authenticated.fills_status.available or onchain_authoritative else "source_unavailable",
             self.clock(), owner_address=self.owner, trading_address=self.trading_address,
             trading_address_status="available" if self.trading_address else "unresolved",
             orderbook_status=orderbook_status, vault_address_semantics="unresolved",
             owner_diagnostics=owner_diagnostics, trading_diagnostics=trading_diagnostics,
-            account_address_semantics="resolved" if authenticated_authoritative else "unresolved",
+            account_address_semantics="resolved" if authenticated_authoritative or onchain_authoritative else "unresolved",
             authenticated=authenticated,
+            onchain_fills=onchain_fills,
         )
-        return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics)
+        return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc+onchain_order_filled", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics, onchain_fills)
 
     def fetch_account_snapshot(self) -> AccountSnapshot:
         return self.fetch_snapshot().account
@@ -906,8 +927,17 @@ class DreamDexReadOnlyAdapter:
             mismatches.append("quote_vault_mismatch")
         if account.open_orders_status == "source_unavailable" or not account.authenticated.open_orders_status.available:
             mismatches.append("incomplete_open_orders_source")
-        if account.fills_status == "source_unavailable" or not account.authenticated.fills_status.available:
+        onchain_fills_authoritative = account.onchain_fills.source_status.authoritative and account.onchain_fills.source_status.account_match_status == "matched"
+        if (account.fills_status == "source_unavailable" or not account.authenticated.fills_status.available) and not onchain_fills_authoritative:
             mismatches.append("incomplete_fills_source")
+        if account.onchain_fills.source_status.status == "unavailable" and self.fill_event_indexer is not None:
+            mismatches.append("onchain_fills_unavailable")
+        if account.onchain_fills.source_status.reorg_status == "reorg_detected":
+            mismatches.append("reorg_detected")
+        if account.onchain_fills.source_status.malformed_count:
+            mismatches.append("malformed_onchain_fill_logs")
+        if self.fill_event_indexer is not None and account.account_address_semantics != "resolved" and account.onchain_fills.source_status.account_match_status != "matched":
+            mismatches.append("authoritative_account_address_unresolved")
         if local_cash is not None and exchange_cash is not None and local_cash != exchange_cash: mismatches.append("cash_mismatch")
         if local_inventory is not None and exchange_inventory is not None and local_inventory != exchange_inventory: mismatches.append("inventory_mismatch")
         complete = not mismatches

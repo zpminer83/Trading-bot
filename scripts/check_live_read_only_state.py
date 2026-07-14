@@ -141,6 +141,17 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Authenticated open orders: {authenticated.open_orders_status.status}")
     print(f"Authenticated fills: {authenticated.fills_status.status}")
     print(f"Authenticated pagination complete: {'YES' if authenticated.pagination_complete else 'NO'}")
+    onchain = account.onchain_fills
+    onchain_status = onchain.source_status
+    print(f"On-chain fills source: {onchain_status.status if onchain_status.status != 'unavailable' else 'unavailable'}")
+    print(f"On-chain latest block: {onchain_status.latest_block if onchain_status.latest_block is not None else 'unavailable'}")
+    print(f"On-chain confirmed through block: {onchain_status.confirmed_through_block if onchain_status.confirmed_through_block is not None else 'unavailable'}")
+    print(f"On-chain decoded fills: {onchain_status.decoded_fill_count}")
+    print(f"On-chain duplicate count: {onchain_status.duplicate_count}")
+    print(f"On-chain pagination complete: {'YES' if onchain_status.pagination_complete else 'NO'}")
+    print(f"On-chain reorg status: {onchain_status.reorg_status}")
+    print(f"On-chain account match status: {onchain_status.account_match_status}")
+    print(f"On-chain fills authoritative: {'YES' if onchain_status.authoritative and onchain_status.account_match_status == 'matched' else 'NO'}")
     print(f"Reconciliation complete: {'YES' if report.completed else 'NO'}")
     print(f"Account address semantics: {account.account_address_semantics}")
     print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")
