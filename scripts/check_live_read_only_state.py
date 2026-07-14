@@ -152,6 +152,13 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"On-chain reorg status: {onchain_status.reorg_status}")
     print(f"On-chain account match status: {onchain_status.account_match_status}")
     print(f"On-chain fills authoritative: {'YES' if onchain_status.authoritative and onchain_status.account_match_status == 'matched' else 'NO'}")
+    metadata = account.order_metadata_report
+    metadata_source = "unconfigured" if metadata.reason == "authenticated_transport_unconfigured" else ("available" if metadata.resolved_count else "unavailable")
+    print(f"Order metadata source: {metadata_source}")
+    print(f"Order metadata records resolved: {metadata.resolved_count}")
+    print(f"Order metadata conflicts: {metadata.conflict_count}")
+    print(f"Fill/order correlation status: {metadata.status}")
+    print(f"Account-correlated fills authoritative: {'YES' if metadata.authoritative else 'NO'}")
     print(f"Reconciliation complete: {'YES' if report.completed else 'NO'}")
     print(f"Account address semantics: {account.account_address_semantics}")
     print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")

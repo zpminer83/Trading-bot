@@ -36,4 +36,9 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "Authenticated pagination complete: NO" in output
     assert "On-chain fills source: unconfigured" in output
     assert "On-chain fills authoritative: NO" in output
+    assert "Order metadata source: unconfigured" in output
+    assert "Order metadata records resolved: 0" in output
+    assert "Order metadata conflicts: 0" in output
+    assert "Fill/order correlation status: unavailable" in output
+    assert "Account-correlated fills authoritative: NO" in output
     assert "authenticated_account_state_unavailable" in output

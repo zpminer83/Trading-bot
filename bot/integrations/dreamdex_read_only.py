@@ -7,7 +7,7 @@ unavailable until a confirmed route is provided.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -26,6 +26,10 @@ from bot.integrations.dreamdex_auth_models import (
 from bot.integrations.dreamdex_fill_events import (
     FillEventPage,
     OrderFilledEventIndexer,
+)
+from bot.integrations.dreamdex_order_metadata import (
+    OrderMetadataResolver,
+    OrderMetadataResolverReport,
 )
 
 
@@ -698,6 +702,7 @@ class AccountSnapshot:
     account_address_semantics: str = "unresolved"
     authenticated: AuthenticatedAccountSnapshot = field(default_factory=AuthenticatedAccountSnapshot.unavailable)
     onchain_fills: FillEventPage = field(default_factory=FillEventPage.unavailable)
+    order_metadata_report: OrderMetadataResolverReport = field(default_factory=OrderMetadataResolverReport.unavailable)
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
@@ -742,6 +747,10 @@ class AccountSnapshot:
             "onchain_fills_pagination_complete": self.onchain_fills.pagination_complete,
             "onchain_fills_reorg_status": self.onchain_fills.source_status.reorg_status,
             "onchain_fills_account_match_status": self.onchain_fills.source_status.account_match_status,
+            "order_metadata_status": self.order_metadata_report.status,
+            "order_metadata_resolved_count": self.order_metadata_report.resolved_count,
+            "order_metadata_conflict_count": self.order_metadata_report.conflict_count,
+            "order_metadata_account_match": self.order_metadata_report.account_match,
             "observed_at": self.observed_at.isoformat(),
             "source": self.source,
         }
@@ -783,7 +792,7 @@ class ReconciliationReport:
 class DreamDexReadOnlyAdapter:
     """Compose confirmed market, vault and RPC sources; never mutates state."""
 
-    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None, fill_event_indexer: OrderFilledEventIndexer | None = None) -> None:
+    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None, fill_event_indexer: OrderFilledEventIndexer | None = None, order_metadata_resolver: OrderMetadataResolver | None = None) -> None:
         if not owner or not str(owner).strip() or not _is_address(owner):
             raise ValueError("owner must be a public address")
         if trading_address is not None and not _is_address(trading_address):
@@ -793,6 +802,7 @@ class DreamDexReadOnlyAdapter:
         self.owner, self.trading_address, self.symbol, self.clock = str(owner), (str(trading_address) if trading_address else None), symbol, clock or (lambda: datetime.now(timezone.utc))
         self.authenticated_transport = authenticated_transport or UnconfiguredAuthenticatedReadOnlyTransport()
         self.fill_event_indexer = fill_event_indexer
+        self.order_metadata_resolver = order_metadata_resolver
         self.market_source = MarketReadOnlySource(transport, symbol, self.clock)
         self._transport, self._rpc_transport = transport, rpc_transport
 
@@ -868,6 +878,11 @@ class DreamDexReadOnlyAdapter:
             rpc = RpcAccountReadOnlySnapshot("", unavailable("rpc_pool_vault"), unavailable("rpc_pool_vault"), unavailable("rpc_erc20_balance"), unavailable("rpc_erc20_balance"), owner_diagnostics.native_gas, observed, self.owner)
         authenticated = self._fetch_authenticated_account()
         onchain_fills = self.fill_event_indexer.fetch() if self.fill_event_indexer is not None else FillEventPage.unavailable()
+        order_metadata_report = self.order_metadata_resolver.resolve_fills(onchain_fills.fills) if self.order_metadata_resolver is not None else OrderMetadataResolverReport.unavailable()
+        if self.order_metadata_resolver is not None and order_metadata_report.authoritative:
+            correlated_ids = {item.fill_id for item in order_metadata_report.correlations if item.status == "matched" and item.owner_match is True}
+            updated_fills = tuple(replace(fill, account_match=True) if fill.fill_id in correlated_ids else fill for fill in onchain_fills.fills)
+            onchain_fills = replace(onchain_fills, fills=updated_fills, source_status=replace(onchain_fills.source_status, account_match_status="matched"))
         onchain_account_match = onchain_fills.source_status.account_match_status
         onchain_authoritative = onchain_fills.source_status.authoritative and onchain_account_match == "matched"
         authenticated_authoritative = authenticated.authoritative_for(self.trading_address, now=self.clock())
@@ -889,6 +904,7 @@ class DreamDexReadOnlyAdapter:
             account_address_semantics="resolved" if authenticated_authoritative or onchain_authoritative else "unresolved",
             authenticated=authenticated,
             onchain_fills=onchain_fills,
+            order_metadata_report=order_metadata_report,
         )
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc+onchain_order_filled", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics, onchain_fills)
 
@@ -938,6 +954,8 @@ class DreamDexReadOnlyAdapter:
             mismatches.append("malformed_onchain_fill_logs")
         if self.fill_event_indexer is not None and account.account_address_semantics != "resolved" and account.onchain_fills.source_status.account_match_status != "matched":
             mismatches.append("authoritative_account_address_unresolved")
+        if self.order_metadata_resolver is not None and not account.order_metadata_report.authoritative:
+            mismatches.append(account.order_metadata_report.reason or "order_metadata_unavailable")
         if local_cash is not None and exchange_cash is not None and local_cash != exchange_cash: mismatches.append("cash_mismatch")
         if local_inventory is not None and exchange_inventory is not None and local_inventory != exchange_inventory: mismatches.append("inventory_mismatch")
         complete = not mismatches
