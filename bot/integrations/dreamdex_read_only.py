@@ -33,6 +33,26 @@ def _first(row: Mapping[str, Any], *names: str, default: Any = None) -> Any:
     return default
 
 
+def _parse_int(row: Mapping[str, Any], primary: str, alias: str) -> int | None:
+    value = row.get(primary, row.get(alias))
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"invalid {primary}")
+    if parsed < 0:
+        raise ValueError(f"invalid {primary}")
+    return parsed
+
+
+def _is_address(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    clean = value.lower().removeprefix("0x")
+    return len(clean) == 40 and all(char in "0123456789abcdef" for char in clean)
+
+
 def _rows(payload: Any, *keys: str) -> list[Mapping[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, Mapping)]
@@ -103,7 +123,7 @@ class HttpGetTransport:
 class HttpRpcTransport:
     """JSON-RPC transport allowing only ``eth_call`` and ``eth_getBalance``."""
 
-    ALLOWED_METHODS = frozenset({"eth_call", "eth_getBalance"})
+    ALLOWED_METHODS = frozenset({"eth_call", "eth_getBalance", "eth_chainId", "eth_blockNumber"})
 
     def __init__(self, rpc_url: str, timeout_seconds: float = 10.0) -> None:
         self.rpc_url = rpc_url
@@ -146,14 +166,15 @@ class MarketMetadata:
     quote_asset: str | None
     base_token_address: str | None
     quote_token_address: str | None
-    pool_address: str | None
+    pool_contract: str | None
     price_tick_size: Decimal | None
     quantity_step_size: Decimal | None
     minimum_quantity: Decimal | None
     minimum_notional: Decimal | None
     status: str | None
-    base_decimals: int = 18
-    quote_decimals: int = 18
+    base_decimals: int | None = None
+    quote_decimals: int | None = None
+    stop_registry: str | None = None
     supported_order_types: tuple[str, ...] = ()
     maker_fee: Decimal | None = None
     taker_fee: Decimal | None = None
@@ -163,6 +184,19 @@ class MarketMetadata:
     @property
     def active(self) -> bool:
         return (self.status or "").lower() in {"active", "enabled", "online", "trading"}
+
+    @property
+    def pool_address(self) -> str | None:
+        """Backward-compatible alias for the confirmed ``contract`` field."""
+        return self.pool_contract
+
+    @property
+    def quantity_step(self) -> Decimal | None:
+        return self.quantity_step_size
+
+    @property
+    def lot_size(self) -> Decimal | None:
+        return self.quantity_step_size
 
     def is_fresh(self, *, now: datetime | None = None, max_age_seconds: Decimal = Decimal("30")) -> bool:
         age = max(Decimal("0"), Decimal(str((_utc(now) - self.observed_at).total_seconds())))
@@ -208,24 +242,35 @@ class MarketReadOnlySource:
         types = _first(row, "supportedOrderTypes", "supported_order_types", "orderTypes", default=())
         if isinstance(types, str):
             types = (types,)
+        symbol = self.symbol
+        base_asset, quote_asset = symbol.split(":", 1)
+        base_address = _first(row, "base", "baseTokenAddress", "base_token_address", "baseAddress")
+        quote_address = _first(row, "quote", "quoteTokenAddress", "quote_token_address", "quoteAddress")
+        pool_contract = _first(row, "contract", "poolContract", "pool_contract", "poolAddress", "pool_address")
+        base_decimals = _parse_int(row, "baseDecimals", "base_decimals")
+        quote_decimals = _parse_int(row, "quoteDecimals", "quote_decimals")
+        for name, value in (("pool_contract", pool_contract), ("base_token_address", base_address), ("quote_token_address", quote_address), ("stop_registry", _first(row, "stopRegistry", "stop_registry"))):
+            if value is not None and not _is_address(value):
+                raise ValueError(f"invalid {name} address")
         return MarketMetadata(
             symbol=self.symbol,
-            base_asset=_first(row, "baseToken", "baseAsset", "base_asset", "base"),
-            quote_asset=_first(row, "quoteToken", "quoteAsset", "quote_asset", "quote"),
-            base_token_address=_first(row, "baseTokenAddress", "base_token_address", "baseAddress"),
-            quote_token_address=_first(row, "quoteTokenAddress", "quote_token_address", "quoteAddress"),
-            pool_address=_first(row, "poolAddress", "pool_address", "address"),
-            base_decimals=int(_first(row, "baseDecimals", "base_decimals", default=18)),
-            quote_decimals=int(_first(row, "quoteDecimals", "quote_decimals", default=18)),
+            base_asset=base_asset,
+            quote_asset=quote_asset,
+            base_token_address=base_address,
+            quote_token_address=quote_address,
+            pool_contract=pool_contract,
             price_tick_size=_dec(_first(row, "tickSize", "tick_size", "priceTickSize")),
             quantity_step_size=_dec(_first(row, "quantityStepSize", "quantity_step_size", "lotSize", "stepSize")),
             minimum_quantity=_dec(_first(row, "minimumQuantity", "minQuantity", "min_quantity")),
             minimum_notional=_dec(_first(row, "minimumNotional", "minNotional", "minimum_notional")),
-            status=str(_first(row, "status", "marketStatus", default="unknown")),
+            status=_first(row, "status", "marketStatus"),
             supported_order_types=tuple(str(item) for item in (types or ())),
             maker_fee=_dec(_first(row, "makerFee", "maker_fee", "makerFeeBps")),
             taker_fee=_dec(_first(row, "takerFee", "taker_fee", "takerFeeBps")),
             observed_at=_utc(_first(row, "timestamp", "updatedAt", "updated_at"), self.clock()),
+            base_decimals=base_decimals,
+            quote_decimals=quote_decimals,
+            stop_registry=_first(row, "stopRegistry", "stop_registry"),
         )
 
     def orderbook(self) -> Mapping[str, Any]:
@@ -457,11 +502,22 @@ class DreamDexReadOnlyAdapter:
 
     def fetch_snapshot(self) -> ReadOnlySnapshot:
         market = self.fetch_market()
-        if not market.metadata.base_asset or not market.metadata.quote_asset or not market.metadata.pool_address or not market.metadata.base_token_address or not market.metadata.quote_token_address:
-            raise ValueError("market metadata is incomplete for vault/RPC reconciliation")
-        vault = VaultReadOnlySource(self._transport, self.symbol, market.metadata.base_asset, market.metadata.quote_asset, self.clock).fetch(self.owner)
-        rpc = RpcAccountReadOnlySource(self._rpc_transport, owner=self.owner, pool_address=market.metadata.pool_address, base_token_address=market.metadata.base_token_address, quote_token_address=market.metadata.quote_token_address, base_decimals=market.metadata.base_decimals, quote_decimals=market.metadata.quote_decimals, clock=self.clock).fetch()
-        balances = {market.metadata.base_asset: BalanceSnapshot(market.metadata.base_asset, rpc.base_wallet.value, rpc.base_wallet.value, None, rpc.base_wallet.status), market.metadata.quote_asset: BalanceSnapshot(market.metadata.quote_asset, rpc.quote_wallet.value, rpc.quote_wallet.value, None, rpc.quote_wallet.status)}
+        metadata = market.metadata
+        required = {
+            "pool_contract": metadata.pool_contract,
+            "base_token_address": metadata.base_token_address,
+            "quote_token_address": metadata.quote_token_address,
+            "base_decimals": metadata.base_decimals,
+            "quote_decimals": metadata.quote_decimals,
+        }
+        missing = [name for name, value in required.items() if value is None]
+        if missing:
+            raise ValueError(f"market metadata incomplete: missing {', '.join(missing)}")
+        if metadata.base_decimals is None or metadata.quote_decimals is None:
+            raise ValueError("market metadata incomplete: missing token decimals")
+        vault = VaultReadOnlySource(self._transport, self.symbol, metadata.base_asset or self.symbol.split(":", 1)[0], metadata.quote_asset or self.symbol.split(":", 1)[1], self.clock).fetch(self.owner)
+        rpc = RpcAccountReadOnlySource(self._rpc_transport, owner=self.owner, pool_address=metadata.pool_contract, base_token_address=metadata.base_token_address, quote_token_address=metadata.quote_token_address, base_decimals=metadata.base_decimals, quote_decimals=metadata.quote_decimals, clock=self.clock).fetch()
+        balances = {metadata.base_asset: BalanceSnapshot(metadata.base_asset, rpc.base_wallet.value, rpc.base_wallet.value, None, rpc.base_wallet.status), metadata.quote_asset: BalanceSnapshot(metadata.quote_asset, rpc.quote_wallet.value, rpc.quote_wallet.value, None, rpc.quote_wallet.status)}
         account = AccountSnapshot(self.owner, balances, vault, rpc, "source_unavailable", "source_unavailable", self.clock())
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc", market.orderbook, market.recent_trades)
 
@@ -482,8 +538,8 @@ class DreamDexReadOnlyAdapter:
             mismatches.append("base_vault_mismatch")
         if account.vault_rest.quote.available and account.vault_rpc.quote_vault.available and account.vault_rest.quote.value != account.vault_rpc.quote_vault.value:
             mismatches.append("quote_vault_mismatch")
-        if account.open_orders_status == "source_unavailable": mismatches.append("open_orders_source_unavailable")
-        if account.fills_status == "source_unavailable": mismatches.append("fills_source_unavailable")
+        if account.open_orders_status == "source_unavailable": mismatches.append("incomplete_open_orders_source")
+        if account.fills_status == "source_unavailable": mismatches.append("incomplete_fills_source")
         if local_cash is not None and exchange_cash is not None and local_cash != exchange_cash: mismatches.append("cash_mismatch")
         if local_inventory is not None and exchange_inventory is not None and local_inventory != exchange_inventory: mismatches.append("inventory_mismatch")
         complete = not mismatches

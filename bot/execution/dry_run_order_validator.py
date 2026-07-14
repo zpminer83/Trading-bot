@@ -72,7 +72,9 @@ class DryRunOrderValidator:
         reasons: list[str] = []
         if market.symbol != intent.symbol:
             reasons.append("market_not_found")
-        if not market.active:
+        if market.status is None:
+            reasons.append("market_status_unavailable")
+        elif not market.active:
             reasons.append("market_not_active")
         if market.supported_order_types and intent.order_type not in {item.lower() for item in market.supported_order_types}:
             reasons.append("unsupported_order_type")

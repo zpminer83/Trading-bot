@@ -34,6 +34,16 @@ def test_confirmed_market_vault_and_rpc_sources_match_without_network():
     assert snapshot.market.symbol == "SOMI:USDso"
     assert snapshot.market.pool_address.startswith("0x3333")
     assert snapshot.market.base_token_address.startswith("0x1111")
+    assert snapshot.market.quote_token_address.startswith("0x2222")
+    assert snapshot.market.base_decimals == 18 and snapshot.market.quote_decimals == 18
+    assert snapshot.market.price_tick_size == Decimal("0.0001")
+    assert snapshot.market.quantity_step == Decimal("0.01")
+    assert snapshot.market.minimum_quantity == Decimal("1")
+    assert snapshot.market.stop_registry.startswith("0x4444")
+    assert snapshot.market.minimum_notional is None
+    assert snapshot.market.status is None
+    assert snapshot.market.maker_fee is None
+    assert snapshot.market.supported_order_types == ()
     assert snapshot.account.vault_rest.base.value == Decimal("10")
     assert snapshot.account.vault_rest.quote.value == Decimal("1000")
     assert snapshot.account.vault_rpc.base_vault.value == Decimal("10")
@@ -52,7 +62,7 @@ def test_reconciliation_reports_match_and_blocks_incomplete_account_state():
     report = adapter.reconcile(snapshot, local_cash=Decimal("1000"), local_inventory=Decimal("10"))
     assert not report.completed
     assert report.trading_blocked
-    assert "open_orders_source_unavailable" in report.mismatches
+    assert "incomplete_open_orders_source" in report.mismatches
     complete_account = replace(snapshot.account, open_orders_status="confirmed", fills_status="confirmed")
     complete = adapter.reconcile(replace(snapshot, account=complete_account), local_cash=Decimal("1000"), local_inventory=Decimal("10"))
     assert complete.completed and not complete.trading_blocked

@@ -2,22 +2,15 @@
   "markets": [
     {
       "symbol": "SOMI:USDso",
-      "baseToken": "SOMI",
-      "quoteToken": "USDso",
-      "baseTokenAddress": "0x1111111111111111111111111111111111111111",
-      "quoteTokenAddress": "0x2222222222222222222222222222222222222222",
-      "poolAddress": "0x3333333333333333333333333333333333333333",
+      "base": "0x1111111111111111111111111111111111111111",
+      "quote": "0x2222222222222222222222222222222222222222",
+      "contract": "0x3333333333333333333333333333333333333333",
       "baseDecimals": 18,
       "quoteDecimals": 18,
       "tickSize": "0.0001",
       "quantityStepSize": "0.01",
       "minQuantity": "1",
-      "minimumNotional": "5",
-      "status": "active",
-      "supportedOrderTypes": ["limit", "market"],
-      "makerFee": "0.001",
-      "takerFee": "0.002",
-      "timestamp": "2026-07-14T10:00:00Z"
+      "stopRegistry": "0x4444444444444444444444444444444444444444"
     }
   ],
   "orderbook": {"symbol": "SOMI:USDso", "bids": [], "asks": []},
