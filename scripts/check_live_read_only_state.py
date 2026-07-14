@@ -1,23 +1,14 @@
-"""Safe read-only DreamDEX account check.
-
-This script intentionally has no order mutation methods and no flag that can
-enable real submission.  A fixture may be selected with an environment
-variable for completely offline operation.
-"""
+"""Safe read-only DreamDEX state check (no order or transaction operations)."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import os
 import re
-import sys
-from datetime import datetime, timezone
 
 from bot.execution.dry_run_order_validator import DryRunOrderValidator, DryRunValidationLimits
 from bot.execution.order import OrderIntent
-from bot.integrations.dreamdex_read_only import DreamDexReadOnlyAdapter, FixtureTransport, load_fixture, mask_account_id
-
-
-TRUE_VALUES = {"1", "true", "yes", "on"}
+from bot.integrations.dreamdex_read_only import DreamDexReadOnlyAdapter, FixtureRpcTransport, FixtureTransport, load_fixture, mask_account_id
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -30,55 +21,52 @@ def _decimal_env(name: str, default: Decimal) -> Decimal:
         raise ValueError(f"{name} must be a decimal")
 
 
-def _safe_error(exc: Exception, account_identifier: str | None = None) -> str:
-    message = str(exc)
-    message = re.sub(r"(?i)(private[_ -]?key|seed[_ -]?phrase|api[_ -]?secret|authorization|bearer|signature)\s*[:=]\s*\S+", r"\1=<redacted>", message)
-    if account_identifier:
-        message = message.replace(account_identifier, mask_account_id(account_identifier))
-    return message[:300]
+def _safe_error(exc: Exception, owner: str | None = None) -> str:
+    message = re.sub(r"(?i)(private[_ -]?key|seed[_ -]?phrase|api[_ -]?secret|authorization|bearer|signature)\s*[:=]\s*\S+", r"\1=<redacted>", str(exc))
+    return message.replace(owner, mask_account_id(owner))[:300] if owner else message[:300]
 
 
-def _print_snapshot(snapshot, report, validation) -> None:
-    market = snapshot.market
-    account = snapshot.account
-    quote = market.quote_asset or "USDso"
-    base = market.base_asset or "SOMI"
+def _source(value) -> str:
+    if value is None:
+        return "unavailable"
+    return f"{value.status}: {value.value if value.value is not None else value.reason}"
+
+
+def _print_report(snapshot, report, validation) -> None:
+    market, account = snapshot.market, snapshot.account
+    base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
-    print(f"Market: {market.symbol} ({base}/{quote})")
-    print(f"  Status: {market.status}; tick {market.price_tick_size}; quantity step {market.quantity_step_size}")
-    print(f"  Minimum quantity: {market.minimum_quantity}; minimum notional: {market.minimum_notional}")
-    print(f"  Supported orders: {', '.join(market.supported_order_types) or 'unknown'}")
-    print(f"  Maker/taker fee: {market.maker_fee} / {market.taker_fee}")
-    print(f"Balances (account {mask_account_id(account.account_identifier)}):")
-    for asset in (quote, base):
+    print(f"Owner address: {mask_account_id(account.account_identifier)}")
+    print(f"Market: {market.symbol}")
+    print(f"Pool address: {market.pool_address or '<unavailable>'}")
+    print(f"Base token address: {market.base_token_address or '<unavailable>'}")
+    print(f"Quote token address: {market.quote_token_address or '<unavailable>'}")
+    print(f"Market metadata: {market.status}; tick={market.price_tick_size}; quantity_step={market.quantity_step_size}; min_quantity={market.minimum_quantity}; min_notional={market.minimum_notional}")
+    print("Wallet token balances:")
+    for asset in (base, quote):
         balance = account.balance(asset)
-        print(f"  {asset}: total={balance.total} available={balance.available} locked={balance.locked}")
-    print(f"Open orders: {len(account.open_orders)}")
-    for order in account.open_orders:
-        print(f"  {order.order_id}: {order.side or '?'} {order.quantity} @ {order.price} ({order.status or 'unknown'})")
-    print(f"Recent orders: {len(account.recent_orders)}")
-    print(f"Recent fills: {len(account.recent_fills)}")
-    for fill in account.recent_fills:
-        print(f"  {fill.fill_id}: {fill.side or '?'} {fill.quantity} @ {fill.price}; commission={fill.commission}")
-    print(f"Commissions: {len(account.commissions)}")
-    print("Trading constraints:")
-    print(f"  Reconciliation: {'OK' if report.completed and not report.trading_blocked else 'BLOCKED'} ({report.reason})")
-    print(f"  Cash difference: {report.cash_difference}; inventory difference: {report.inventory_difference}")
-    print("Dry-run validation:")
-    print(f"  Approved: {'YES' if validation.approved else 'NO'}")
-    print(f"  Normalized price/quantity: {validation.normalized_price} / {validation.normalized_quantity}")
-    print(f"  Notional: {validation.notional}")
-    print(f"  Reasons: {', '.join(validation.reasons) or 'none'}")
-    print("Reconciliation status:")
-    print(f"  Completed: {report.completed}; unresolved orders: {len(report.unresolved_orders)}")
+        print(f"  {asset}: total={balance.total} available={balance.available} status={balance.status}")
+    print("Vault balances REST:")
+    print(f"  {base}: {_source(account.vault_rest.base)}")
+    print(f"  {quote}: {_source(account.vault_rest.quote)}")
+    print("Vault balances RPC getWithdrawableBalance:")
+    print(f"  {base}: {_source(account.vault_rpc.base_vault)}")
+    print(f"  {quote}: {_source(account.vault_rpc.quote_vault)}")
+    print(f"Native gas balance (eth_getBalance): {_source(account.vault_rpc.native_gas)}")
+    print(f"Open-orders source status: {account.open_orders_status}")
+    print(f"Fills source status: {account.fills_status}")
+    print(f"Reconciliation complete: {'YES' if report.completed else 'NO'}")
+    print(f"Hypothetical trading blocked reason: {report.reason if report.trading_blocked else ', '.join(validation.reasons) or 'none'}")
+    print(f"Dry-run approved: {'YES' if validation.approved else 'NO'}")
+    print(f"Dry-run reasons: {', '.join(validation.reasons) or 'none'}")
     print("Real submission enabled: NO")
 
 
 def main() -> int:
-    required = ["DREAMDEX_READ_ONLY_ACCOUNT_ID"]
     fixture_path = os.environ.get("DREAMDEX_READ_ONLY_FIXTURE")
+    required = ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
     if not fixture_path:
-        required.append("DREAMDEX_READ_ONLY_BASE_URL")
+        required.extend(("DREAMDEX_READ_ONLY_BASE_URL", "DREAMDEX_READ_ONLY_RPC_URL"))
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         print("READ-ONLY ACCOUNT CHECK")
@@ -86,37 +74,27 @@ def main() -> int:
         print("No network request or order operation was attempted.")
         print("Real submission enabled: NO")
         return 2
+    owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
     try:
-        account_id = os.environ["DREAMDEX_READ_ONLY_ACCOUNT_ID"]
-        market_symbol = os.environ.get("DREAMDEX_READ_ONLY_MARKET", "SOMI:USDso")
+        symbol = os.environ.get("DREAMDEX_READ_ONLY_MARKET", "SOMI:USDso")
         if fixture_path:
             fixture = load_fixture(fixture_path)
-            transport = FixtureTransport(fixture)
-            adapter = DreamDexReadOnlyAdapter(transport=transport, account_identifier=account_id, market_symbol=market_symbol)
+            rest_transport, rpc_transport = FixtureTransport(fixture), FixtureRpcTransport(fixture)
         else:
-            adapter = DreamDexReadOnlyAdapter(base_url=os.environ["DREAMDEX_READ_ONLY_BASE_URL"], account_identifier=account_id, market_symbol=market_symbol)
+            from bot.integrations.dreamdex_read_only import HttpGetTransport, HttpRpcTransport
+            rest_transport, rpc_transport = HttpGetTransport(os.environ["DREAMDEX_READ_ONLY_BASE_URL"]), HttpRpcTransport(os.environ["DREAMDEX_READ_ONLY_RPC_URL"])
+        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, symbol=symbol)
         snapshot = adapter.fetch_snapshot()
-        local_cash = _decimal_env("DREAMDEX_READ_ONLY_LOCAL_CASH", Decimal("0"))
-        local_inventory = _decimal_env("DREAMDEX_READ_ONLY_LOCAL_INVENTORY", Decimal("0"))
-        report = adapter.reconcile(snapshot, local_cash=local_cash, local_inventory=local_inventory)
-        price = _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_PRICE", Decimal("0"))
-        quantity = _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_QUANTITY", Decimal("0"))
-        intent = OrderIntent(market_symbol, os.environ.get("DREAMDEX_READ_ONLY_DRY_RUN_SIDE", "buy"), "limit", price, quantity)
-        market_fresh = snapshot.market.is_fresh(
-            now=datetime.now(timezone.utc),
-            max_age_seconds=_decimal_env("DREAMDEX_READ_ONLY_MAX_MARKET_AGE_SECONDS", Decimal("30")),
-        )
-        validation = DryRunOrderValidator(
-            DryRunValidationLimits(
-                maximum_notional=_decimal_env("DREAMDEX_READ_ONLY_MAX_NOTIONAL", Decimal("100000")),
-                maximum_inventory=_decimal_env("DREAMDEX_READ_ONLY_MAX_INVENTORY", Decimal("100000")),
-            )
-        ).validate(intent, market=snapshot.market, account=snapshot.account, reconciliation=report, market_fresh=market_fresh)
-        _print_snapshot(snapshot, report, validation)
+        local_cash = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_CASH")
+        local_inventory = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_INVENTORY")
+        report = adapter.reconcile(snapshot, local_cash=None if local_cash is None else Decimal(local_cash), local_inventory=None if local_inventory is None else Decimal(local_inventory))
+        intent = OrderIntent(symbol, os.environ.get("DREAMDEX_READ_ONLY_DRY_RUN_SIDE", "buy"), "limit", _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_PRICE", Decimal("0")), _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_QUANTITY", Decimal("0")))
+        validation = DryRunOrderValidator(DryRunValidationLimits(_decimal_env("DREAMDEX_READ_ONLY_MAX_NOTIONAL", Decimal("100000")), _decimal_env("DREAMDEX_READ_ONLY_MAX_INVENTORY", Decimal("100000")))).validate(intent, market=snapshot.market, account=snapshot.account, reconciliation=report, market_fresh=snapshot.market.is_fresh(now=datetime.now(timezone.utc), max_age_seconds=_decimal_env("DREAMDEX_READ_ONLY_MAX_MARKET_AGE_SECONDS", Decimal("30"))))
+        _print_report(snapshot, report, validation)
         return 0
     except Exception as exc:
         print("READ-ONLY ACCOUNT CHECK")
-        print(f"Read-only check failed: {_safe_error(exc, os.environ.get('DREAMDEX_READ_ONLY_ACCOUNT_ID'))}")
+        print(f"Read-only check failed: {_safe_error(exc, owner)}")
         print("No order submission was attempted.")
         print("Real submission enabled: NO")
         return 1

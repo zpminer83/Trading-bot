@@ -86,13 +86,25 @@ class DryRunOrderValidator:
             reasons.append("minimum_notional")
         quote = market.quote_asset or "USDso"
         base = market.base_asset or "SOMI"
-        if intent.side == "buy" and account.balance(quote).available < notional:
+        if getattr(account, "incomplete", False):
+            reasons.append("incomplete_account_state")
+        quote_balance = account.balance(quote)
+        base_balance = account.balance(base)
+        if quote_balance.available is None:
+            reasons.append("quote_balance_unavailable")
+        if base_balance.available is None:
+            reasons.append("base_balance_unavailable")
+        if intent.side == "buy" and quote_balance.available is not None and quote_balance.available < notional:
             reasons.append("insufficient_quote_balance")
-        if intent.side == "sell" and account.balance(base).available < quantity:
+        if intent.side == "sell" and base_balance.available is not None and base_balance.available < quantity:
             reasons.append("insufficient_base_balance")
         if notional > self.limits.maximum_notional:
             reasons.append("maximum_notional")
-        projected_inventory = account.balance(base).total + (quantity if intent.side == "buy" else -quantity)
+        if base_balance.total is None:
+            reasons.append("inventory_unavailable")
+            projected_inventory = quantity if intent.side == "buy" else -quantity
+        else:
+            projected_inventory = base_balance.total + (quantity if intent.side == "buy" else -quantity)
         if projected_inventory < 0:
             reasons.append("negative_inventory")
         if abs(projected_inventory) > self.limits.maximum_inventory:

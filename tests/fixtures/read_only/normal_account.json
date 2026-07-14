@@ -4,6 +4,11 @@
       "symbol": "SOMI:USDso",
       "baseToken": "SOMI",
       "quoteToken": "USDso",
+      "baseTokenAddress": "0x1111111111111111111111111111111111111111",
+      "quoteTokenAddress": "0x2222222222222222222222222222222222222222",
+      "poolAddress": "0x3333333333333333333333333333333333333333",
+      "baseDecimals": 18,
+      "quoteDecimals": 18,
       "tickSize": "0.0001",
       "quantityStepSize": "0.01",
       "minQuantity": "1",
@@ -15,22 +20,9 @@
       "timestamp": "2026-07-14T10:00:00Z"
     }
   ],
-  "account": {
-    "accountIdentifier": "0x1234567890abcdef",
-    "timestamp": "2026-07-14T10:00:00Z",
-    "balances": {
-      "USDso": {"total": "1000", "available": "900", "locked": "100"},
-      "SOMI": {"total": "10", "available": "8", "locked": "2"}
-    },
-    "openOrders": [
-      {"orderId": "order-1", "clientOrderId": "client-1", "symbol": "SOMI:USDso", "side": "buy", "price": "10.0000", "quantity": "1", "remainingQuantity": "1", "status": "open"}
-    ],
-    "recentOrders": [
-      {"orderId": "order-0", "symbol": "SOMI:USDso", "side": "buy", "price": "9.9000", "quantity": "1", "status": "filled"}
-    ],
-    "recentFills": [
-      {"fillId": "fill-0", "orderId": "order-0", "symbol": "SOMI:USDso", "side": "buy", "price": "9.9000", "quantity": "1", "commission": "0.01"}
-    ],
-    "commissions": [{"asset": "USDso", "amount": "0.01"}]
-  }
+  "orderbook": {"symbol": "SOMI:USDso", "bids": [], "asks": []},
+  "trades": [],
+  "vault_rest": {"SOMI": "10", "USDso": "1000"},
+  "rpc": {"base_vault": "0x8ac7230489e80000", "quote_vault": "0x3635c9adc5dea00000", "base_wallet": "0x8ac7230489e80000", "quote_wallet": "0x3635c9adc5dea00000"},
+  "native_gas": "0x8ac7230489e80000"
 }

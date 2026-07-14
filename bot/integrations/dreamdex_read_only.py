@@ -1,8 +1,9 @@
-"""Read-only DreamDEX state adapter.
+"""Confirmed DreamDEX read-only market, vault and RPC sources.
 
-The adapter intentionally exposes only GET-shaped operations.  It accepts an
-injected transport for deterministic tests and fixtures; the optional HTTP
-transport is also GET-only and never accepts credentials or auth headers.
+The REST routes mirror the public Bot Kit client. Account state is not fetched
+from an invented account REST resource: balances come from the documented vault
+route and read-only Somnia RPC calls. Open orders and fills remain explicitly
+unavailable until a confirmed route is provided.
 """
 from __future__ import annotations
 
@@ -13,80 +14,75 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 import json
 import os
+from urllib.parse import quote
 
 
-def _decimal(value: Any, default: Decimal | None = None) -> Decimal | None:
+def _dec(value: Any, default: Decimal | None = None) -> Decimal | None:
     if value is None or value == "":
         return default
     try:
         return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
+    except (InvalidOperation, TypeError, ValueError):
         return default
 
 
-def _first(mapping: Mapping[str, Any], *names: str, default: Any = None) -> Any:
+def _first(row: Mapping[str, Any], *names: str, default: Any = None) -> Any:
     for name in names:
-        if name in mapping and mapping[name] is not None:
-            return mapping[name]
+        if name in row and row[name] is not None:
+            return row[name]
     return default
 
 
-def _list_payload(payload: Any, *keys: str) -> list[Mapping[str, Any]]:
+def _rows(payload: Any, *keys: str) -> list[Mapping[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, Mapping)]
     if isinstance(payload, Mapping):
-        if any(name in payload for name in ("symbol", "market", "orderId", "order_id", "fillId", "tradeId")):
+        if any(key in payload for key in ("symbol", "market", "orderId", "fillId")):
             return [payload]
         for key in keys:
-            value = payload.get(key)
-            if isinstance(value, list):
-                return [item for item in value if isinstance(item, Mapping)]
+            if isinstance(payload.get(key), list):
+                return [item for item in payload[key] if isinstance(item, Mapping)]
         data = payload.get("data")
         if isinstance(data, list):
             return [item for item in data if isinstance(item, Mapping)]
         if isinstance(data, Mapping):
-            return _list_payload(data, *keys)
+            return _rows(data, *keys)
     return []
 
 
-def _timestamp(value: Any, fallback: datetime | None = None) -> datetime:
+def _utc(value: Any = None, fallback: datetime | None = None) -> datetime:
     if isinstance(value, datetime):
         result = value
     elif isinstance(value, (int, float)):
-        number = float(value)
-        if number > 10_000_000_000:
-            number /= 1000
+        number = float(value) / (1000 if value > 10_000_000_000 else 1)
         result = datetime.fromtimestamp(number, tz=timezone.utc)
     elif value:
-        text = str(value).replace("Z", "+00:00")
         try:
-            result = datetime.fromisoformat(text)
+            result = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         except ValueError:
             result = fallback or datetime.now(timezone.utc)
     else:
         result = fallback or datetime.now(timezone.utc)
-    if result.tzinfo is None or result.utcoffset() is None:
-        return result.replace(tzinfo=timezone.utc)
-    return result.astimezone(timezone.utc)
+    return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result.astimezone(timezone.utc)
 
 
 def mask_account_id(value: str | None) -> str:
-    """Mask identifiers for human-facing output; never mask in comparisons."""
     if not value:
         return "<missing>"
     text = str(value)
-    if len(text) <= 8:
-        return "***"
-    return f"{text[:4]}…{text[-4:]}"
+    return "***" if len(text) <= 8 else f"{text[:4]}…{text[-4:]}"
 
 
 class ReadOnlyTransport(Protocol):
-    def get(self, path: str, *, params: Mapping[str, str] | None = None) -> Any:
-        ...
+    def get(self, path: str, *, params: Mapping[str, str] | None = None) -> Any: ...
+
+
+class RpcTransport(Protocol):
+    def call(self, method: str, params: Sequence[Any]) -> Any: ...
 
 
 class HttpGetTransport:
-    """Minimal GET-only transport.  It cannot send auth or mutation methods."""
+    """GET-only REST transport; no auth headers and no mutation methods."""
 
     def __init__(self, base_url: str, timeout_seconds: float = 10.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -94,7 +90,6 @@ class HttpGetTransport:
 
     def get(self, path: str, *, params: Mapping[str, str] | None = None) -> Any:
         import httpx
-
         response = httpx.get(
             f"{self.base_url}/{path.lstrip('/')}",
             params=dict(params or {}),
@@ -105,109 +100,312 @@ class HttpGetTransport:
         return response.json()
 
 
+class HttpRpcTransport:
+    """JSON-RPC transport allowing only ``eth_call`` and ``eth_getBalance``."""
+
+    ALLOWED_METHODS = frozenset({"eth_call", "eth_getBalance"})
+
+    def __init__(self, rpc_url: str, timeout_seconds: float = 10.0) -> None:
+        self.rpc_url = rpc_url
+        self.timeout_seconds = timeout_seconds
+
+    def call(self, method: str, params: Sequence[Any]) -> Any:
+        if method not in self.ALLOWED_METHODS:
+            raise ValueError(f"RPC method is not allowed in read-only mode: {method}")
+        import httpx
+        response = httpx.post(
+            self.rpc_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)},
+            headers={"Accept": "application/json", "Content-Type": "application/json"},
+            timeout=self.timeout_seconds,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if payload.get("error"):
+            raise RuntimeError(str(payload["error"]))
+        return payload.get("result")
+
+
+@dataclass(frozen=True)
+class SourceValue:
+    value: Decimal | None
+    status: str
+    source: str
+    reason: str | None = None
+    observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @property
+    def available(self) -> bool:
+        return self.status == "available" and self.value is not None
+
+
 @dataclass(frozen=True)
 class MarketMetadata:
     symbol: str
     base_asset: str | None
     quote_asset: str | None
+    base_token_address: str | None
+    quote_token_address: str | None
+    pool_address: str | None
     price_tick_size: Decimal | None
     quantity_step_size: Decimal | None
     minimum_quantity: Decimal | None
     minimum_notional: Decimal | None
     status: str | None
+    base_decimals: int = 18
+    quote_decimals: int = 18
     supported_order_types: tuple[str, ...] = ()
     maker_fee: Decimal | None = None
     taker_fee: Decimal | None = None
     observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    source: str = "unknown"
+    source: str = "markets"
 
     @property
     def active(self) -> bool:
-        return (self.status or "active").lower() in {"active", "enabled", "online", "trading"}
+        return (self.status or "").lower() in {"active", "enabled", "online", "trading"}
 
     def is_fresh(self, *, now: datetime | None = None, max_age_seconds: Decimal = Decimal("30")) -> bool:
-        observed = _timestamp(self.observed_at)
-        current = _timestamp(now)
-        age = max(Decimal("0"), Decimal(str((current - observed).total_seconds())))
+        age = max(Decimal("0"), Decimal(str((_utc(now) - self.observed_at).total_seconds())))
         return age <= max_age_seconds
+
+
+@dataclass(frozen=True)
+class MarketReadOnlySnapshot:
+    metadata: MarketMetadata
+    orderbook: Mapping[str, Any] | None
+    recent_trades: tuple[Mapping[str, Any], ...]
+    status: str = "available"
+    reason: str | None = None
+    observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class MarketReadOnlySource:
+    def __init__(self, transport: ReadOnlyTransport | Callable[..., Any], symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None) -> None:
+        if not symbol or ":" not in symbol:
+            raise ValueError("market symbol must be a non-empty BASE:QUOTE identifier")
+        self.transport = transport
+        self.symbol = symbol
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _get(self, path: str, params: Mapping[str, str] | None = None) -> Any:
+        try:
+            return self.transport.get(path, params=params)  # type: ignore[attr-defined]
+        except AttributeError:
+            try:
+                return self.transport(path, params=params)  # type: ignore[misc]
+            except TypeError:
+                return self.transport(path)  # type: ignore[misc]
+        except TypeError:
+            return self.transport.get(path)  # type: ignore[attr-defined]
+
+    def markets(self) -> list[Mapping[str, Any]]:
+        return _rows(self._get("/markets"), "markets", "items")
+
+    def metadata(self) -> MarketMetadata:
+        row = next((item for item in self.markets() if str(_first(item, "symbol", "market", default="")) == self.symbol), None)
+        if row is None:
+            raise ValueError(f"market {self.symbol} was not found")
+        types = _first(row, "supportedOrderTypes", "supported_order_types", "orderTypes", default=())
+        if isinstance(types, str):
+            types = (types,)
+        return MarketMetadata(
+            symbol=self.symbol,
+            base_asset=_first(row, "baseToken", "baseAsset", "base_asset", "base"),
+            quote_asset=_first(row, "quoteToken", "quoteAsset", "quote_asset", "quote"),
+            base_token_address=_first(row, "baseTokenAddress", "base_token_address", "baseAddress"),
+            quote_token_address=_first(row, "quoteTokenAddress", "quote_token_address", "quoteAddress"),
+            pool_address=_first(row, "poolAddress", "pool_address", "address"),
+            base_decimals=int(_first(row, "baseDecimals", "base_decimals", default=18)),
+            quote_decimals=int(_first(row, "quoteDecimals", "quote_decimals", default=18)),
+            price_tick_size=_dec(_first(row, "tickSize", "tick_size", "priceTickSize")),
+            quantity_step_size=_dec(_first(row, "quantityStepSize", "quantity_step_size", "lotSize", "stepSize")),
+            minimum_quantity=_dec(_first(row, "minimumQuantity", "minQuantity", "min_quantity")),
+            minimum_notional=_dec(_first(row, "minimumNotional", "minNotional", "minimum_notional")),
+            status=str(_first(row, "status", "marketStatus", default="unknown")),
+            supported_order_types=tuple(str(item) for item in (types or ())),
+            maker_fee=_dec(_first(row, "makerFee", "maker_fee", "makerFeeBps")),
+            taker_fee=_dec(_first(row, "takerFee", "taker_fee", "takerFeeBps")),
+            observed_at=_utc(_first(row, "timestamp", "updatedAt", "updated_at"), self.clock()),
+        )
+
+    def orderbook(self) -> Mapping[str, Any]:
+        payload = self._get("/orderbooks", {"symbols": self.symbol})
+        rows = _rows(payload, "orderbooks", "data")
+        return rows[0] if rows else (payload[0] if isinstance(payload, list) and payload else payload)
+
+    def recent_trades(self, limit: int = 20) -> tuple[Mapping[str, Any], ...]:
+        payload = self._get(f"/markets/{quote(self.symbol, safe='')}/trades", {"limit": str(limit)})
+        return tuple(_rows(payload, "trades", "data", "items"))
+
+    def snapshot(self, limit: int = 20) -> MarketReadOnlySnapshot:
+        metadata = self.metadata()
+        return MarketReadOnlySnapshot(metadata, self.orderbook(), self.recent_trades(limit), observed_at=self.clock())
+
+    fetch_markets = markets
+    fetch_metadata = metadata
+    fetch_orderbook = orderbook
+    fetch_recent_trades = recent_trades
+    fetch_snapshot = snapshot
+
+
+@dataclass(frozen=True)
+class VaultReadOnlySnapshot:
+    owner: str
+    base: SourceValue
+    quote: SourceValue
+    observed_at: datetime
+
+    @property
+    def available(self) -> bool:
+        return self.base.available and self.quote.available
+
+
+class VaultReadOnlySource:
+    def __init__(self, transport: ReadOnlyTransport | Callable[..., Any], symbol: str, base_asset: str, quote_asset: str, clock: Callable[[], datetime] | None = None) -> None:
+        self.transport, self.symbol = transport, symbol
+        self.base_asset, self.quote_asset = base_asset, quote_asset
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def fetch(self, owner: str) -> VaultReadOnlySnapshot:
+        observed = self.clock()
+        try:
+            path = f"/markets/{quote(self.symbol, safe='')}/vault/balance"
+            try:
+                payload = self.transport.get(path, params={"walletAddress": owner})  # type: ignore[attr-defined]
+            except AttributeError:
+                payload = self.transport(path, params={"walletAddress": owner})  # type: ignore[misc]
+            rows = payload.get("data", payload) if isinstance(payload, Mapping) else payload
+            if not isinstance(rows, Mapping):
+                raise ValueError("vault response is not an object")
+            base = _source_value(rows, self.base_asset, "vault_rest", observed)
+            quote_value = _source_value(rows, self.quote_asset, "vault_rest", observed)
+            return VaultReadOnlySnapshot(owner, base, quote_value, observed)
+        except Exception as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            reason = f"unavailable:{status or type(exc).__name__}"
+            return VaultReadOnlySnapshot(owner, SourceValue(None, "unavailable", "vault_rest", reason, observed), SourceValue(None, "unavailable", "vault_rest", reason, observed), observed)
+
+    fetch_balance = fetch
+
+
+def _source_value(payload: Mapping[str, Any], asset: str, source: str, observed: datetime) -> SourceValue:
+    candidates = [payload.get(asset), payload.get(asset.lower()), payload.get(asset.upper())]
+    balances = payload.get("balances")
+    if isinstance(balances, Mapping):
+        candidates.append(balances.get(asset))
+    elif isinstance(balances, list):
+        candidates.extend(
+            _first(row, "total", "available", "balance", "amount", "vaultBalance")
+            for row in balances
+            if isinstance(row, Mapping) and str(_first(row, "asset", "token", "symbol", default="")) == asset
+        )
+    data = payload.get("data")
+    if isinstance(data, list):
+        candidates.extend(
+            _first(row, "total", "available", "balance", "amount", "vaultBalance")
+            for row in data
+            if isinstance(row, Mapping) and str(_first(row, "asset", "token", "symbol", default="")) == asset
+        )
+    value: Any = next((item for item in candidates if item is not None), None)
+    if isinstance(value, Mapping):
+        value = _first(value, "total", "available", "balance", "amount", "vaultBalance")
+    if value is None and str(_first(payload, "asset", "token", default="")) == asset:
+        value = _first(payload, "total", "available", "balance", "amount")
+    parsed = _dec(value)
+    return SourceValue(parsed, "available" if parsed is not None else "unavailable", source, None if parsed is not None else "asset_missing", observed)
+
+
+@dataclass(frozen=True)
+class RpcAccountReadOnlySnapshot:
+    owner: str
+    base_vault: SourceValue
+    quote_vault: SourceValue
+    base_wallet: SourceValue
+    quote_wallet: SourceValue
+    native_gas: SourceValue
+    observed_at: datetime
+
+
+class RpcAccountReadOnlySource:
+    def __init__(self, transport: RpcTransport | Callable[..., Any], *, owner: str, pool_address: str, base_token_address: str, quote_token_address: str, base_decimals: int = 18, quote_decimals: int = 18, clock: Callable[[], datetime] | None = None) -> None:
+        self.transport, self.owner = transport, owner
+        self.pool_address, self.base_token_address, self.quote_token_address = pool_address, base_token_address, quote_token_address
+        self.base_decimals, self.quote_decimals = base_decimals, quote_decimals
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def _call(self, method: str, params: Sequence[Any]) -> Any:
+        if hasattr(self.transport, "call"):
+            return self.transport.call(method, params)  # type: ignore[attr-defined]
+        return self.transport(method, params)  # type: ignore[misc]
+
+    @staticmethod
+    def _address_word(address: str) -> str:
+        clean = address.lower().removeprefix("0x")
+        if len(clean) != 40 or any(char not in "0123456789abcdef" for char in clean):
+            raise ValueError("invalid public address")
+        return clean.rjust(64, "0")
+
+    @classmethod
+    def _calldata(cls, signature: str, address: str, second: str | None = None) -> str:
+        from eth_utils import keccak
+        selector = keccak(text=signature)[:4].hex()
+        data = selector + cls._address_word(address)
+        if second is not None:
+            data += cls._address_word(second)
+        return "0x" + data
+
+    def _view(self, method: str, params: Sequence[Any], source: str, observed: datetime, decimals: int = 0) -> SourceValue:
+        try:
+            result = self._call(method, params)
+            raw = int(str(result), 16) if isinstance(result, str) and result.startswith("0x") else result
+            parsed = _dec(raw)
+            if parsed is not None and decimals:
+                parsed = parsed / (Decimal(10) ** decimals)
+            return SourceValue(parsed, "available" if parsed is not None else "unavailable", source, None if parsed is not None else "invalid_result", observed)
+        except Exception as exc:
+            return SourceValue(None, "unavailable", source, f"{type(exc).__name__}", observed)
+
+    def fetch(self) -> RpcAccountReadOnlySnapshot:
+        observed = self.clock()
+        base_vault = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", self.owner, self.base_token_address)}, "latest"], "rpc_pool_vault", observed, self.base_decimals)
+        quote_vault = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", self.owner, self.quote_token_address)}, "latest"], "rpc_pool_vault", observed, self.quote_decimals)
+        base_wallet = self._view("eth_call", [{"to": self.base_token_address, "data": self._calldata("balanceOf(address)", self.owner)}, "latest"], "rpc_erc20_balance", observed, self.base_decimals)
+        quote_wallet = self._view("eth_call", [{"to": self.quote_token_address, "data": self._calldata("balanceOf(address)", self.owner)}, "latest"], "rpc_erc20_balance", observed, self.quote_decimals)
+        native_gas = self._view("eth_getBalance", [self.owner, "latest"], "rpc_native_balance", observed)
+        return RpcAccountReadOnlySnapshot(self.owner, base_vault, quote_vault, base_wallet, quote_wallet, native_gas, observed)
+
+    fetch_snapshot = fetch
 
 
 @dataclass(frozen=True)
 class BalanceSnapshot:
     asset: str
-    total: Decimal
-    available: Decimal
-    locked: Decimal
-
-
-@dataclass(frozen=True)
-class OpenOrderSnapshot:
-    order_id: str
-    client_order_id: str | None
-    symbol: str
-    side: str | None
-    price: Decimal | None
-    quantity: Decimal | None
-    remaining_quantity: Decimal | None
-    status: str | None
-    observed_at: datetime
-
-
-@dataclass(frozen=True)
-class RecentOrderSnapshot:
-    order_id: str
-    symbol: str
-    status: str | None
-    side: str | None
-    price: Decimal | None
-    quantity: Decimal | None
-    observed_at: datetime
-
-
-@dataclass(frozen=True)
-class FillSnapshot:
-    fill_id: str
-    order_id: str | None
-    symbol: str
-    side: str | None
-    price: Decimal | None
-    quantity: Decimal | None
-    notional: Decimal | None
-    commission: Decimal | None
-    observed_at: datetime
+    total: Decimal | None
+    available: Decimal | None
+    locked: Decimal | None
+    status: str = "available"
 
 
 @dataclass(frozen=True)
 class AccountSnapshot:
     account_identifier: str
     balances: Mapping[str, BalanceSnapshot]
-    open_orders: tuple[OpenOrderSnapshot, ...]
-    recent_orders: tuple[RecentOrderSnapshot, ...]
-    recent_fills: tuple[FillSnapshot, ...]
-    commissions: tuple[Mapping[str, Any], ...]
-    observed_at: datetime
-    source: str
+    vault_rest: VaultReadOnlySnapshot
+    vault_rpc: RpcAccountReadOnlySnapshot
+    open_orders_status: str = "source_unavailable"
+    fills_status: str = "source_unavailable"
+    observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    source: str = "read-only"
 
     def balance(self, asset: str) -> BalanceSnapshot:
-        return self.balances.get(
-            asset,
-            BalanceSnapshot(asset=asset, total=Decimal("0"), available=Decimal("0"), locked=Decimal("0")),
-        )
+        return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
+
+    @property
+    def incomplete(self) -> bool:
+        return not all((self.vault_rest.available, self.vault_rpc.base_vault.available, self.vault_rpc.quote_vault.available, self.vault_rpc.base_wallet.available, self.vault_rpc.quote_wallet.available, self.vault_rpc.native_gas.available, self.open_orders_status != "source_unavailable", self.fills_status != "source_unavailable"))
 
     def safe_dict(self) -> dict[str, Any]:
-        return {
-            "account_identifier": mask_account_id(self.account_identifier),
-            "balances": {
-                asset: {"total": str(value.total), "available": str(value.available), "locked": str(value.locked)}
-                for asset, value in self.balances.items()
-            },
-            "open_orders": len(self.open_orders),
-            "recent_orders": len(self.recent_orders),
-            "recent_fills": len(self.recent_fills),
-            "commissions": len(self.commissions),
-            "observed_at": self.observed_at.isoformat(),
-            "source": self.source,
-        }
+        return {"account_identifier": mask_account_id(self.account_identifier), "balances": {key: {"total": str(value.total), "available": str(value.available), "locked": str(value.locked), "status": value.status} for key, value in self.balances.items()}, "open_orders_status": self.open_orders_status, "fills_status": self.fills_status, "observed_at": self.observed_at.isoformat(), "source": self.source}
 
 
 @dataclass(frozen=True)
@@ -216,6 +414,8 @@ class ReadOnlySnapshot:
     account: AccountSnapshot
     observed_at: datetime
     source: str
+    orderbook: Mapping[str, Any] | None = None
+    recent_trades: tuple[Mapping[str, Any], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -223,242 +423,117 @@ class ReconciliationReport:
     completed: bool
     trading_blocked: bool
     reason: str
-    local_cash: Decimal
-    exchange_cash: Decimal
-    cash_difference: Decimal
-    local_inventory: Decimal
-    exchange_inventory: Decimal
-    inventory_difference: Decimal
-    local_open_order_ids: tuple[str, ...]
-    exchange_open_order_ids: tuple[str, ...]
-    local_fill_ids: tuple[str, ...]
-    exchange_fill_ids: tuple[str, ...]
+    local_cash: Decimal | None
+    exchange_cash: Decimal | None
+    cash_difference: Decimal | None
+    local_inventory: Decimal | None
+    exchange_inventory: Decimal | None
+    inventory_difference: Decimal | None
+    vault_rest_base: SourceValue
+    vault_rpc_base: SourceValue
+    vault_rest_quote: SourceValue
+    vault_rpc_quote: SourceValue
     mismatches: tuple[str, ...]
     observed_at: datetime
     unresolved_orders: tuple[str, ...] = ()
 
 
 class DreamDexReadOnlyAdapter:
-    """Fetch and normalize public market plus account read snapshots."""
+    """Compose confirmed market, vault and RPC sources; never mutates state."""
 
-    def __init__(
-        self,
-        *,
-        transport: ReadOnlyTransport | Callable[..., Any] | None = None,
-        client: ReadOnlyTransport | Callable[..., Any] | None = None,
-        base_url: str | None = None,
-        account_identifier: str | None = None,
-        account_id: str | None = None,
-        wallet_address: str | None = None,
-        market_symbol: str = "SOMI:USDso",
-        source: str = "dreamdex-read-only",
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
-        account_identifier = account_identifier or account_id or wallet_address
-        if not account_identifier or not str(account_identifier).strip():
-            raise ValueError("account_identifier is required")
-        self.account_identifier = str(account_identifier)
-        self.market_symbol = market_symbol
-        self.source = source
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
-        self._transport = transport or client or HttpGetTransport(base_url or os.environ.get("DREAMDEX_READ_ONLY_BASE_URL", ""))
-        if isinstance(self._transport, HttpGetTransport) and not self._transport.base_url:
-            raise ValueError("base_url is required for the HTTP read-only transport")
+    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None) -> None:
+        if not owner or not str(owner).strip():
+            raise ValueError("owner is required")
+        if not symbol or ":" not in symbol:
+            raise ValueError("market symbol must be BASE:QUOTE")
+        self.owner, self.symbol, self.clock = str(owner), symbol, clock or (lambda: datetime.now(timezone.utc))
+        self.market_source = MarketReadOnlySource(transport, symbol, self.clock)
+        self._transport, self._rpc_transport = transport, rpc_transport
 
-    def _get(self, path: str, *, params: Mapping[str, str] | None = None) -> Any:
-        transport = self._transport
-        if hasattr(transport, "get"):
-            try:
-                return transport.get(path, params=params)
-            except TypeError:
-                return transport.get(path)
-        try:
-            return transport(path, params=params)
-        except TypeError:
-            return transport(path)
+    def fetch_market(self) -> MarketReadOnlySnapshot:
+        return self.market_source.snapshot()
 
-    def fetch_market_metadata(self) -> MarketMetadata:
-        payload = self._get("/markets")
-        rows = _list_payload(payload, "markets", "items")
-        row = next((item for item in rows if str(_first(item, "symbol", "market", default="")) == self.market_symbol), None)
-        if row is None:
-            raise ValueError(f"market {self.market_symbol} was not found")
-        types = _first(row, "supportedOrderTypes", "supported_order_types", "orderTypes", default=())
-        if isinstance(types, str):
-            types = (types,)
-        return MarketMetadata(
-            symbol=str(_first(row, "symbol", "market", default=self.market_symbol)),
-            base_asset=_first(row, "baseToken", "base_asset", "base", "baseAsset"),
-            quote_asset=_first(row, "quoteToken", "quote_asset", "quote", "quoteAsset"),
-            price_tick_size=_decimal(_first(row, "tickSize", "tick_size", "priceTickSize")),
-            quantity_step_size=_decimal(_first(row, "quantityStepSize", "quantity_step_size", "lotSize", "lot_size", "stepSize")),
-            minimum_quantity=_decimal(_first(row, "minimumQuantity", "minQuantity", "min_quantity")),
-            minimum_notional=_decimal(_first(row, "minimumNotional", "minNotional", "minimum_notional")),
-            status=str(_first(row, "status", "marketStatus", default="unknown")),
-            supported_order_types=tuple(str(item) for item in (types or ())),
-            maker_fee=_decimal(_first(row, "makerFee", "maker_fee", "makerFeeBps")),
-            taker_fee=_decimal(_first(row, "takerFee", "taker_fee", "takerFeeBps")),
-            observed_at=_timestamp(_first(row, "timestamp", "updatedAt", "updated_at"), self._clock()),
-            source=self.source,
-        )
-
-    def fetch_account_snapshot(self) -> AccountSnapshot:
-        account = self._get(f"/accounts/{self.account_identifier}")
-        if not isinstance(account, Mapping):
-            account = {}
-        if isinstance(account.get("data"), Mapping):
-            account = account["data"]
-        # Some deployments expose the read-only resources separately.  These
-        # are optional fallbacks; no mutation endpoint is ever attempted.
-        def optional(path: str, current: Any, *keys: str) -> Any:
-            if current not in (None, {}, []):
-                return current
-            try:
-                return self._get(path)
-            except Exception:
-                return current
-
-        balances_value = account.get("balances", account.get("assets", {}))
-        balances_value = optional(f"/accounts/{self.account_identifier}/balances", balances_value, "balances", "assets")
-        open_orders_value = account.get("openOrders", account.get("open_orders", []))
-        open_orders_value = optional(f"/accounts/{self.account_identifier}/orders/open", open_orders_value, "orders", "openOrders")
-        recent_orders_value = account.get("recentOrders", account.get("recent_orders", []))
-        recent_orders_value = optional(f"/accounts/{self.account_identifier}/orders", recent_orders_value, "orders", "recentOrders")
-        fills_value = account.get("recentFills", account.get("recent_fills", account.get("fills", [])))
-        fills_value = optional(f"/accounts/{self.account_identifier}/fills", fills_value, "fills", "trades")
-        commissions_value = account.get("commissions", [])
-        commissions_value = optional(f"/accounts/{self.account_identifier}/commissions", commissions_value, "commissions")
-        balances_raw = account.get("balances", account.get("assets", {}))
-        balances_raw = balances_value
-        balances: dict[str, BalanceSnapshot] = {}
-        if isinstance(balances_raw, Mapping):
-            balance_rows = [dict(value, asset=key) if isinstance(value, Mapping) else {"asset": key, "total": value} for key, value in balances_raw.items()]
-        else:
-            balance_rows = _list_payload(balances_raw, "balances", "assets")
-        for row in balance_rows:
-            asset = str(_first(row, "asset", "symbol", "currency", default=""))
-            if not asset:
-                continue
-            total = _decimal(_first(row, "total", "balance", default="0"), Decimal("0")) or Decimal("0")
-            available = _decimal(_first(row, "available", "free", default=total), total) or total
-            locked = _decimal(_first(row, "locked", "hold", default=total - available), total - available) or (total - available)
-            balances[asset] = BalanceSnapshot(asset, total, available, locked)
-        observed = _timestamp(_first(account, "timestamp", "updatedAt", "updated_at"), self._clock())
-        return AccountSnapshot(
-            account_identifier=str(_first(account, "accountIdentifier", "account_id", "wallet", "address", default=self.account_identifier)),
-            balances=balances,
-            open_orders=tuple(self._parse_open_order(row, observed) for row in _list_payload(open_orders_value, "orders", "openOrders")),
-            recent_orders=tuple(self._parse_recent_order(row, observed) for row in _list_payload(recent_orders_value, "orders", "recentOrders")),
-            recent_fills=tuple(self._parse_fill(row, observed) for row in _list_payload(fills_value, "fills", "trades")),
-            commissions=tuple(row for row in _list_payload(commissions_value, "commissions")),
-            observed_at=observed,
-            source=self.source,
-        )
+    fetch_market_metadata = lambda self: self.market_source.metadata()
 
     def fetch_snapshot(self) -> ReadOnlySnapshot:
-        observed = _timestamp(None, self._clock())
-        market = self.fetch_market_metadata()
-        account = self.fetch_account_snapshot()
-        return ReadOnlySnapshot(market=market, account=account, observed_at=observed, source=self.source)
+        market = self.fetch_market()
+        if not market.metadata.base_asset or not market.metadata.quote_asset or not market.metadata.pool_address or not market.metadata.base_token_address or not market.metadata.quote_token_address:
+            raise ValueError("market metadata is incomplete for vault/RPC reconciliation")
+        vault = VaultReadOnlySource(self._transport, self.symbol, market.metadata.base_asset, market.metadata.quote_asset, self.clock).fetch(self.owner)
+        rpc = RpcAccountReadOnlySource(self._rpc_transport, owner=self.owner, pool_address=market.metadata.pool_address, base_token_address=market.metadata.base_token_address, quote_token_address=market.metadata.quote_token_address, base_decimals=market.metadata.base_decimals, quote_decimals=market.metadata.quote_decimals, clock=self.clock).fetch()
+        balances = {market.metadata.base_asset: BalanceSnapshot(market.metadata.base_asset, rpc.base_wallet.value, rpc.base_wallet.value, None, rpc.base_wallet.status), market.metadata.quote_asset: BalanceSnapshot(market.metadata.quote_asset, rpc.quote_wallet.value, rpc.quote_wallet.value, None, rpc.quote_wallet.status)}
+        account = AccountSnapshot(self.owner, balances, vault, rpc, "source_unavailable", "source_unavailable", self.clock())
+        return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc", market.orderbook, market.recent_trades)
 
-    def reconcile(
-        self,
-        snapshot: ReadOnlySnapshot,
-        *,
-        local_cash: Decimal = Decimal("0"),
-        local_inventory: Decimal = Decimal("0"),
-        local_open_order_ids: Sequence[str] = (),
-        local_fill_ids: Sequence[str] = (),
-    ) -> ReconciliationReport:
-        quote = snapshot.market.quote_asset or "USDso"
-        base = snapshot.market.base_asset or "SOMI"
-        exchange_cash = snapshot.account.balance(quote).total
-        exchange_inventory = snapshot.account.balance(base).total
-        exchange_orders = tuple(order.order_id for order in snapshot.account.open_orders)
-        exchange_fills = tuple(fill.fill_id for fill in snapshot.account.recent_fills)
+    def fetch_account_snapshot(self) -> AccountSnapshot:
+        return self.fetch_snapshot().account
+
+    def reconcile(self, snapshot: ReadOnlySnapshot, *, local_cash: Decimal | None = None, local_inventory: Decimal | None = None) -> ReconciliationReport:
+        account = snapshot.account
+        quote, base = snapshot.market.quote_asset or "USDso", snapshot.market.base_asset or "SOMI"
+        exchange_cash = account.vault_rpc.quote_vault.value if account.vault_rpc.quote_vault.available else None
+        exchange_inventory = account.vault_rpc.base_vault.value if account.vault_rpc.base_vault.available else None
         mismatches: list[str] = []
-        if Decimal(str(local_cash)) != exchange_cash:
-            mismatches.append("cash_mismatch")
-        if Decimal(str(local_inventory)) != exchange_inventory:
-            mismatches.append("inventory_mismatch")
-        if set(local_open_order_ids) != set(exchange_orders):
-            mismatches.append("open_orders_mismatch")
-        if set(local_fill_ids) != set(exchange_fills):
-            mismatches.append("fills_mismatch")
-        return ReconciliationReport(
-            completed=True,
-            trading_blocked=bool(mismatches),
-            reason=";".join(mismatches) if mismatches else "reconciled",
-            local_cash=Decimal(str(local_cash)), exchange_cash=exchange_cash,
-            cash_difference=exchange_cash - Decimal(str(local_cash)),
-            local_inventory=Decimal(str(local_inventory)), exchange_inventory=exchange_inventory,
-            inventory_difference=exchange_inventory - Decimal(str(local_inventory)),
-            local_open_order_ids=tuple(str(item) for item in local_open_order_ids),
-            exchange_open_order_ids=exchange_orders,
-            local_fill_ids=tuple(str(item) for item in local_fill_ids), exchange_fill_ids=exchange_fills,
-            mismatches=tuple(mismatches), observed_at=snapshot.observed_at,
-            unresolved_orders=tuple(sorted(set(local_open_order_ids) ^ set(exchange_orders))) if "open_orders_mismatch" in mismatches else (),
-        )
-
-    @staticmethod
-    def _parse_open_order(row: Mapping[str, Any], observed: datetime) -> OpenOrderSnapshot:
-        return OpenOrderSnapshot(
-            order_id=str(_first(row, "orderId", "order_id", "id", default="")),
-            client_order_id=_first(row, "clientOrderId", "client_order_id"),
-            symbol=str(_first(row, "symbol", "market", default="")), side=_first(row, "side"),
-            price=_decimal(_first(row, "price", "limitPrice")), quantity=_decimal(_first(row, "quantity", "size")),
-            remaining_quantity=_decimal(_first(row, "remainingQuantity", "remaining_quantity", "remaining")),
-            status=_first(row, "status", "state"), observed_at=_timestamp(_first(row, "timestamp", "updatedAt"), observed),
-        )
-
-    @staticmethod
-    def _parse_recent_order(row: Mapping[str, Any], observed: datetime) -> RecentOrderSnapshot:
-        return RecentOrderSnapshot(
-            order_id=str(_first(row, "orderId", "order_id", "id", default="")), symbol=str(_first(row, "symbol", "market", default="")),
-            status=_first(row, "status", "state"), side=_first(row, "side"), price=_decimal(_first(row, "price")), quantity=_decimal(_first(row, "quantity", "size")), observed_at=_timestamp(_first(row, "timestamp", "updatedAt"), observed),
-        )
-
-    @staticmethod
-    def _parse_fill(row: Mapping[str, Any], observed: datetime) -> FillSnapshot:
-        price = _decimal(_first(row, "price", "fillPrice")); quantity = _decimal(_first(row, "quantity", "size", "filledQuantity"))
-        notional = _decimal(_first(row, "notional", "quoteQuantity"), price * quantity if price is not None and quantity is not None else None)
-        return FillSnapshot(
-            fill_id=str(_first(row, "fillId", "tradeId", "fill_id", "id", default="")), order_id=_first(row, "orderId", "order_id"), symbol=str(_first(row, "symbol", "market", default="")), side=_first(row, "side"), price=price, quantity=quantity, notional=notional, commission=_decimal(_first(row, "commission", "fee")), observed_at=_timestamp(_first(row, "timestamp", "createdAt"), observed),
-        )
+        if account.incomplete:
+            mismatches.append("incomplete_account_state")
+        if not account.vault_rest.available or not account.vault_rpc.base_vault.available or not account.vault_rpc.quote_vault.available:
+            mismatches.append("balance_source_unavailable")
+        if account.vault_rest.base.available and account.vault_rpc.base_vault.available and account.vault_rest.base.value != account.vault_rpc.base_vault.value:
+            mismatches.append("base_vault_mismatch")
+        if account.vault_rest.quote.available and account.vault_rpc.quote_vault.available and account.vault_rest.quote.value != account.vault_rpc.quote_vault.value:
+            mismatches.append("quote_vault_mismatch")
+        if account.open_orders_status == "source_unavailable": mismatches.append("open_orders_source_unavailable")
+        if account.fills_status == "source_unavailable": mismatches.append("fills_source_unavailable")
+        if local_cash is not None and exchange_cash is not None and local_cash != exchange_cash: mismatches.append("cash_mismatch")
+        if local_inventory is not None and exchange_inventory is not None and local_inventory != exchange_inventory: mismatches.append("inventory_mismatch")
+        complete = not mismatches
+        return ReconciliationReport(complete, bool(mismatches), ";".join(mismatches) if mismatches else "reconciled", local_cash, exchange_cash, None if local_cash is None or exchange_cash is None else exchange_cash - local_cash, local_inventory, exchange_inventory, None if local_inventory is None or exchange_inventory is None else exchange_inventory - local_inventory, account.vault_rest.base, account.vault_rpc.base_vault, account.vault_rest.quote, account.vault_rpc.quote_vault, tuple(mismatches), snapshot.observed_at)
 
 
 def load_fixture(path: str | Path) -> Mapping[str, Any]:
     with Path(path).open("r", encoding="utf-8") as handle:
-        payload = json.load(handle)
-    if not isinstance(payload, Mapping):
-        raise ValueError("read-only fixture must contain a JSON object")
-    return payload
+        value = json.load(handle)
+    if not isinstance(value, Mapping): raise ValueError("fixture must be an object")
+    return value
 
 
 class FixtureTransport:
-    """GET-only transport for offline snapshots."""
-
-    def __init__(self, fixture: Mapping[str, Any]) -> None:
-        self.fixture = fixture
-        self.paths: list[str] = []
-
+    def __init__(self, fixture: Mapping[str, Any]) -> None: self.fixture, self.paths = fixture, []
     def get(self, path: str, *, params: Mapping[str, str] | None = None) -> Any:
-        self.paths.append(path)
-        if path == "/markets":
-            return self.fixture.get("markets", [])
-        return self.fixture.get("account", {})
+        self.paths.append((path, dict(params or {})))
+        if path == "/markets": return self.fixture.get("markets", [])
+        if path.startswith("/orderbooks"): return self.fixture.get("orderbook", {})
+        if "/trades" in path: return self.fixture.get("trades", [])
+        if "/vault/balance" in path: return self.fixture.get("vault_rest", {})
+        raise RuntimeError("unavailable fixture route")
 
 
-__all__ = [
-    "AccountSnapshot", "BalanceSnapshot", "DreamDexReadOnlyAdapter", "FillSnapshot", "FixtureTransport",
-    "HttpGetTransport", "MarketMetadata", "OpenOrderSnapshot", "ReadOnlySnapshot", "ReconciliationReport",
-    "RecentOrderSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyAccountSnapshot", "ReadOnlyReconciliationReport",
-    "DreamDexReadOnlyClient", "mask_account_id", "load_fixture",
-]
+class FixtureRpcTransport:
+    def __init__(self, fixture: Mapping[str, Any]) -> None: self.fixture, self.calls, self._vault_index, self._wallet_index = fixture, [], 0, 0
+    def call(self, method: str, params: Sequence[Any]) -> Any:
+        self.calls.append((method, params))
+        if method == "eth_getBalance": return self.fixture.get("native_gas")
+        values = self.fixture.get("rpc", {})
+        data = params[0].get("data", "") if params and isinstance(params[0], Mapping) else ""
+        if data[2:10] == _selector("getWithdrawableBalance(address,address)"):
+            value = values.get("base_vault") if self._vault_index == 0 else values.get("quote_vault")
+            self._vault_index += 1
+            return value
+        if data[2:10] == _selector("balanceOf(address)"):
+            value = values.get("base_wallet") if self._wallet_index == 0 else values.get("quote_wallet")
+            self._wallet_index += 1
+            return value
+        raise RuntimeError("unsupported fixture RPC call")
 
-# Descriptive aliases keep the public API readable for callers that prefer
-# explicit read-only names.
+
+def _selector(signature: str) -> str:
+    from eth_utils import keccak
+    return keccak(text=signature)[:4].hex()
+
+
 ReadOnlyMarketMetadata = MarketMetadata
 ReadOnlyAccountSnapshot = AccountSnapshot
 ReadOnlyReconciliationReport = ReconciliationReport
 DreamDexReadOnlyClient = DreamDexReadOnlyAdapter
+
+__all__ = ["AccountSnapshot", "BalanceSnapshot", "DreamDexReadOnlyAdapter", "DreamDexReadOnlyClient", "FixtureRpcTransport", "FixtureTransport", "HttpGetTransport", "HttpRpcTransport", "MarketMetadata", "MarketReadOnlySnapshot", "MarketReadOnlySource", "ReadOnlyAccountSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyReconciliationReport", "ReadOnlySnapshot", "ReconciliationReport", "RpcAccountReadOnlySnapshot", "RpcAccountReadOnlySource", "SourceValue", "VaultReadOnlySnapshot", "VaultReadOnlySource", "load_fixture", "mask_account_id"]
