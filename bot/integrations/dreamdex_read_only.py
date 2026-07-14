@@ -10,6 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
+from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 import json
@@ -52,6 +53,33 @@ def _is_address(value: Any) -> bool:
         return False
     clean = value.lower().removeprefix("0x")
     return len(clean) == 40 and all(char in "0123456789abcdef" for char in clean)
+
+
+class AssetKind(str, Enum):
+    native = "native"
+    erc20 = "erc20"
+    special = "special"
+    unknown = "unknown"
+    NATIVE = native
+    ERC20 = erc20
+    SPECIAL = special
+    UNKNOWN = unknown
+
+
+NATIVE_SENTINEL = "0x28f34defd2b4cb48d9ee6d89f2be4bc601694c00"
+
+
+def _asset_kind(symbol: str, token_address: str | None, *, side: str) -> AssetKind:
+    # This is intentionally based on the Bot Kit's explicit SOMI:USDso
+    # baseIsNative mapping (packages/core/src/config/tokens.ts), not on
+    # token-address heuristics.
+    if symbol.upper() == "SOMI:USDSO" and side == "base":
+        return AssetKind.NATIVE
+    if token_address and token_address.lower() == NATIVE_SENTINEL:
+        return AssetKind.SPECIAL
+    if _is_address(token_address):
+        return AssetKind.ERC20
+    return AssetKind.UNKNOWN
 
 
 def _rows(payload: Any, *keys: str) -> list[Mapping[str, Any]]:
@@ -202,10 +230,20 @@ class MarketMetadata:
     taker_fee: Decimal | None = None
     observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "markets"
+    base_asset_kind: AssetKind = AssetKind.unknown
+    quote_asset_kind: AssetKind = AssetKind.unknown
 
     @property
     def active(self) -> bool:
         return (self.status or "").lower() in {"active", "enabled", "online", "trading"}
+
+    @property
+    def base_is_native(self) -> bool:
+        return self.base_asset_kind is AssetKind.native
+
+    @property
+    def quote_is_native(self) -> bool:
+        return self.quote_asset_kind is AssetKind.native
 
     @property
     def pool_address(self) -> str | None:
@@ -293,6 +331,8 @@ class MarketReadOnlySource:
             base_decimals=base_decimals,
             quote_decimals=quote_decimals,
             stop_registry=_first(row, "stopRegistry", "stop_registry"),
+            base_asset_kind=_asset_kind(self.symbol, base_address, side="base"),
+            quote_asset_kind=_asset_kind(self.symbol, quote_address, side="quote"),
         )
 
     def orderbook(self) -> Mapping[str, Any]:
@@ -362,7 +402,7 @@ class VaultReadOnlySource:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status in {401, 403}:
                 reason = "unauthorized"
-                return VaultReadOnlySnapshot(owner, SourceValue(None, "unauthorized", "vault_rest", reason, observed, "unavailable"), SourceValue(None, "unauthorized", "vault_rest", reason, observed, "unavailable"), observed)
+                return VaultReadOnlySnapshot(owner, SourceValue(None, "unauthorized", "vault_rest", reason, observed, "unauthorized"), SourceValue(None, "unauthorized", "vault_rest", reason, observed, "unauthorized"), observed)
             reason = f"unavailable:{status or type(exc).__name__}"
             return VaultReadOnlySnapshot(owner, SourceValue(None, "unavailable", "vault_rest", reason, observed, "unavailable"), SourceValue(None, "unavailable", "vault_rest", reason, observed, "unavailable"), observed)
 
@@ -409,6 +449,17 @@ class RpcAccountReadOnlySnapshot:
 
 
 @dataclass(frozen=True)
+class TokenReadOnlyDiagnostics:
+    address: str | None
+    asset_kind: AssetKind
+    code: SourceValue
+    raw_balance: SourceValue
+    balance: SourceValue
+    decimals: SourceValue
+    balance_method: str
+
+
+@dataclass(frozen=True)
 class AddressReadOnlyDiagnostics:
     """Independent public-RPC observations for one candidate account address."""
 
@@ -416,10 +467,14 @@ class AddressReadOnlyDiagnostics:
     code: SourceValue
     address_type: str
     native_gas: SourceValue
+    # Keep the original wallet fields for callers that consumed this
+    # diagnostic object before token-level details were added.
     wallet_base: SourceValue
     wallet_quote: SourceValue
     vault_base: SourceValue
     vault_quote: SourceValue
+    base_token: TokenReadOnlyDiagnostics | None = None
+    quote_token: TokenReadOnlyDiagnostics | None = None
 
     @property
     def wallet_somi(self) -> SourceValue:
@@ -439,13 +494,14 @@ class AddressReadOnlyDiagnostics:
 
 
 class RpcAccountReadOnlySource:
-    def __init__(self, transport: RpcTransport | Callable[..., Any], *, pool_address: str, base_token_address: str, quote_token_address: str, owner: str | None = None, account_address: str | None = None, gas_address: str | None = None, base_decimals: int = 18, quote_decimals: int = 18, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(self, transport: RpcTransport | Callable[..., Any], *, pool_address: str, base_token_address: str, quote_token_address: str, owner: str | None = None, account_address: str | None = None, gas_address: str | None = None, base_decimals: int = 18, quote_decimals: int = 18, base_asset_kind: AssetKind = AssetKind.erc20, quote_asset_kind: AssetKind = AssetKind.erc20, clock: Callable[[], datetime] | None = None) -> None:
         self.transport = transport
         self.account_address = account_address or owner
         self.gas_address = gas_address or owner
         self.owner = self.account_address  # compatibility alias; account reads use the explicit trading address
         self.pool_address, self.base_token_address, self.quote_token_address = pool_address, base_token_address, quote_token_address
         self.base_decimals, self.quote_decimals = base_decimals, quote_decimals
+        self.base_asset_kind, self.quote_asset_kind = base_asset_kind, quote_asset_kind
         self.clock = clock or (lambda: datetime.now(timezone.utc))
 
     def _call(self, method: str, params: Sequence[Any]) -> Any:
@@ -531,6 +587,36 @@ class RpcAccountReadOnlySource:
             code = "contract_revert" if "revert" in text else "rpc_error"
             return self._error("rpc_code", observed, code, self._sanitized_error(exc, code))
 
+    def _token_diagnostics(self, address: str | None, kind: AssetKind, metadata_decimals: int, account: str, observed: datetime) -> TokenReadOnlyDiagnostics:
+        code = self._code(address or "", observed) if address else self._error("rpc_token_code", observed, "invalid_target")
+        if kind is AssetKind.native:
+            raw = self._view("eth_getBalance", [account, "latest"], "rpc_native_balance", observed, 0)
+            if raw.available:
+                try:
+                    balance = SourceValue(raw.value / (Decimal(10) ** metadata_decimals), "available", "rpc_native_balance", None, observed, None)
+                except (ArithmeticError, InvalidOperation):
+                    balance = self._error("rpc_native_balance", observed, "decode_error")
+            else:
+                balance = raw
+            decimals = SourceValue(Decimal(metadata_decimals), "available", "market_metadata", "native_asset_no_decimals_call", observed, None)
+            return TokenReadOnlyDiagnostics(address, kind, code, raw, balance, decimals, "eth_getBalance")
+        if kind is not AssetKind.erc20 or not address or not _is_address(address):
+            unavailable = self._error("rpc_erc20_balance", observed, "unavailable")
+            decimals = self._error("rpc_erc20_decimals", observed, "unavailable")
+            return TokenReadOnlyDiagnostics(address, kind, code, unavailable, unavailable, decimals, "unavailable")
+        decimals = self._view("eth_call", [{"to": address, "data": self._calldata("decimals()", "0x0000000000000000000000000000000000000000")[:10]}, "latest"], "rpc_erc20_decimals", observed, 0)
+        raw = self._view("eth_call", [{"to": address, "data": self._calldata("balanceOf(address)", account)}, "latest"], "rpc_erc20_balance", observed, 0)
+        if not raw.available:
+            balance = raw
+        elif not decimals.available or decimals.value is None:
+            balance = self._error("rpc_erc20_balance", observed, "decode_error", "decimals unavailable")
+        else:
+            try:
+                balance = SourceValue(raw.value / (Decimal(10) ** int(decimals.value)), "available", "rpc_erc20_balance", None, observed, None)
+            except (ArithmeticError, InvalidOperation, ValueError):
+                balance = self._error("rpc_erc20_balance", observed, "decode_error")
+        return TokenReadOnlyDiagnostics(address, kind, code, raw, balance, decimals, "balanceOf(address)")
+
     def fetch_address(self, address: str, *, include_gas: bool = True) -> AddressReadOnlyDiagnostics:
         observed = self.clock()
         invalid = not _is_address(address)
@@ -541,25 +627,25 @@ class RpcAccountReadOnlySource:
         else:
             address_type = "unavailable"
         if invalid:
-            wallet_base = self._error("rpc_erc20_balance", observed, "invalid_target")
-            wallet_quote = self._error("rpc_erc20_balance", observed, "invalid_target")
+            wallet_base = TokenReadOnlyDiagnostics(None, self.base_asset_kind, code, self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_decimals", observed, "invalid_target"), "unavailable")
+            wallet_quote = TokenReadOnlyDiagnostics(None, self.quote_asset_kind, code, self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_decimals", observed, "invalid_target"), "unavailable")
             vault_base = self._error("rpc_pool_vault", observed, "invalid_target")
             vault_quote = self._error("rpc_pool_vault", observed, "invalid_target")
             native = self._error("rpc_native_balance", observed, "invalid_target")
-            return AddressReadOnlyDiagnostics(address, code, address_type, native, wallet_base, wallet_quote, vault_base, vault_quote)
+            return AddressReadOnlyDiagnostics(address, code, address_type, native, wallet_base.balance, wallet_quote.balance, vault_base, vault_quote, wallet_base, wallet_quote)
         targets_valid = _is_address(self.pool_address) and _is_address(self.base_token_address) and _is_address(self.quote_token_address)
         if not targets_valid:
-            wallet_base = self._error("rpc_erc20_balance", observed, "invalid_target")
-            wallet_quote = self._error("rpc_erc20_balance", observed, "invalid_target")
+            wallet_base = TokenReadOnlyDiagnostics(self.base_token_address, self.base_asset_kind, self._error("rpc_token_code", observed, "invalid_target"), self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_decimals", observed, "invalid_target"), "unavailable")
+            wallet_quote = TokenReadOnlyDiagnostics(self.quote_token_address, self.quote_asset_kind, self._error("rpc_token_code", observed, "invalid_target"), self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_balance", observed, "invalid_target"), self._error("rpc_erc20_decimals", observed, "invalid_target"), "unavailable")
             vault_base = self._error("rpc_pool_vault", observed, "invalid_target")
             vault_quote = self._error("rpc_pool_vault", observed, "invalid_target")
         else:
             vault_base = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", address, self.base_token_address)}, "latest"], "rpc_pool_vault", observed, self.base_decimals)
             vault_quote = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", address, self.quote_token_address)}, "latest"], "rpc_pool_vault", observed, self.quote_decimals)
-            wallet_base = self._view("eth_call", [{"to": self.base_token_address, "data": self._calldata("balanceOf(address)", address)}, "latest"], "rpc_erc20_balance", observed, self.base_decimals)
-            wallet_quote = self._view("eth_call", [{"to": self.quote_token_address, "data": self._calldata("balanceOf(address)", address)}, "latest"], "rpc_erc20_balance", observed, self.quote_decimals)
-        native = self._view("eth_getBalance", [address, "latest"], "rpc_native_balance", observed, 18) if include_gas else self._error("rpc_native_balance", observed, "unavailable")
-        return AddressReadOnlyDiagnostics(address, code, address_type, native, wallet_base, wallet_quote, vault_base, vault_quote)
+            wallet_base = self._token_diagnostics(self.base_token_address, self.base_asset_kind, self.base_decimals, address, observed)
+            wallet_quote = self._token_diagnostics(self.quote_token_address, self.quote_asset_kind, self.quote_decimals, address, observed)
+        native = wallet_base.balance if include_gas and self.base_asset_kind is AssetKind.native else (self._view("eth_getBalance", [address, "latest"], "rpc_native_balance", observed, 18) if include_gas else self._error("rpc_native_balance", observed, "unavailable"))
+        return AddressReadOnlyDiagnostics(address, code, address_type, native, wallet_base.balance, wallet_quote.balance, vault_base, vault_quote, wallet_base, wallet_quote)
 
     def fetch(self, *, account_reads: bool = True) -> RpcAccountReadOnlySnapshot:
         observed = self.clock()
@@ -681,7 +767,7 @@ class DreamDexReadOnlyAdapter:
         base_asset = metadata.base_asset or self.symbol.split(":", 1)[0]
         quote_asset = metadata.quote_asset or self.symbol.split(":", 1)[1]
         orderbook_status = _orderbook_status(market.orderbook, self.clock())
-        rpc_source = RpcAccountReadOnlySource(self._rpc_transport, account_address=self.trading_address, gas_address=self.owner, pool_address=metadata.pool_contract, base_token_address=metadata.base_token_address, quote_token_address=metadata.quote_token_address, base_decimals=metadata.base_decimals, quote_decimals=metadata.quote_decimals, clock=self.clock)
+        rpc_source = RpcAccountReadOnlySource(self._rpc_transport, account_address=self.trading_address, gas_address=self.owner, pool_address=metadata.pool_contract, base_token_address=metadata.base_token_address, quote_token_address=metadata.quote_token_address, base_decimals=metadata.base_decimals, quote_decimals=metadata.quote_decimals, base_asset_kind=metadata.base_asset_kind, quote_asset_kind=metadata.quote_asset_kind, clock=self.clock)
         owner_diagnostics = rpc_source.fetch_address(self.owner)
         trading_diagnostics = rpc_source.fetch_address(self.trading_address) if self.trading_address else None
         if self.trading_address:
@@ -752,6 +838,11 @@ class FixtureTransport:
 
 class FixtureRpcTransport:
     def __init__(self, fixture: Mapping[str, Any]) -> None: self.fixture, self.calls, self._vault_index, self._wallet_index = fixture, [], 0, 0
+
+    def _market(self) -> Mapping[str, Any]:
+        rows = _rows(self.fixture.get("markets", []), "markets", "items")
+        return rows[0] if rows else {}
+
     def call(self, method: str, params: Sequence[Any]) -> Any:
         self.calls.append((method, params))
         if method == "eth_getCode":
@@ -759,21 +850,35 @@ class FixtureRpcTransport:
             values = self.fixture.get("rpc", {})
             codes = values.get("code_by_address", values.get("codes", {})) if isinstance(values, Mapping) else {}
             return codes.get(address, codes.get(address.removeprefix("0x"), values.get("code", "0x"))) if isinstance(codes, Mapping) else values.get("code", "0x")
-        if method == "eth_getBalance": return self.fixture.get("native_gas")
+        if method == "eth_getBalance":
+            address = str(params[0]).lower() if params else ""
+            values = self.fixture.get("rpc", {})
+            if isinstance(values, Mapping):
+                by_address = values.get("native_balance_by_address", values.get("balance_by_address", {}))
+                if isinstance(by_address, Mapping):
+                    selected = by_address.get(address, by_address.get(address.removeprefix("0x")))
+                    if selected is not None:
+                        return selected
+            return self.fixture.get("native_gas")
         values = self.fixture.get("rpc", {})
         data = params[0].get("data", "") if params and isinstance(params[0], Mapping) else ""
         if data[2:10] == _selector("getWithdrawableBalance(address,address)"):
             token_word = data[-40:].lower() if len(data) >= 40 else ""
-            base_token = str(self.fixture.get("markets", [{}])[0].get("base", "")).lower().removeprefix("0x") if self.fixture.get("markets") else ""
+            base_token = str(self._market().get("base", "")).lower().removeprefix("0x")
             value = values.get("base_vault") if token_word == base_token else values.get("quote_vault")
             self._vault_index += 1
             return value
         if data[2:10] == _selector("balanceOf(address)"):
             target = str(params[0].get("to", "")).lower() if params and isinstance(params[0], Mapping) else ""
-            base_token = str(self.fixture.get("markets", [{}])[0].get("base", "")).lower() if self.fixture.get("markets") else ""
+            base_token = str(self._market().get("base", "")).lower()
             value = values.get("base_wallet") if target == base_token else values.get("quote_wallet")
             self._wallet_index += 1
             return value
+        if data[2:10] == _selector("decimals()"):
+            target = str(params[0].get("to", "")).lower() if params and isinstance(params[0], Mapping) else ""
+            market = self._market()
+            base_token = str(market.get("base", "")).lower()
+            return hex(int(market.get("baseDecimals", 18) if target == base_token else market.get("quoteDecimals", 18)))
         raise RuntimeError("unsupported fixture RPC call")
 
 
@@ -787,4 +892,4 @@ ReadOnlyAccountSnapshot = AccountSnapshot
 ReadOnlyReconciliationReport = ReconciliationReport
 DreamDexReadOnlyClient = DreamDexReadOnlyAdapter
 
-__all__ = ["AccountSnapshot", "AddressReadOnlyDiagnostics", "BalanceSnapshot", "DreamDexReadOnlyAdapter", "DreamDexReadOnlyClient", "FixtureRpcTransport", "FixtureTransport", "HttpGetTransport", "HttpRpcTransport", "MarketMetadata", "MarketReadOnlySnapshot", "MarketReadOnlySource", "ReadOnlyAccountSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyReconciliationReport", "ReadOnlySnapshot", "ReconciliationReport", "RpcAccountReadOnlySnapshot", "RpcAccountReadOnlySource", "SourceValue", "VaultReadOnlySnapshot", "VaultReadOnlySource", "load_fixture", "mask_account_id"]
+__all__ = ["AccountSnapshot", "AddressReadOnlyDiagnostics", "AssetKind", "BalanceSnapshot", "DreamDexReadOnlyAdapter", "DreamDexReadOnlyClient", "FixtureRpcTransport", "FixtureTransport", "HttpGetTransport", "HttpRpcTransport", "MarketMetadata", "MarketReadOnlySnapshot", "MarketReadOnlySource", "NATIVE_SENTINEL", "ReadOnlyAccountSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyReconciliationReport", "ReadOnlySnapshot", "ReconciliationReport", "RpcAccountReadOnlySnapshot", "RpcAccountReadOnlySource", "SourceValue", "TokenReadOnlyDiagnostics", "VaultReadOnlySnapshot", "VaultReadOnlySource", "load_fixture", "mask_account_id"]

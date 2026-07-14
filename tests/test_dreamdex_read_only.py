@@ -6,6 +6,7 @@ import pytest
 
 from bot.integrations.dreamdex_read_only import (
     AddressReadOnlyDiagnostics,
+    AssetKind,
     DreamDexReadOnlyAdapter,
     FixtureRpcTransport,
     FixtureTransport,
@@ -46,6 +47,8 @@ def test_confirmed_market_vault_and_rpc_sources_match_without_network():
     assert snapshot.market.status is None
     assert snapshot.market.maker_fee is None
     assert snapshot.market.supported_order_types == ()
+    assert snapshot.market.base_asset_kind is AssetKind.native
+    assert snapshot.market.quote_asset_kind is AssetKind.erc20
     assert snapshot.account.vault_rest.base.value == Decimal("10")
     assert snapshot.account.vault_rest.quote.value == Decimal("1000")
     assert snapshot.account.vault_rpc.base_vault.value == Decimal("10")
@@ -55,7 +58,7 @@ def test_confirmed_market_vault_and_rpc_sources_match_without_network():
     assert snapshot.account.vault_rpc.native_gas.value == Decimal("10")
     assert any(path == "/markets" for path, _ in rest.paths)
     assert any("/vault/balance" in path and params.get("walletAddress") == "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" for path, params in rest.paths)
-    assert [method for method, _ in rpc.calls].count("eth_getCode") == 2
+    assert [method for method, _ in rpc.calls].count("eth_getCode") == 6
     assert [method for method, _ in rpc.calls].count("eth_getBalance") == 2
 
 
@@ -102,6 +105,34 @@ def test_unknown_market_and_invalid_symbol_are_rejected():
         MarketReadOnlySource(FixtureTransport(load_fixture(FIXTURE)), "invalid").metadata()
 
 
+def test_real_markets_wrapper_maps_native_somi_and_optional_fields_remain_unavailable():
+    market = {
+        "symbol": "SOMI:USDso",
+        "base": "0x28f34DeFd2b4CB48d9eE6d89f2Be4Bc601694c00",
+        "quote": "0x00000022dA000002656c64D9eA6011ea952D008A",
+        "contract": "0x035De7403eac6872787779CCA7CCF1b4CDb61379",
+        "baseDecimals": 18,
+        "quoteDecimals": 18,
+        "tickSize": "0.0001",
+        "lotSize": "0.01",
+        "minQuantity": "1",
+        "stopRegistry": "0x68c8f6fb1EA19A28F25358Ff00b8Ed8E1216df30",
+    }
+    metadata = MarketReadOnlySource(FixtureTransport({"markets": {"markets": [market]}}), "SOMI:USDso").metadata()
+    assert metadata.base_asset_kind is AssetKind.native
+    assert metadata.base_token_address == market["base"]
+    assert metadata.quote_token_address == market["quote"]
+    assert metadata.pool_contract == market["contract"]
+    assert metadata.price_tick_size == Decimal("0.0001")
+    assert metadata.quantity_step == Decimal("0.01")
+    assert metadata.minimum_quantity == Decimal("1")
+    assert metadata.base_decimals == 18 and metadata.quote_decimals == 18
+    assert metadata.stop_registry == market["stopRegistry"]
+    assert metadata.minimum_notional is None
+    assert metadata.status is None
+    assert metadata.maker_fee is None and metadata.taker_fee is None
+
+
 def test_no_transaction_or_signing_methods_and_rpc_mutations_are_rejected():
     adapter, _, _ = make_adapter()
     for name in ("create_order", "submit_order", "cancel_order", "replace_order", "sign", "send_transaction", "send_raw_transaction"):
@@ -125,7 +156,7 @@ def test_login_owner_and_trading_address_are_separate_and_no_owner_fallback():
     assert snapshot.account.trading_address is None
     assert snapshot.account.trading_address_status == "unresolved"
     assert not any("/vault/balance" in path for path, _ in rest.paths)
-    assert [method for method, _ in rpc.calls].count("eth_getCode") == 1
+    assert [method for method, _ in rpc.calls].count("eth_getCode") == 3
     assert [method for method, _ in rpc.calls].count("eth_getBalance") == 1
     report = adapter.reconcile(snapshot)
     assert "trading_address_unresolved" in report.mismatches
@@ -174,6 +205,8 @@ class _DiagnosticRpc:
             return "0xnot-hex"
         if data.startswith("0x70a08231"):
             return "0xde0b6b3a7640000"
+        if data.startswith("0x313ce567"):
+            return "0x12"
         return "0x8ac7230489e80000"
 
 
@@ -192,6 +225,32 @@ def test_balance_of_selector_padding_and_somi_success():
     assert set(balance_calls[0][0]) == {"to", "data"}
 
 
+def test_native_asset_uses_eth_get_balance_and_never_balance_of():
+    rpc = _DiagnosticRpc()
+    source = RpcAccountReadOnlySource(rpc, owner="0x1234567890abcdef1234567890abcdef12345678", pool_address="0x3333333333333333333333333333333333333333", base_token_address="0x28f34DeFd2b4CB48d9eE6d89f2Be4Bc601694c00", quote_token_address="0x2222222222222222222222222222222222222222", base_asset_kind=AssetKind.native)
+    diagnostics = source.fetch_address("0x1234567890abcdef1234567890abcdef12345678")
+    assert diagnostics.base_token.asset_kind is AssetKind.native
+    assert diagnostics.base_token.balance_method == "eth_getBalance"
+    assert diagnostics.base_token.balance.value == Decimal("10")
+    assert not any(method == "eth_call" and params[0]["data"].startswith("0x70a08231") and params[0]["to"].lower().startswith("0x28f3") for method, params in rpc.calls)
+
+
+def test_special_and_unknown_assets_remain_unavailable_without_fallback():
+    for kind in (AssetKind.special, AssetKind.unknown):
+        rpc = _DiagnosticRpc()
+        source = RpcAccountReadOnlySource(rpc, owner="0x1234567890abcdef1234567890abcdef12345678", pool_address="0x3333333333333333333333333333333333333333", base_token_address="0x1111111111111111111111111111111111111111", quote_token_address="0x2222222222222222222222222222222222222222", base_asset_kind=kind)
+        diagnostics = source.fetch_address("0x1234567890abcdef1234567890abcdef12345678")
+        assert diagnostics.base_token.balance.value is None
+        assert diagnostics.base_token.balance_method == "unavailable"
+        assert not any(method == "eth_call" and params[0]["data"].startswith("0x70a08231") and params[0]["to"].lower().startswith("0x1111") for method, params in rpc.calls)
+
+
+def test_erc20_decimals_error_is_not_silently_converted():
+    diagnostics = _diagnostic_source(_DiagnosticRpc("revert")).fetch_address("0x1234567890abcdef1234567890abcdef12345678")
+    assert diagnostics.quote_token.decimals.error_code == "contract_revert"
+    assert diagnostics.quote_token.balance.error_code == "contract_revert"
+
+
 @pytest.mark.parametrize("mode,error_code", [("empty", "empty_result"), ("malformed", "malformed_hex"), ("revert", "contract_revert")])
 def test_balance_of_failures_are_explicit(mode, error_code):
     diagnostics = _diagnostic_source(_DiagnosticRpc(mode)).fetch_address("0x1234567890abcdef1234567890abcdef12345678")
@@ -208,6 +267,7 @@ def test_eth_get_code_rpc_error_is_unavailable():
     diagnostics = _diagnostic_source(CodeError()).fetch_address("0x1234567890abcdef1234567890abcdef12345678")
     assert diagnostics.address_type == "unavailable"
     assert diagnostics.code.error_code == "rpc_error"
+    assert diagnostics.base_token.code.error_code == "rpc_error"
 
 
 def test_unauthorized_rest_vault_is_not_zero():
@@ -221,4 +281,4 @@ def test_unauthorized_rest_vault_is_not_zero():
     vault = VaultReadOnlySource(Unauthorized(), "SOMI:USDso", "SOMI", "USDso").fetch("0x1234567890abcdef1234567890abcdef12345678")
     assert vault.base.status == "unauthorized"
     assert vault.base.value is None
-    assert vault.base.error_code == "unavailable"
+    assert vault.base.error_code == "unauthorized"

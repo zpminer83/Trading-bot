@@ -35,6 +35,13 @@ def _source(value) -> str:
     return f"{value.status}: {value.reason or 'unavailable'}{suffix}"
 
 
+def _source_status(value) -> str:
+    if value is None:
+        return "unavailable (error_code=unavailable)"
+    suffix = f" (error_code={value.error_code})" if getattr(value, "error_code", None) else ""
+    return f"{value.status}{suffix}"
+
+
 def _masked(value: str | None) -> str:
     return mask_account_id(value) if value else "<unresolved>"
 
@@ -50,6 +57,16 @@ def _print_address_diagnostics(label: str, diagnostics, fallback_address: str | 
     print(f"  address masked: {_masked(diagnostics.address)}")
     type_suffix = "" if diagnostics.address_type != "unavailable" else f" (error_code={diagnostics.code.error_code})"
     print(f"  type: {diagnostics.address_type}{type_suffix}")
+    print(f"  base asset kind: {diagnostics.base_token.asset_kind.value}")
+    print(f"  base token code status: {_source_status(diagnostics.base_token.code)}")
+    print(f"  base raw balance status: {_source_status(diagnostics.base_token.raw_balance)}")
+    print(f"  base decimals: {_source(diagnostics.base_token.decimals)}")
+    print(f"  base balance read method: {diagnostics.base_token.balance_method}")
+    print(f"  quote asset kind: {diagnostics.quote_token.asset_kind.value}")
+    print(f"  quote token code status: {_source_status(diagnostics.quote_token.code)}")
+    print(f"  quote raw balance status: {_source_status(diagnostics.quote_token.raw_balance)}")
+    print(f"  quote decimals: {_source(diagnostics.quote_token.decimals)}")
+    print(f"  quote balance read method: {diagnostics.quote_token.balance_method}")
     for name, value in (("native SOMI", diagnostics.native_gas), ("wallet SOMI", diagnostics.wallet_somi), ("wallet USDso", diagnostics.wallet_usdso), ("vault SOMI", diagnostics.vault_somi), ("vault USDso", diagnostics.vault_usdso)):
         print(f"  {name}: {_source(value)}")
 
