@@ -24,7 +24,7 @@ from bot.execution.conservative_paper_broker import (
     PaperOrder,
 )
 from bot.execution.execution_manager import ExecutionManager
-from bot.execution.order import OrderDecision, OrderIntent
+from bot.execution.order import OrderDecision, OrderIntent, OrderPurpose
 from bot.execution.order_manager import OrderManager
 from bot.execution.paper_broker import PaperFill
 from bot.market.market_cache import MarketCache
@@ -75,6 +75,10 @@ class ConservativePaperTradingStepResult:
     fair_play_blocked_intents_count: int = 0
     short_window_round_trip_count: int = 0
     near_flat_cycle_count: int = 0
+    risk_exit_enabled: bool | None = None
+    risk_exit_intents_count: int = 0
+    risk_exit_fills_count: int = 0
+    risk_exit_reason: str | None = None
     trade_intent_events: list[TradeIntentEvent] = field(default_factory=list)
     purpose_counts: dict[str, int] = field(default_factory=dict)
     orderbook_signal: OrderBookSignalSnapshot | None = None
@@ -123,6 +127,8 @@ class ConservativePaperTradingEngine:
         fair_play_guard: FairPlayGuard | None = None,
         trade_intent_ledger: TradeIntentLedger | None = None,
         orderbook_signal_engine: OrderBookSignalEngine | None = None,
+        paper_risk_exit_enabled: bool = False,
+        risk_exit_enabled: bool | None = None,
     ):
         self.symbol = symbol
         self.market = market
@@ -137,6 +143,11 @@ class ConservativePaperTradingEngine:
         self.fair_play_guard = fair_play_guard
         self.trade_intent_ledger = trade_intent_ledger
         self.orderbook_signal_engine = orderbook_signal_engine
+        self.paper_risk_exit_enabled = bool(
+            paper_risk_exit_enabled
+            if risk_exit_enabled is None
+            else risk_exit_enabled
+        )
         self.confirmed_fill_ledger = confirmed_fill_ledger
         if self.confirmed_fill_ledger is None and fair_play_guard is not None:
             self.confirmed_fill_ledger = ConfirmedFillLedger(
@@ -173,6 +184,7 @@ class ConservativePaperTradingEngine:
 
             return ConservativePaperTradingStepResult(
                 mid_price=mid_price,
+                risk_exit_enabled=self.paper_risk_exit_enabled,
                 competition_snapshot=self._competition_snapshot(),
                 market_freshness_decision=freshness_decision,
             )
@@ -184,6 +196,7 @@ class ConservativePaperTradingEngine:
 
             return ConservativePaperTradingStepResult(
                 mid_price=mid_price,
+                risk_exit_enabled=self.paper_risk_exit_enabled,
                 competition_snapshot=self._competition_snapshot(),
                 market_safety_decision=safety_decision,
                 market_freshness_decision=freshness_decision,
@@ -213,16 +226,28 @@ class ConservativePaperTradingEngine:
         )
 
         if not portfolio_risk_decision.allowed:
-            self.order_manager.cancel_all()
+            if not self.paper_risk_exit_enabled:
+                self.order_manager.cancel_all()
 
-            return ConservativePaperTradingStepResult(
+                return ConservativePaperTradingStepResult(
+                    mid_price=mid_price,
+                    risk_exit_enabled=self.paper_risk_exit_enabled,
+                    competition_snapshot=self._competition_snapshot(),
+                    market_safety_decision=safety_decision,
+                    market_freshness_decision=freshness_decision,
+                    portfolio_risk_decision=portfolio_risk_decision,
+                    orderbook_signal=orderbook_signal,
+                    orderbook_depth_diagnostics=orderbook_depth_diagnostics,
+                )
+
+            return self._handle_latched_risk_exit(
                 mid_price=mid_price,
-                competition_snapshot=self._competition_snapshot(),
-                market_safety_decision=safety_decision,
-                market_freshness_decision=freshness_decision,
+                safety_decision=safety_decision,
+                freshness_decision=freshness_decision,
                 portfolio_risk_decision=portfolio_risk_decision,
                 orderbook_signal=orderbook_signal,
                 orderbook_depth_diagnostics=orderbook_depth_diagnostics,
+                timestamp=timestamp,
             )
 
         position_before_fills = self.portfolio.base_position
@@ -259,6 +284,7 @@ class ConservativePaperTradingEngine:
                 self.order_manager.cancel_all()
                 return ConservativePaperTradingStepResult(
                     mid_price=mid_price,
+                    risk_exit_enabled=self.paper_risk_exit_enabled,
                     fills=fills,
                     competition_snapshot=self._competition_snapshot(),
                     market_safety_decision=safety_decision,
@@ -381,6 +407,168 @@ class ConservativePaperTradingEngine:
             purpose_counts=purpose_counts,
             orderbook_signal=orderbook_signal,
             orderbook_depth_diagnostics=orderbook_depth_diagnostics,
+        )
+
+    def _handle_latched_risk_exit(
+        self,
+        *,
+        mid_price: Decimal | None,
+        safety_decision: MarketSafetyDecision | None,
+        freshness_decision: MarketFreshnessDecision | None,
+        portfolio_risk_decision: PortfolioRiskDecision,
+        orderbook_signal: OrderBookSignalSnapshot | None,
+        orderbook_depth_diagnostics: OrderBookDepthDiagnostics | None,
+        timestamp: datetime | None,
+    ) -> ConservativePaperTradingStepResult:
+        """Handle the explicitly enabled paper-only capital-protection exit.
+
+        Ordinary strategy orders are cancelled and never regenerated after a
+        latched risk stop.  A single already-open RISK_EXIT may remain so the
+        existing conservative broker can confirm it on a later snapshot.
+        """
+        cancel_all_except = getattr(self.order_manager, "cancel_all_except", None)
+        if callable(cancel_all_except):
+            cancel_all_except(
+                lambda order: order.intent.purpose == OrderPurpose.RISK_EXIT
+            )
+        else:
+            # Compatibility fallback for narrow test doubles.  Production
+            # OrderManager exposes cancel_all_except above.
+            self.order_manager.cancel_all()
+        existing_risk_exit_orders = [
+            order
+            for order in self.broker.open_orders
+            if order.intent.purpose == OrderPurpose.RISK_EXIT
+        ]
+
+        position_before_fills = self.portfolio.base_position
+        fills: list[PaperFill] = []
+        if existing_risk_exit_orders:
+            fills = self.broker.process_market(self.market)
+
+        confirmed_fill_events = self._record_confirmed_fills(
+            fills=fills,
+            starting_position=position_before_fills,
+            timestamp=timestamp,
+        )
+
+        intents: list[OrderIntent] = []
+        decisions: list[OrderDecision] = []
+        submitted_orders: list[PaperOrder] = []
+        trade_intent_events: list[TradeIntentEvent] = []
+        if (
+            not existing_risk_exit_orders
+            and self.portfolio.base_position > 0
+        ):
+            best_bid = self.market.best_bid(self.symbol)
+            if best_bid is not None and best_bid.price > 0:
+                intent = OrderIntent(
+                    symbol=self.symbol,
+                    side="sell",
+                    order_type="limit",
+                    # A low paper-only limit is marketable for the current
+                    # book and remains reduce-only through the broker's
+                    # min(quantity, base_position) sell rule.
+                    price=best_bid.price * Decimal("0.5"),
+                    quantity=self.portfolio.base_position,
+                    purpose=OrderPurpose.RISK_EXIT,
+                    strategy_name="paper_emergency_risk_exit",
+                    rationale=(
+                        "emergency capital-protection action; "
+                        "paper-only reduce-only exit"
+                    ),
+                )
+                decision = OrderDecision(
+                    approved=True,
+                    reason="paper_risk_exit_approved",
+                    intent=intent,
+                )
+                intents.append(intent)
+                decisions.append(decision)
+                submitted_orders = self.order_manager.replace_orders([decision])
+
+                if self.trade_intent_ledger is not None:
+                    trade_intent_events = [
+                        self.trade_intent_ledger.record_intent(
+                            intent,
+                            timestamp=timestamp,
+                            execution_decision=decision,
+                            submitted_order=(
+                                submitted_orders[0]
+                                if submitted_orders
+                                else None
+                            ),
+                        )
+                    ]
+
+        fair_play_status = None
+        if self.fair_play_guard is not None:
+            fair_play_status = self.fair_play_guard.consume(confirmed_fill_events)
+        risk_exit_reason = "risk_exit_emergency_capital_protection"
+        risk_exit_fill_count = sum(
+            event.purpose == OrderPurpose.RISK_EXIT.value
+            for event in confirmed_fill_events
+        )
+        purpose_counts = {
+            OrderPurpose.RISK_EXIT.value: len(intents),
+        } if intents else {}
+
+        return ConservativePaperTradingStepResult(
+            mid_price=mid_price,
+            risk_exit_enabled=self.paper_risk_exit_enabled,
+            intents=intents,
+            decisions=decisions,
+            fills=fills,
+            submitted_orders=submitted_orders,
+            competition_snapshot=self._competition_snapshot(),
+            market_safety_decision=safety_decision,
+            market_freshness_decision=freshness_decision,
+            portfolio_risk_decision=portfolio_risk_decision,
+            confirmed_fill_events=confirmed_fill_events,
+            fair_play_allowed=None,
+            fair_play_reason=risk_exit_reason,
+            fair_play_latched=(
+                fair_play_status.latched if fair_play_status is not None else None
+            ),
+            risk_exit_intents_count=len(intents),
+            risk_exit_fills_count=risk_exit_fill_count,
+            risk_exit_reason=risk_exit_reason,
+            trade_intent_events=trade_intent_events,
+            purpose_counts=purpose_counts,
+            orderbook_signal=orderbook_signal,
+            orderbook_depth_diagnostics=orderbook_depth_diagnostics,
+        )
+
+    def _record_confirmed_fills(
+        self,
+        *,
+        fills: list[PaperFill],
+        starting_position: Decimal,
+        timestamp: datetime | None,
+    ) -> list[ConfirmedFillEvent]:
+        if self.competition is not None:
+            for fill in fills:
+                self.competition.record_trade(
+                    symbol=fill.symbol,
+                    notional=fill.notional,
+                    timestamp=timestamp,
+                )
+
+        if self.confirmed_fill_ledger is None:
+            return []
+
+        source_orders_by_fill_id = {
+            id(fill): source_order
+            for fill in fills
+            if (
+                source_order := self.broker.source_order_for_fill(fill)
+            ) is not None
+        }
+        return self.confirmed_fill_ledger.record_fills(
+            fills=fills,
+            starting_position=starting_position,
+            timestamp=timestamp,
+            source_orders_by_fill_id=source_orders_by_fill_id,
         )
 
     def _evaluate_market_freshness(

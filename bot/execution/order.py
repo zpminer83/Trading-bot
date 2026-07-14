@@ -11,6 +11,7 @@ OrderType = Literal["limit", "market"]
 
 class OrderPurpose(str, Enum):
     ENTRY = "entry"
+    RISK_EXIT = "risk_exit"
     TAKE_PROFIT = "take_profit"
     SIGNAL_EXIT = "signal_exit"
     STOP_LOSS = "stop_loss"

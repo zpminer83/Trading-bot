@@ -27,7 +27,9 @@ class MarketFreshnessDecision:
     reason: str
 
     exchange_age_seconds: Decimal | None = None
+    effective_exchange_age_seconds: Decimal | None = None
     unchanged_seconds: Decimal = Decimal("0")
+    clock_skew_seconds: Decimal = Decimal("0")
 
     timestamp_changed: bool | None = None
     nonce_changed: bool | None = None
@@ -96,6 +98,8 @@ class MarketFreshnessGuard:
             )
 
         exchange_age_seconds: Decimal | None = None
+        effective_exchange_age_seconds: Decimal | None = None
+        clock_skew_seconds = Decimal("0")
 
         if timestamp > 0:
             try:
@@ -107,18 +111,23 @@ class MarketFreshnessGuard:
                     details=[f"invalid orderbook timestamp: {timestamp}"],
                 )
 
-            exchange_age_seconds = Decimal(
+            raw_exchange_age_seconds = Decimal(
                 str((now - exchange_time).total_seconds())
             )
+            clock_skew_seconds = min(raw_exchange_age_seconds, Decimal("0"))
+            exchange_age_seconds = raw_exchange_age_seconds
+            effective_exchange_age_seconds = max(raw_exchange_age_seconds, Decimal("0"))
 
             if (
-                exchange_age_seconds
+                effective_exchange_age_seconds
                 > self.limits.max_exchange_age_seconds
             ):
                 return MarketFreshnessDecision(
                     fresh=False,
                     reason="stale_timestamp",
                     exchange_age_seconds=exchange_age_seconds,
+                    effective_exchange_age_seconds=effective_exchange_age_seconds,
+                    clock_skew_seconds=clock_skew_seconds,
                     details=[
                         f"exchange_age_seconds={exchange_age_seconds}",
                         (
@@ -129,13 +138,15 @@ class MarketFreshnessGuard:
                 )
 
             if (
-                exchange_age_seconds
+                raw_exchange_age_seconds
                 < -self.limits.max_future_skew_seconds
             ):
                 return MarketFreshnessDecision(
                     fresh=False,
                     reason="future_timestamp",
                     exchange_age_seconds=exchange_age_seconds,
+                    effective_exchange_age_seconds=effective_exchange_age_seconds,
+                    clock_skew_seconds=clock_skew_seconds,
                     details=[
                         f"exchange_age_seconds={exchange_age_seconds}",
                         (
@@ -161,6 +172,8 @@ class MarketFreshnessGuard:
                 fresh=True,
                 reason="ok",
                 exchange_age_seconds=exchange_age_seconds,
+                effective_exchange_age_seconds=effective_exchange_age_seconds,
+                clock_skew_seconds=clock_skew_seconds,
             )
 
         timestamp_changed = timestamp != previous.timestamp
@@ -177,6 +190,8 @@ class MarketFreshnessGuard:
                 fresh=False,
                 reason="timestamp_regressed",
                 exchange_age_seconds=exchange_age_seconds,
+                effective_exchange_age_seconds=effective_exchange_age_seconds,
+                clock_skew_seconds=clock_skew_seconds,
                 timestamp_changed=timestamp_changed,
                 nonce_changed=nonce_changed,
                 details=[
@@ -200,6 +215,8 @@ class MarketFreshnessGuard:
                 fresh=True,
                 reason="ok",
                 exchange_age_seconds=exchange_age_seconds,
+                effective_exchange_age_seconds=effective_exchange_age_seconds,
+                clock_skew_seconds=clock_skew_seconds,
                 unchanged_seconds=Decimal("0"),
                 timestamp_changed=timestamp_changed,
                 nonce_changed=nonce_changed,
@@ -216,6 +233,8 @@ class MarketFreshnessGuard:
                 fresh=False,
                 reason="repeated_snapshot",
                 exchange_age_seconds=exchange_age_seconds,
+                effective_exchange_age_seconds=effective_exchange_age_seconds,
+                clock_skew_seconds=clock_skew_seconds,
                 unchanged_seconds=unchanged_seconds,
                 timestamp_changed=False,
                 nonce_changed=False,
@@ -232,6 +251,8 @@ class MarketFreshnessGuard:
             fresh=True,
             reason="ok",
             exchange_age_seconds=exchange_age_seconds,
+            effective_exchange_age_seconds=effective_exchange_age_seconds,
+            clock_skew_seconds=clock_skew_seconds,
             unchanged_seconds=unchanged_seconds,
             timestamp_changed=False,
             nonce_changed=False,

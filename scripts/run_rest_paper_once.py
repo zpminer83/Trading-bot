@@ -89,6 +89,7 @@ def build_engine(
     portfolio_risk_limits: PortfolioRiskLimits | None = None,
     fair_play_limits: FairPlayLimits | None = None,
     signal_limits: OrderBookSignalLimits | None = None,
+    paper_risk_exit_enabled: bool = False,
 ) -> ConservativePaperTradingEngine:
     resolved_risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
     portfolio = PortfolioManager(initial_cash=initial_cash)
@@ -170,6 +171,7 @@ def build_engine(
         fair_play_guard=fair_play_guard,
         trade_intent_ledger=trade_intent_ledger,
         orderbook_signal_engine=orderbook_signal_engine,
+        paper_risk_exit_enabled=paper_risk_exit_enabled,
     )
 
 
@@ -238,9 +240,16 @@ def print_market_freshness(result) -> None:
 
     print(f"Fresh          : {decision.fresh}")
     print(f"Reason         : {decision.reason}")
+    effective_age = getattr(decision, "effective_exchange_age_seconds", None)
+    if effective_age is None:
+        effective_age = decision.exchange_age_seconds
     print(
         "Exchange age   : "
-        f"{fmt_seconds(decision.exchange_age_seconds)}"
+        f"{fmt_seconds(effective_age)}"
+    )
+    print(
+        "Clock skew     : "
+        f"{fmt_seconds(getattr(decision, 'clock_skew_seconds', None))}"
     )
     print(
         "Unchanged time : "
@@ -359,6 +368,18 @@ def print_fair_play(result) -> None:
     )
     if getattr(result, "fair_play_latched", False):
         print("WARNING: FAIR-PLAY GUARD LATCHED")
+
+
+def print_risk_exit(result) -> None:
+    print()
+    print("Paper risk exit:")
+    print(f"Enabled       : {getattr(result, 'risk_exit_enabled', None)}")
+    print(
+        "Intents/fills : "
+        f"{getattr(result, 'risk_exit_intents_count', 0)}/"
+        f"{getattr(result, 'risk_exit_fills_count', 0)}"
+    )
+    print(f"Reason        : {getattr(result, 'risk_exit_reason', None)}")
 
 
 def print_trade_intent_audit(result) -> None:
@@ -500,6 +521,7 @@ def main() -> None:
     portfolio_risk_limits = PortfolioRiskLimits(
         max_drawdown=env_decimal("PAPER_MAX_DRAWDOWN_RATIO", "0.10")
     )
+    paper_risk_exit_enabled = env_bool("PAPER_RISK_EXIT_ENABLED", False)
     fair_play_limits = None
     if env_bool("PAPER_FAIR_PLAY_ENABLED", True):
         fair_play_limits = FairPlayLimits(
@@ -591,6 +613,10 @@ def main() -> None:
         "Max drawdown : "
         f"{fmt_decimal(portfolio_risk_limits.max_drawdown * Decimal('100'))}%"
     )
+    print(
+        "Paper risk exit: "
+        f"{'enabled' if paper_risk_exit_enabled else 'disabled'}"
+    )
     print()
     print("Competition fair-play limits:")
     if fair_play_limits is None:
@@ -669,6 +695,7 @@ def main() -> None:
         portfolio_risk_limits=portfolio_risk_limits,
         fair_play_limits=fair_play_limits,
         signal_limits=signal_limits,
+        paper_risk_exit_enabled=paper_risk_exit_enabled,
     )
 
     result = engine.step(
@@ -681,6 +708,7 @@ def main() -> None:
     print_orderbook_signal(result)
     print_orderbook_depth_diagnostics(result)
     print_portfolio_risk(result)
+    print_risk_exit(result)
     print_confirmed_fill_events(result)
     print_fair_play(result)
     print_trade_intent_audit(result)

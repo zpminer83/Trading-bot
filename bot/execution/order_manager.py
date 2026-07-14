@@ -1,4 +1,5 @@
 from collections.abc import Iterable
+from collections.abc import Callable
 
 from bot.execution.conservative_paper_broker import ConservativePaperBroker, PaperOrder
 from bot.execution.order import OrderDecision
@@ -54,6 +55,12 @@ class OrderManager:
 
     def cancel_all(self) -> None:
         self.broker.cancel_all()
+
+    def cancel_all_except(
+        self,
+        keep: Callable[[PaperOrder], bool],
+    ) -> None:
+        self.broker.cancel_all_except(keep)
 
     @property
     def open_order_count(self) -> int:

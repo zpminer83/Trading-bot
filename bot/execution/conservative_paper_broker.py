@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from decimal import Decimal
+from collections.abc import Callable
 from typing import Literal
 
 from bot.execution.order import OrderDecision, OrderIntent
@@ -79,6 +80,24 @@ class ConservativePaperBroker:
             order.status = "cancelled"
 
         self.open_orders.clear()
+
+    def cancel_all_except(
+        self,
+        keep: Callable[[PaperOrder], bool],
+    ) -> None:
+        """Cancel open orders except those explicitly retained.
+
+        This is used by the optional paper emergency path to retain one
+        already-open reduce-only risk exit while cancelling all ordinary
+        strategy orders through the same broker lifecycle.
+        """
+        retained: list[PaperOrder] = []
+        for order in self.open_orders:
+            if keep(order):
+                retained.append(order)
+            else:
+                order.status = "cancelled"
+        self.open_orders = retained
 
     def _try_fill_order(
         self,

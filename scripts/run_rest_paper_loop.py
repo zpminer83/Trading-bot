@@ -143,11 +143,39 @@ def calculate_error_backoff(
 def cancel_all_paper_orders(
     engine: ConservativePaperTradingEngine,
 ) -> None:
+    if getattr(engine, "_paper_shutdown_complete", False):
+        return
+
     order_manager = getattr(engine, "order_manager", None)
     cancel_all = getattr(order_manager, "cancel_all", None)
 
     if callable(cancel_all):
-        cancel_all()
+        broker = getattr(engine, "broker", None)
+        open_orders = getattr(broker, "open_orders", None)
+        # A no-op normal completion does not need to call a fake lifecycle
+        # hook, while real open orders are always cancelled through the
+        # existing OrderManager/Broker path.
+        if open_orders or getattr(engine, "_paper_shutdown_force", False):
+            cancel_all()
+
+    try:
+        setattr(engine, "_paper_shutdown_complete", True)
+    except Exception:
+        pass
+
+
+def shutdown_paper_orders(
+    engine: ConservativePaperTradingEngine,
+    *,
+    force: bool = False,
+) -> None:
+    """Idempotent single shutdown entry point for the paper lifecycle."""
+    if force:
+        try:
+            setattr(engine, "_paper_shutdown_force", True)
+        except Exception:
+            pass
+    cancel_all_paper_orders(engine)
 
 
 def fmt_decimal(value: Decimal | None, places: str = "0.000000") -> str:
@@ -206,6 +234,7 @@ def build_engine(
     portfolio_risk_limits: PortfolioRiskLimits | None = None,
     fair_play_limits: FairPlayLimits | None = None,
     signal_limits: OrderBookSignalLimits | None = None,
+    paper_risk_exit_enabled: bool = False,
 ) -> ConservativePaperTradingEngine:
     resolved_risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
     portfolio = PortfolioManager(initial_cash=initial_cash)
@@ -287,6 +316,7 @@ def build_engine(
         fair_play_guard=fair_play_guard,
         trade_intent_ledger=trade_intent_ledger,
         orderbook_signal_engine=orderbook_signal_engine,
+        paper_risk_exit_enabled=paper_risk_exit_enabled,
     )
 
 
@@ -307,6 +337,7 @@ def print_header(
     portfolio_risk_limits: PortfolioRiskLimits | None = None,
     fair_play_limits: FairPlayLimits | None = None,
     signal_limits: OrderBookSignalLimits | None = None,
+    paper_risk_exit_enabled: bool = False,
 ) -> None:
     freshness_limits = market_freshness_limits or MarketFreshnessLimits()
     risk_limits = portfolio_risk_limits or PortfolioRiskLimits()
@@ -352,6 +383,10 @@ def print_header(
     print(
         "Max drawdown : "
         f"{fmt_decimal(risk_limits.max_drawdown * Decimal('100'))}%"
+    )
+    print(
+        "Paper risk exit: "
+        f"{'enabled' if paper_risk_exit_enabled else 'disabled'}"
     )
     print()
     print("Competition fair-play limits:")
@@ -458,9 +493,16 @@ def print_market_freshness(result) -> None:
 
     print(f"  Fresh          : {decision.fresh}")
     print(f"  Reason         : {decision.reason}")
+    effective_age = getattr(decision, "effective_exchange_age_seconds", None)
+    if effective_age is None:
+        effective_age = decision.exchange_age_seconds
     print(
         "  Exchange age   : "
-        f"{fmt_seconds(decision.exchange_age_seconds)}"
+        f"{fmt_seconds(effective_age)}"
+    )
+    print(
+        "  Clock skew     : "
+        f"{fmt_seconds(getattr(decision, 'clock_skew_seconds', None))}"
     )
     print(
         "  Unchanged time : "
@@ -606,7 +648,21 @@ def print_purpose_summary(result) -> None:
         print("  No generated purposes.")
         return
     for purpose, count in sorted(purpose_counts.items()):
-        print(f"  {purpose}: {count}")
+            print(f"  {purpose}: {count}")
+
+
+def print_risk_exit(result) -> None:
+    print("Paper risk exit:")
+    print(f"  Enabled       : {getattr(result, 'risk_exit_enabled', None)}")
+    print(
+        "  Intents/fills : "
+        f"{getattr(result, 'risk_exit_intents_count', 0)}/"
+        f"{getattr(result, 'risk_exit_fills_count', 0)}"
+    )
+    print(
+        "  Reason        : "
+        f"{getattr(result, 'risk_exit_reason', None)}"
+    )
     confirmed_counts = _confirmed_fill_purpose_counts(result)
     if confirmed_counts:
         print("  Confirmed fills:")
@@ -787,6 +843,16 @@ def build_record(
     signal = getattr(result, "orderbook_signal", None)
     depth_diagnostic = getattr(result, "orderbook_depth_diagnostics", None)
     evidence = passive_fill_evidence or []
+    effective_exchange_age = (
+        getattr(market_freshness, "effective_exchange_age_seconds", None)
+        if market_freshness is not None
+        else None
+    )
+    if (
+        effective_exchange_age is None
+        and market_freshness is not None
+    ):
+        effective_exchange_age = market_freshness.exchange_age_seconds
 
     return PaperRunRecord(
         timestamp=timestamp,
@@ -811,7 +877,10 @@ def build_record(
             market_freshness.reason if market_freshness is not None else None
         ),
         exchange_age_seconds=(
-            market_freshness.exchange_age_seconds
+            effective_exchange_age
+        ),
+        clock_skew_seconds=(
+            market_freshness.clock_skew_seconds
             if market_freshness is not None
             else None
         ),
@@ -866,6 +935,14 @@ def build_record(
             0,
         ),
         near_flat_cycle_count=getattr(result, "near_flat_cycle_count", 0),
+        risk_exit_enabled=getattr(
+            result,
+            "risk_exit_enabled",
+            getattr(engine, "paper_risk_exit_enabled", None),
+        ),
+        risk_exit_intents_count=getattr(result, "risk_exit_intents_count", 0),
+        risk_exit_fills_count=getattr(result, "risk_exit_fills_count", 0),
+        risk_exit_reason=getattr(result, "risk_exit_reason", None),
         trade_intent_events=[
             asdict(event)
             for event in getattr(result, "trade_intent_events", [])
@@ -1071,6 +1148,7 @@ def run_iteration(
     print_orderbook_signal(result)
     print_orderbook_depth_diagnostics(result)
     print_portfolio_risk(result)
+    print_risk_exit(result)
     print_passive_fill_evidence(evidence)
     print_confirmed_fill_events(result)
     print_fair_play(result)
@@ -1141,6 +1219,7 @@ def main() -> None:
     portfolio_risk_limits = PortfolioRiskLimits(
         max_drawdown=env_decimal("PAPER_MAX_DRAWDOWN_RATIO", "0.10")
     )
+    paper_risk_exit_enabled = env_bool("PAPER_RISK_EXIT_ENABLED", False)
     fair_play_limits = None
     if env_bool("PAPER_FAIR_PLAY_ENABLED", True):
         fair_play_limits = FairPlayLimits(
@@ -1211,6 +1290,7 @@ def main() -> None:
         portfolio_risk_limits=portfolio_risk_limits,
         fair_play_limits=fair_play_limits,
         signal_limits=signal_limits,
+        paper_risk_exit_enabled=paper_risk_exit_enabled,
     )
 
     print_header(
@@ -1230,6 +1310,7 @@ def main() -> None:
         portfolio_risk_limits=portfolio_risk_limits,
         fair_play_limits=fair_play_limits,
         signal_limits=signal_limits,
+        paper_risk_exit_enabled=paper_risk_exit_enabled,
     )
 
     consecutive_failures = 0
@@ -1274,7 +1355,7 @@ def main() -> None:
                 print("=" * 80)
 
                 if consecutive_failures >= max_consecutive_failures:
-                    cancel_all_paper_orders(engine)
+                    shutdown_paper_orders(engine, force=True)
                     print()
                     print("=" * 80)
                     print(
@@ -1302,15 +1383,16 @@ def main() -> None:
             if index < iterations:
                 time.sleep(interval_seconds)
     except KeyboardInterrupt:
-        cancel_all_paper_orders(engine)
+        shutdown_paper_orders(engine, force=True)
         print()
         print("Interrupted by user. Open paper orders cancelled.")
-
-    print_final_summary(
-        engine=engine,
-        recorder=recorder,
-        output_path=output_path,
-    )
+    finally:
+        shutdown_paper_orders(engine)
+        print_final_summary(
+            engine=engine,
+            recorder=recorder,
+            output_path=output_path,
+        )
 
 
 if __name__ == "__main__":

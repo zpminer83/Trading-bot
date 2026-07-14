@@ -59,6 +59,10 @@ class PaperRunSummary:
     maximum_opposite_fill_delay_seconds: Decimal | None
     fair_play_reason_counts: dict[str, int]
 
+    risk_exit_intent_count: int
+    risk_exit_fill_count: int
+    risk_exit_reason_counts: dict[str, int]
+
     generated_intent_count: int
     submitted_intent_count: int
     fair_play_rejected_intent_count: int
@@ -424,6 +428,25 @@ class PaperRunAnalyzer:
                     fair_play_reason_counts.get(reason_text, 0) + 1
                 )
 
+        risk_exit_intent_count = sum(
+            self._to_int(record.get("risk_exit_intents_count"))
+            for record in records
+        )
+        risk_exit_fill_count = sum(
+            self._to_int(record.get("risk_exit_fills_count"))
+            for record in records
+        )
+        risk_exit_reason_counts: dict[str, int] = {}
+        for record in records:
+            reason = record.get("risk_exit_reason")
+            if reason is None:
+                continue
+            reason_text = str(reason).strip()
+            if reason_text:
+                risk_exit_reason_counts[reason_text] = (
+                    risk_exit_reason_counts.get(reason_text, 0) + 1
+                )
+
         trade_intent_events: list[dict[str, Any]] = []
         for record in records:
             raw_events = record.get("trade_intent_events")
@@ -629,6 +652,9 @@ class PaperRunAnalyzer:
                 max(opposite_fill_delays) if opposite_fill_delays else None
             ),
             fair_play_reason_counts=fair_play_reason_counts,
+            risk_exit_intent_count=risk_exit_intent_count,
+            risk_exit_fill_count=risk_exit_fill_count,
+            risk_exit_reason_counts=risk_exit_reason_counts,
             generated_intent_count=generated_intent_count,
             submitted_intent_count=submitted_intent_count,
             fair_play_rejected_intent_count=fair_play_rejected_intent_count,

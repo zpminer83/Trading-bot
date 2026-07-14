@@ -48,6 +48,7 @@ class PaperRunRecord:
     market_fresh: bool | None = None
     market_freshness_reason: str | None = None
     exchange_age_seconds: Decimal | None = None
+    clock_skew_seconds: Decimal | None = None
     unchanged_seconds: Decimal | None = None
 
     portfolio_risk_allowed: bool | None = None
@@ -70,6 +71,11 @@ class PaperRunRecord:
     fair_play_blocked_intents_count: int = 0
     short_window_round_trip_count: int = 0
     near_flat_cycle_count: int = 0
+
+    risk_exit_enabled: bool | None = None
+    risk_exit_intents_count: int = 0
+    risk_exit_fills_count: int = 0
+    risk_exit_reason: str | None = None
 
     trade_intent_events: list[dict[str, Any]] = field(default_factory=list)
     generated_intent_purpose_counts: dict[str, int] = field(default_factory=dict)
@@ -140,6 +146,7 @@ class PaperRunRecord:
                 "market_fresh": self.market_fresh,
                 "market_freshness_reason": self.market_freshness_reason,
                 "exchange_age_seconds": self.exchange_age_seconds,
+                "clock_skew_seconds": self.clock_skew_seconds,
                 "unchanged_seconds": self.unchanged_seconds,
                 "portfolio_risk_allowed": self.portfolio_risk_allowed,
                 "portfolio_risk_reason": self.portfolio_risk_reason,
@@ -165,6 +172,10 @@ class PaperRunRecord:
                     self.short_window_round_trip_count
                 ),
                 "near_flat_cycle_count": self.near_flat_cycle_count,
+                "risk_exit_enabled": self.risk_exit_enabled,
+                "risk_exit_intents_count": self.risk_exit_intents_count,
+                "risk_exit_fills_count": self.risk_exit_fills_count,
+                "risk_exit_reason": self.risk_exit_reason,
                 "trade_intent_events": self.trade_intent_events,
                 "generated_intent_purpose_counts": (
                     self.generated_intent_purpose_counts

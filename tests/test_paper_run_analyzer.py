@@ -128,6 +128,33 @@ def test_analyzer_counts_market_safety_states():
     assert summary.unknown_market_count == 1
 
 
+def test_analyzer_counts_paper_risk_exit_telemetry():
+    records = [
+        make_record("2026-07-13T12:00:00+00:00"),
+        make_record("2026-07-13T12:01:00+00:00"),
+    ]
+    records[0].update(
+        risk_exit_enabled=True,
+        risk_exit_intents_count=1,
+        risk_exit_fills_count=0,
+        risk_exit_reason="risk_exit_emergency_capital_protection",
+    )
+    records[1].update(
+        risk_exit_enabled=True,
+        risk_exit_intents_count=0,
+        risk_exit_fills_count=1,
+        risk_exit_reason="risk_exit_emergency_capital_protection",
+    )
+
+    summary = PaperRunAnalyzer().analyze_records(records)
+
+    assert summary.risk_exit_intent_count == 1
+    assert summary.risk_exit_fill_count == 1
+    assert summary.risk_exit_reason_counts == {
+        "risk_exit_emergency_capital_protection": 2
+    }
+
+
 def test_analyzer_summarizes_run_reliability(capsys):
     records = [
         make_record("2026-07-13T12:00:00+00:00"),

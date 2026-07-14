@@ -26,6 +26,7 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         market_fresh=True,
         market_freshness_reason="ok",
         exchange_age_seconds=Decimal("1.25"),
+        clock_skew_seconds=Decimal("-0.10"),
         unchanged_seconds=Decimal("2.50"),
         portfolio_risk_allowed=False,
         portfolio_risk_reason="max_drawdown_reached",
@@ -51,6 +52,10 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         fair_play_blocked_intents_count=2,
         short_window_round_trip_count=1,
         near_flat_cycle_count=2,
+        risk_exit_enabled=True,
+        risk_exit_intents_count=1,
+        risk_exit_fills_count=1,
+        risk_exit_reason="risk_exit_emergency_capital_protection",
         cash_balance=Decimal("150"),
         equity=Decimal("150"),
         weekly_volume=Decimal("10.10"),
@@ -75,6 +80,7 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["market_fresh"] is True
     assert data["market_freshness_reason"] == "ok"
     assert data["exchange_age_seconds"] == "1.25"
+    assert data["clock_skew_seconds"] == "-0.10"
     assert data["unchanged_seconds"] == "2.50"
     assert data["portfolio_risk_allowed"] is False
     assert data["portfolio_risk_reason"] == "max_drawdown_reached"
@@ -99,6 +105,10 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["fair_play_latched"] is True
     assert data["fair_play_blocked_intents_count"] == 2
     assert data["short_window_round_trip_count"] == 1
+    assert data["risk_exit_enabled"] is True
+    assert data["risk_exit_intents_count"] == 1
+    assert data["risk_exit_fills_count"] == 1
+    assert data["risk_exit_reason"] == "risk_exit_emergency_capital_protection"
     assert data["near_flat_cycle_count"] == 2
 
 

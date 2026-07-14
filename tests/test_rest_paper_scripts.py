@@ -8,7 +8,7 @@ import pytest
 from bot.execution.conservative_paper_broker import PaperOrder
 from bot.competition.confirmed_fill_ledger import ConfirmedFillEvent
 from bot.competition.fair_play_guard import FairPlayLimits
-from bot.execution.order import OrderIntent
+from bot.execution.order import OrderDecision, OrderIntent
 from bot.execution.passive_fill_evidence import PassiveFillEvidenceTracker
 from bot.market.models import OrderBook, OrderBookLevel
 from bot.market.orderbook_signal import (
@@ -305,6 +305,36 @@ def test_loop_build_record_captures_market_freshness():
     assert record.portfolio_risk_latched is True
     assert record.risk_drawdown == Decimal("0.10")
     assert record.risk_max_drawdown == Decimal("0.10")
+
+
+def test_loop_build_record_clamps_effective_exchange_age_and_logs_clock_skew():
+    freshness = MarketFreshnessDecision(
+        fresh=False,
+        reason="future_timestamp",
+        exchange_age_seconds=Decimal("-10"),
+        effective_exchange_age_seconds=Decimal("0"),
+        clock_skew_seconds=Decimal("-10"),
+    )
+    result = SimpleNamespace(
+        market_safety_decision=None,
+        market_freshness_decision=freshness,
+        portfolio_risk_decision=None,
+        intents=[], decisions=[], fills=[], submitted_orders=[],
+    )
+    snapshot = SimpleNamespace(
+        best_bid=None, best_ask=None, mid_price=None, spread=None,
+    )
+
+    record = run_rest_paper_loop.build_record(
+        timestamp=datetime(2026, 7, 13, 12, 0, tzinfo=timezone.utc),
+        symbol="SOMI:USDso",
+        snapshot=snapshot,
+        result=result,
+        engine=make_loop_engine(),
+    )
+
+    assert record.exchange_age_seconds == Decimal("0")
+    assert record.clock_skew_seconds == Decimal("-10")
 
 
 def test_loop_build_record_serializes_fair_play_telemetry():
@@ -802,6 +832,38 @@ def test_keyboard_interrupt_is_not_recorded_as_failure(tmp_path, monkeypatch):
 
     assert output_path.exists() is False
     assert engine.cancellations == [True]
+
+
+def test_shutdown_is_idempotent_and_clears_real_paper_orders():
+    engine = run_rest_paper_loop.build_engine(
+        symbol="SOMI:USDso",
+        market_cache=run_rest_paper_loop.MarketCache(),
+        initial_cash=Decimal("150"),
+        order_size_usd=Decimal("5"),
+        max_open_orders=2,
+        pair_boost=Decimal("1"),
+        max_spread_percent=Decimal("0.02"),
+        min_best_bid_quantity=Decimal("1"),
+        min_best_ask_quantity=Decimal("1"),
+    )
+    engine.broker.submit(
+        OrderDecision(
+            approved=True,
+            reason="test",
+            intent=OrderIntent(
+                symbol="SOMI:USDso",
+                side="buy",
+                order_type="limit",
+                price=Decimal("1"),
+                quantity=Decimal("1"),
+            ),
+        )
+    )
+
+    assert len(engine.broker.open_orders) == 1
+    run_rest_paper_loop.shutdown_paper_orders(engine, force=True)
+    run_rest_paper_loop.shutdown_paper_orders(engine, force=True)
+    assert len(engine.broker.open_orders) == 0
 
 
 def test_failed_record_redacts_sensitive_values_and_truncates_message():

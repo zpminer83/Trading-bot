@@ -127,6 +127,15 @@ def print_summary(
             print(f"    {reason}: {count}")
 
     print()
+    print("Paper risk exit:")
+    print(f"  Risk-exit intents: {summary.risk_exit_intent_count}")
+    print(f"  Risk-exit fills  : {summary.risk_exit_fill_count}")
+    if summary.risk_exit_reason_counts:
+        print("  Reasons:")
+        for reason, count in sorted(summary.risk_exit_reason_counts.items()):
+            print(f"    {reason}: {count}")
+
+    print()
     print("Passive fill evidence:")
     print(
         "  Evaluated open orders: "
