@@ -86,11 +86,31 @@ def _utc(value: Any = None, fallback: datetime | None = None) -> datetime:
     return result.replace(tzinfo=timezone.utc) if result.tzinfo is None else result.astimezone(timezone.utc)
 
 
+def _orderbook_status(orderbook: Mapping[str, Any] | None, observed_at: datetime, max_age_seconds: Decimal = Decimal("30")) -> str:
+    if not isinstance(orderbook, Mapping):
+        return "unavailable"
+    bids, asks = orderbook.get("bids"), orderbook.get("asks")
+    if not isinstance(bids, list) or not isinstance(asks, list) or not bids or not asks:
+        return "unavailable"
+    raw_timestamp = _first(orderbook, "timestamp", "updatedAt", "updated_at", "time")
+    if raw_timestamp is None:
+        return "unavailable"
+    sentinel = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    try:
+        timestamp = _utc(raw_timestamp, sentinel)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "unavailable"
+    if timestamp == sentinel and str(raw_timestamp) not in {"0", "0.0"}:
+        return "unavailable"
+    age = max(Decimal("0"), Decimal(str((observed_at - timestamp).total_seconds())))
+    return "stale" if age > max_age_seconds else "available"
+
+
 def mask_account_id(value: str | None) -> str:
     if not value:
         return "<missing>"
     text = str(value)
-    return "***" if len(text) <= 8 else f"{text[:4]}…{text[-4:]}"
+    return "***" if len(text) <= 8 else f"{text[:4]}...{text[-4:]}"
 
 
 class ReadOnlyTransport(Protocol):
@@ -276,7 +296,18 @@ class MarketReadOnlySource:
     def orderbook(self) -> Mapping[str, Any]:
         payload = self._get("/orderbooks", {"symbols": self.symbol})
         rows = _rows(payload, "orderbooks", "data")
-        return rows[0] if rows else (payload[0] if isinstance(payload, list) and payload else payload)
+        if rows:
+            return rows[0]
+        if isinstance(payload, list) and payload and isinstance(payload[0], Mapping):
+            return payload[0]
+        if isinstance(payload, Mapping):
+            for key in ("orderbook", "book", "result", "data"):
+                nested = payload.get(key)
+                if isinstance(nested, Mapping):
+                    return nested
+                if isinstance(nested, list) and nested and isinstance(nested[0], Mapping):
+                    return nested[0]
+        return payload if isinstance(payload, Mapping) else {}
 
     def recent_trades(self, limit: int = 20) -> tuple[Mapping[str, Any], ...]:
         payload = self._get(f"/markets/{quote(self.symbol, safe='')}/trades", {"limit": str(limit)})
@@ -369,11 +400,15 @@ class RpcAccountReadOnlySnapshot:
     quote_wallet: SourceValue
     native_gas: SourceValue
     observed_at: datetime
+    gas_address: str | None = None
 
 
 class RpcAccountReadOnlySource:
-    def __init__(self, transport: RpcTransport | Callable[..., Any], *, owner: str, pool_address: str, base_token_address: str, quote_token_address: str, base_decimals: int = 18, quote_decimals: int = 18, clock: Callable[[], datetime] | None = None) -> None:
-        self.transport, self.owner = transport, owner
+    def __init__(self, transport: RpcTransport | Callable[..., Any], *, pool_address: str, base_token_address: str, quote_token_address: str, owner: str | None = None, account_address: str | None = None, gas_address: str | None = None, base_decimals: int = 18, quote_decimals: int = 18, clock: Callable[[], datetime] | None = None) -> None:
+        self.transport = transport
+        self.account_address = account_address or owner
+        self.gas_address = gas_address or owner
+        self.owner = self.account_address  # compatibility alias; account reads use the explicit trading address
         self.pool_address, self.base_token_address, self.quote_token_address = pool_address, base_token_address, quote_token_address
         self.base_decimals, self.quote_decimals = base_decimals, quote_decimals
         self.clock = clock or (lambda: datetime.now(timezone.utc))
@@ -410,14 +445,21 @@ class RpcAccountReadOnlySource:
         except Exception as exc:
             return SourceValue(None, "unavailable", source, f"{type(exc).__name__}", observed)
 
-    def fetch(self) -> RpcAccountReadOnlySnapshot:
+    def fetch(self, *, account_reads: bool = True) -> RpcAccountReadOnlySnapshot:
         observed = self.clock()
-        base_vault = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", self.owner, self.base_token_address)}, "latest"], "rpc_pool_vault", observed, self.base_decimals)
-        quote_vault = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", self.owner, self.quote_token_address)}, "latest"], "rpc_pool_vault", observed, self.quote_decimals)
-        base_wallet = self._view("eth_call", [{"to": self.base_token_address, "data": self._calldata("balanceOf(address)", self.owner)}, "latest"], "rpc_erc20_balance", observed, self.base_decimals)
-        quote_wallet = self._view("eth_call", [{"to": self.quote_token_address, "data": self._calldata("balanceOf(address)", self.owner)}, "latest"], "rpc_erc20_balance", observed, self.quote_decimals)
-        native_gas = self._view("eth_getBalance", [self.owner, "latest"], "rpc_native_balance", observed)
-        return RpcAccountReadOnlySnapshot(self.owner, base_vault, quote_vault, base_wallet, quote_wallet, native_gas, observed)
+        unavailable = lambda source: SourceValue(None, "unavailable", source, "trading_address_unresolved", observed)
+        if account_reads and self.account_address:
+            base_vault = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", self.account_address, self.base_token_address)}, "latest"], "rpc_pool_vault", observed, self.base_decimals)
+            quote_vault = self._view("eth_call", [{"to": self.pool_address, "data": self._calldata("getWithdrawableBalance(address,address)", self.account_address, self.quote_token_address)}, "latest"], "rpc_pool_vault", observed, self.quote_decimals)
+            base_wallet = self._view("eth_call", [{"to": self.base_token_address, "data": self._calldata("balanceOf(address)", self.account_address)}, "latest"], "rpc_erc20_balance", observed, self.base_decimals)
+            quote_wallet = self._view("eth_call", [{"to": self.quote_token_address, "data": self._calldata("balanceOf(address)", self.account_address)}, "latest"], "rpc_erc20_balance", observed, self.quote_decimals)
+        else:
+            base_vault = unavailable("rpc_pool_vault")
+            quote_vault = unavailable("rpc_pool_vault")
+            base_wallet = unavailable("rpc_erc20_balance")
+            quote_wallet = unavailable("rpc_erc20_balance")
+        native_gas = self._view("eth_getBalance", [self.gas_address, "latest"], "rpc_native_balance", observed, 18) if self.gas_address else unavailable("rpc_native_balance")
+        return RpcAccountReadOnlySnapshot(self.account_address or "", base_vault, quote_vault, base_wallet, quote_wallet, native_gas, observed, self.gas_address)
 
     fetch_snapshot = fetch
 
@@ -441,16 +483,21 @@ class AccountSnapshot:
     fills_status: str = "source_unavailable"
     observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     source: str = "read-only"
+    owner_address: str | None = None
+    trading_address: str | None = None
+    trading_address_status: str = "available"
+    orderbook_status: str = "available"
+    vault_address_semantics: str = "trading_address"
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
 
     @property
     def incomplete(self) -> bool:
-        return not all((self.vault_rest.available, self.vault_rpc.base_vault.available, self.vault_rpc.quote_vault.available, self.vault_rpc.base_wallet.available, self.vault_rpc.quote_wallet.available, self.vault_rpc.native_gas.available, self.open_orders_status != "source_unavailable", self.fills_status != "source_unavailable"))
+        return not all((self.trading_address_status == "available", self.orderbook_status == "available", self.vault_rest.available, self.vault_rpc.base_vault.available, self.vault_rpc.quote_vault.available, self.vault_rpc.base_wallet.available, self.vault_rpc.quote_wallet.available, self.vault_rpc.native_gas.available, self.open_orders_status != "source_unavailable", self.fills_status != "source_unavailable"))
 
     def safe_dict(self) -> dict[str, Any]:
-        return {"account_identifier": mask_account_id(self.account_identifier), "balances": {key: {"total": str(value.total), "available": str(value.available), "locked": str(value.locked), "status": value.status} for key, value in self.balances.items()}, "open_orders_status": self.open_orders_status, "fills_status": self.fills_status, "observed_at": self.observed_at.isoformat(), "source": self.source}
+        return {"account_identifier": mask_account_id(self.account_identifier), "owner_address": mask_account_id(self.owner_address), "trading_address": mask_account_id(self.trading_address), "trading_address_status": self.trading_address_status, "balances": {key: {"total": str(value.total), "available": str(value.available), "locked": str(value.locked), "status": value.status} for key, value in self.balances.items()}, "open_orders_status": self.open_orders_status, "fills_status": self.fills_status, "observed_at": self.observed_at.isoformat(), "source": self.source}
 
 
 @dataclass(frozen=True)
@@ -486,12 +533,14 @@ class ReconciliationReport:
 class DreamDexReadOnlyAdapter:
     """Compose confirmed market, vault and RPC sources; never mutates state."""
 
-    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None) -> None:
-        if not owner or not str(owner).strip():
-            raise ValueError("owner is required")
+    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None) -> None:
+        if not owner or not str(owner).strip() or not _is_address(owner):
+            raise ValueError("owner must be a public address")
+        if trading_address is not None and not _is_address(trading_address):
+            raise ValueError("trading address must be a public address")
         if not symbol or ":" not in symbol:
             raise ValueError("market symbol must be BASE:QUOTE")
-        self.owner, self.symbol, self.clock = str(owner), symbol, clock or (lambda: datetime.now(timezone.utc))
+        self.owner, self.trading_address, self.symbol, self.clock = str(owner), (str(trading_address) if trading_address else None), symbol, clock or (lambda: datetime.now(timezone.utc))
         self.market_source = MarketReadOnlySource(transport, symbol, self.clock)
         self._transport, self._rpc_transport = transport, rpc_transport
 
@@ -515,10 +564,18 @@ class DreamDexReadOnlyAdapter:
             raise ValueError(f"market metadata incomplete: missing {', '.join(missing)}")
         if metadata.base_decimals is None or metadata.quote_decimals is None:
             raise ValueError("market metadata incomplete: missing token decimals")
-        vault = VaultReadOnlySource(self._transport, self.symbol, metadata.base_asset or self.symbol.split(":", 1)[0], metadata.quote_asset or self.symbol.split(":", 1)[1], self.clock).fetch(self.owner)
-        rpc = RpcAccountReadOnlySource(self._rpc_transport, owner=self.owner, pool_address=metadata.pool_contract, base_token_address=metadata.base_token_address, quote_token_address=metadata.quote_token_address, base_decimals=metadata.base_decimals, quote_decimals=metadata.quote_decimals, clock=self.clock).fetch()
-        balances = {metadata.base_asset: BalanceSnapshot(metadata.base_asset, rpc.base_wallet.value, rpc.base_wallet.value, None, rpc.base_wallet.status), metadata.quote_asset: BalanceSnapshot(metadata.quote_asset, rpc.quote_wallet.value, rpc.quote_wallet.value, None, rpc.quote_wallet.status)}
-        account = AccountSnapshot(self.owner, balances, vault, rpc, "source_unavailable", "source_unavailable", self.clock())
+        base_asset = metadata.base_asset or self.symbol.split(":", 1)[0]
+        quote_asset = metadata.quote_asset or self.symbol.split(":", 1)[1]
+        orderbook_status = _orderbook_status(market.orderbook, self.clock())
+        if self.trading_address:
+            vault = VaultReadOnlySource(self._transport, self.symbol, base_asset, quote_asset, self.clock).fetch(self.trading_address)
+        else:
+            observed = self.clock()
+            unresolved = lambda source: SourceValue(None, "unavailable", source, "trading_address_unresolved", observed)
+            vault = VaultReadOnlySnapshot("", unresolved("vault_rest"), unresolved("vault_rest"), observed)
+        rpc = RpcAccountReadOnlySource(self._rpc_transport, account_address=self.trading_address, gas_address=self.owner, pool_address=metadata.pool_contract, base_token_address=metadata.base_token_address, quote_token_address=metadata.quote_token_address, base_decimals=metadata.base_decimals, quote_decimals=metadata.quote_decimals, clock=self.clock).fetch(account_reads=bool(self.trading_address))
+        balances = {base_asset: BalanceSnapshot(base_asset, rpc.base_wallet.value, rpc.base_wallet.value, None, rpc.base_wallet.status), quote_asset: BalanceSnapshot(quote_asset, rpc.quote_wallet.value, rpc.quote_wallet.value, None, rpc.quote_wallet.status)}
+        account = AccountSnapshot(self.trading_address or self.owner, balances, vault, rpc, "source_unavailable", "source_unavailable", self.clock(), owner_address=self.owner, trading_address=self.trading_address, trading_address_status="available" if self.trading_address else "unresolved", orderbook_status=orderbook_status, vault_address_semantics="trading_address")
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc", market.orderbook, market.recent_trades)
 
     def fetch_account_snapshot(self) -> AccountSnapshot:
@@ -532,6 +589,10 @@ class DreamDexReadOnlyAdapter:
         mismatches: list[str] = []
         if account.incomplete:
             mismatches.append("incomplete_account_state")
+        if account.trading_address_status != "available":
+            mismatches.append("trading_address_unresolved")
+        if account.orderbook_status != "available":
+            mismatches.append("orderbook_unavailable")
         if not account.vault_rest.available or not account.vault_rpc.base_vault.available or not account.vault_rpc.quote_vault.available:
             mismatches.append("balance_source_unavailable")
         if account.vault_rest.base.available and account.vault_rpc.base_vault.available and account.vault_rest.base.value != account.vault_rpc.base_vault.value:

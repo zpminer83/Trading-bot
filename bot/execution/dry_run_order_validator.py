@@ -90,6 +90,10 @@ class DryRunOrderValidator:
         base = market.base_asset or "SOMI"
         if getattr(account, "incomplete", False):
             reasons.append("incomplete_account_state")
+        if getattr(account, "trading_address_status", "available") != "available":
+            reasons.append("trading_address_unresolved")
+        if getattr(account, "orderbook_status", "available") != "available":
+            reasons.append("orderbook_unavailable")
         quote_balance = account.balance(quote)
         base_balance = account.balance(base)
         if quote_balance.available is None:
@@ -115,6 +119,8 @@ class DryRunOrderValidator:
         if reconciliation is not None and not hasattr(reconciliation, "completed"):
             completed = getattr(getattr(reconciliation, "state", None), "value", "") == "RECONCILED"
         mismatches = tuple(getattr(reconciliation, "mismatches", ())) if reconciliation is not None else ()
+        if "trading_address_unresolved" in mismatches:
+            reasons.append("trading_address_unresolved")
         blocked = bool(getattr(reconciliation, "trading_blocked", True)) if reconciliation is not None else True
         if reconciliation is None or not completed:
             reasons.append("reconciliation_incomplete")

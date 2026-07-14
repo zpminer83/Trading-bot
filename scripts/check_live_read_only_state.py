@@ -32,27 +32,65 @@ def _source(value) -> str:
     return f"{value.status}: {value.value if value.value is not None else value.reason}"
 
 
+def _masked(value: str | None) -> str:
+    return mask_account_id(value) if value else "<unresolved>"
+
+
+def _orderbook_timestamp(book) -> datetime | None:
+    value = book.get("timestamp", book.get("updatedAt", book.get("updated_at"))) if isinstance(book, dict) else None
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            seconds = float(value) / (1000 if value > 10_000_000_000 else 1)
+            return datetime.fromtimestamp(seconds, tz=timezone.utc)
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
 def _print_report(snapshot, report, validation) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
-    print(f"Owner address: {mask_account_id(account.account_identifier)}")
+    print(f"Owner/login address: {_masked(account.owner_address or account.account_identifier)}")
+    print(f"Trading address: {_masked(account.trading_address)}")
+    print(f"Trading address status: {account.trading_address_status}")
     print(f"Market: {market.symbol}")
     print(f"Pool address: {market.pool_address or '<unavailable>'}")
     print(f"Base token address: {market.base_token_address or '<unavailable>'}")
     print(f"Quote token address: {market.quote_token_address or '<unavailable>'}")
-    print(f"Market metadata: {market.status}; tick={market.price_tick_size}; quantity_step={market.quantity_step_size}; min_quantity={market.minimum_quantity}; min_notional={market.minimum_notional}")
+    print("Market metadata status: available")
+    print(f"Market status: {market.status or 'unavailable'}")
+    print(f"Tick size: {market.price_tick_size}; quantity step: {market.quantity_step_size}; minimum quantity: {market.minimum_quantity}; minimum notional: {market.minimum_notional if market.minimum_notional is not None else 'unavailable'}")
+    book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
+    bids, asks = book.get("bids", []), book.get("asks", [])
+    print(f"Orderbook source: {account.orderbook_status}")
+    best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
+    best_ask = asks[0].get("price", asks[0]) if asks and isinstance(asks[0], dict) else (asks[0] if asks else "<unavailable>")
+    print(f"Best bid: {best_bid}")
+    print(f"Best ask: {best_ask}")
+    timestamp = _orderbook_timestamp(book)
+    age = None if timestamp is None else max(Decimal("0"), Decimal(str((datetime.now(timezone.utc) - timestamp).total_seconds())))
+    max_age = _decimal_env("DREAMDEX_READ_ONLY_MAX_MARKET_AGE_SECONDS", Decimal("30"))
+    print(f"Orderbook timestamp: {timestamp.isoformat() if timestamp else '<unavailable>'}")
+    print(f"Orderbook age: {age if age is not None else '<unavailable>'} seconds")
+    print(f"Orderbook freshness: {'available' if account.orderbook_status == 'available' and age is not None and age <= max_age else 'unavailable'}")
     print("Wallet token balances:")
+    wallet_address = _masked(account.trading_address)
     for asset in (base, quote):
         balance = account.balance(asset)
-        print(f"  {asset}: total={balance.total} available={balance.available} status={balance.status}")
+        print(f"  {asset} (address={wallet_address}): total={balance.total} available={balance.available} status={balance.status}")
     print("Vault balances REST:")
+    print(f"  address semantics: {account.vault_address_semantics} ({_masked(account.trading_address)})")
     print(f"  {base}: {_source(account.vault_rest.base)}")
     print(f"  {quote}: {_source(account.vault_rest.quote)}")
     print("Vault balances RPC getWithdrawableBalance:")
+    print(f"  address semantics: {account.vault_address_semantics} ({_masked(account.trading_address)})")
     print(f"  {base}: {_source(account.vault_rpc.base_vault)}")
     print(f"  {quote}: {_source(account.vault_rpc.quote_vault)}")
-    print(f"Native gas balance (eth_getBalance): {_source(account.vault_rpc.native_gas)}")
+    print(f"Native gas balance (eth_getBalance, owner/login address={_masked(account.vault_rpc.gas_address or account.owner_address)}; normalized 18 decimals): {_source(account.vault_rpc.native_gas)}")
     print(f"Open-orders source status: {account.open_orders_status}")
     print(f"Fills source status: {account.fills_status}")
     print(f"Reconciliation complete: {'YES' if report.completed else 'NO'}")
@@ -83,7 +121,8 @@ def main() -> int:
         else:
             from bot.integrations.dreamdex_read_only import HttpGetTransport, HttpRpcTransport
             rest_transport, rpc_transport = HttpGetTransport(os.environ["DREAMDEX_READ_ONLY_BASE_URL"]), HttpRpcTransport(os.environ["DREAMDEX_READ_ONLY_RPC_URL"])
-        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, symbol=symbol)
+        trading_address = os.environ.get("DREAMDEX_READ_ONLY_TRADING_ADDRESS")
+        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, trading_address=trading_address, symbol=symbol)
         snapshot = adapter.fetch_snapshot()
         local_cash = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_CASH")
         local_inventory = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_INVENTORY")

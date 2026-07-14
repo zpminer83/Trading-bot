@@ -25,7 +25,8 @@ def make_adapter(fixture=None):
     rest = FixtureTransport(fixture)
     rpc = FixtureRpcTransport(fixture)
     owner = "0x1234567890abcdef1234567890abcdef12345678"
-    return DreamDexReadOnlyAdapter(transport=rest, rpc_transport=rpc, owner=owner, symbol="SOMI:USDso"), rest, rpc
+    trading = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    return DreamDexReadOnlyAdapter(transport=rest, rpc_transport=rpc, owner=owner, trading_address=trading, symbol="SOMI:USDso"), rest, rpc
 
 
 def test_confirmed_market_vault_and_rpc_sources_match_without_network():
@@ -50,9 +51,9 @@ def test_confirmed_market_vault_and_rpc_sources_match_without_network():
     assert snapshot.account.vault_rpc.quote_vault.value == Decimal("1000")
     assert snapshot.account.vault_rpc.base_wallet.value == Decimal("10")
     assert snapshot.account.vault_rpc.quote_wallet.value == Decimal("1000")
-    assert snapshot.account.vault_rpc.native_gas.value == int("8ac7230489e80000", 16)
+    assert snapshot.account.vault_rpc.native_gas.value == Decimal("10")
     assert any(path == "/markets" for path, _ in rest.paths)
-    assert any("/vault/balance" in path and params.get("walletAddress") == "0x1234567890abcdef1234567890abcdef12345678" for path, params in rest.paths)
+    assert any("/vault/balance" in path and params.get("walletAddress") == "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" for path, params in rest.paths)
     assert [method for method, _ in rpc.calls] == ["eth_call", "eth_call", "eth_call", "eth_call", "eth_getBalance"]
 
 
@@ -63,7 +64,7 @@ def test_reconciliation_reports_match_and_blocks_incomplete_account_state():
     assert not report.completed
     assert report.trading_blocked
     assert "incomplete_open_orders_source" in report.mismatches
-    complete_account = replace(snapshot.account, open_orders_status="confirmed", fills_status="confirmed")
+    complete_account = replace(snapshot.account, open_orders_status="confirmed", fills_status="confirmed", orderbook_status="available")
     complete = adapter.reconcile(replace(snapshot, account=complete_account), local_cash=Decimal("1000"), local_inventory=Decimal("10"))
     assert complete.completed and not complete.trading_blocked
 
@@ -109,3 +110,25 @@ def test_no_transaction_or_signing_methods_and_rpc_mutations_are_rejected():
 
 def test_account_identifier_is_masked():
     assert "0x1234567890abcdef" not in mask_account_id("0x1234567890abcdef")
+
+
+def test_login_owner_and_trading_address_are_separate_and_no_owner_fallback():
+    fixture = load_fixture(FIXTURE)
+    rest, rpc = FixtureTransport(fixture), FixtureRpcTransport(fixture)
+    owner = "0x1234567890abcdef1234567890abcdef12345678"
+    adapter = DreamDexReadOnlyAdapter(transport=rest, rpc_transport=rpc, owner=owner, symbol="SOMI:USDso")
+    snapshot = adapter.fetch_snapshot()
+    assert snapshot.account.owner_address == owner
+    assert snapshot.account.trading_address is None
+    assert snapshot.account.trading_address_status == "unresolved"
+    assert not any("/vault/balance" in path for path, _ in rest.paths)
+    assert [method for method, _ in rpc.calls] == ["eth_getBalance"]
+    report = adapter.reconcile(snapshot)
+    assert "trading_address_unresolved" in report.mismatches
+    assert not report.completed
+
+
+def test_invalid_trading_address_is_rejected_without_fallback():
+    fixture = load_fixture(FIXTURE)
+    with pytest.raises(ValueError, match="trading address"):
+        DreamDexReadOnlyAdapter(transport=FixtureTransport(fixture), rpc_transport=FixtureRpcTransport(fixture), owner="0x1234567890abcdef1234567890abcdef12345678", trading_address="not-an-address")

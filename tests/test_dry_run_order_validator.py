@@ -12,9 +12,9 @@ FIXTURE = Path(__file__).parent / "fixtures" / "read_only" / "normal_account.jso
 
 def state():
     fixture = load_fixture(FIXTURE)
-    adapter = DreamDexReadOnlyAdapter(transport=FixtureTransport(fixture), rpc_transport=FixtureRpcTransport(fixture), owner="0x1234567890abcdef1234567890abcdef12345678", symbol="SOMI:USDso")
+    adapter = DreamDexReadOnlyAdapter(transport=FixtureTransport(fixture), rpc_transport=FixtureRpcTransport(fixture), owner="0x1234567890abcdef1234567890abcdef12345678", trading_address="0xabcdefabcdefabcdefabcdefabcdefabcdefabcd", symbol="SOMI:USDso")
     snapshot = adapter.fetch_snapshot()
-    snapshot = replace(snapshot, account=replace(snapshot.account, open_orders_status="confirmed", fills_status="confirmed"))
+    snapshot = replace(snapshot, account=replace(snapshot.account, open_orders_status="confirmed", fills_status="confirmed", orderbook_status="available"))
     report = adapter.reconcile(snapshot, local_cash=Decimal("1000"), local_inventory=Decimal("10"))
     return snapshot, report
 
