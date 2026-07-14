@@ -29,11 +29,29 @@ def _safe_error(exc: Exception, owner: str | None = None) -> str:
 def _source(value) -> str:
     if value is None:
         return "unavailable"
-    return f"{value.status}: {value.value if value.value is not None else value.reason}"
+    if value.value is not None:
+        return f"{value.status}: {value.value}"
+    suffix = f" error_code={value.error_code}" if getattr(value, "error_code", None) else ""
+    return f"{value.status}: {value.reason or 'unavailable'}{suffix}"
 
 
 def _masked(value: str | None) -> str:
     return mask_account_id(value) if value else "<unresolved>"
+
+
+def _print_address_diagnostics(label: str, diagnostics, fallback_address: str | None = None) -> None:
+    print(f"{label}:")
+    if diagnostics is None:
+        print(f"  address masked: {_masked(fallback_address)}")
+        print("  type: unavailable (error_code=unavailable)")
+        for name in ("native SOMI", "wallet SOMI", "wallet USDso", "vault SOMI", "vault USDso"):
+            print(f"  {name}: unavailable (error_code=unavailable)")
+        return
+    print(f"  address masked: {_masked(diagnostics.address)}")
+    type_suffix = "" if diagnostics.address_type != "unavailable" else f" (error_code={diagnostics.code.error_code})"
+    print(f"  type: {diagnostics.address_type}{type_suffix}")
+    for name, value in (("native SOMI", diagnostics.native_gas), ("wallet SOMI", diagnostics.wallet_somi), ("wallet USDso", diagnostics.wallet_usdso), ("vault SOMI", diagnostics.vault_somi), ("vault USDso", diagnostics.vault_usdso)):
+        print(f"  {name}: {_source(value)}")
 
 
 def _orderbook_timestamp(book) -> datetime | None:
@@ -63,10 +81,14 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Quote token address: {market.quote_token_address or '<unavailable>'}")
     print("Market metadata status: available")
     print(f"Market status: {market.status or 'unavailable'}")
-    print(f"Tick size: {market.price_tick_size}; quantity step: {market.quantity_step_size}; minimum quantity: {market.minimum_quantity}; minimum notional: {market.minimum_notional if market.minimum_notional is not None else 'unavailable'}")
+    print(f"Tick size: {market.price_tick_size}")
+    print(f"Quantity step: {market.quantity_step_size}")
+    print(f"Minimum quantity: {market.minimum_quantity}")
+    print(f"Minimum notional: {market.minimum_notional if market.minimum_notional is not None else 'unavailable'}")
+    _print_address_diagnostics("OWNER/LOGIN", snapshot.owner_diagnostics, account.owner_address or account.account_identifier)
+    _print_address_diagnostics("TRADING/SMART", snapshot.trading_diagnostics, account.trading_address)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
-    print(f"Orderbook source: {account.orderbook_status}")
     best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
     best_ask = asks[0].get("price", asks[0]) if asks and isinstance(asks[0], dict) else (asks[0] if asks else "<unavailable>")
     print(f"Best bid: {best_bid}")
@@ -76,7 +98,9 @@ def _print_report(snapshot, report, validation) -> None:
     max_age = _decimal_env("DREAMDEX_READ_ONLY_MAX_MARKET_AGE_SECONDS", Decimal("30"))
     print(f"Orderbook timestamp: {timestamp.isoformat() if timestamp else '<unavailable>'}")
     print(f"Orderbook age: {age if age is not None else '<unavailable>'} seconds")
-    print(f"Orderbook freshness: {'available' if account.orderbook_status == 'available' and age is not None and age <= max_age else 'unavailable'}")
+    freshness = "fresh" if account.orderbook_status == "available" and age is not None and age <= max_age else ("stale" if account.orderbook_status == "stale" else "unavailable")
+    print(f"Orderbook source status: {'available' if bids and asks else 'unavailable'}")
+    print(f"Orderbook freshness: {freshness}")
     print("Wallet token balances:")
     wallet_address = _masked(account.trading_address)
     for asset in (base, quote):
@@ -90,10 +114,12 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"  address semantics: {account.vault_address_semantics} ({_masked(account.trading_address)})")
     print(f"  {base}: {_source(account.vault_rpc.base_vault)}")
     print(f"  {quote}: {_source(account.vault_rpc.quote_vault)}")
-    print(f"Native gas balance (eth_getBalance, owner/login address={_masked(account.vault_rpc.gas_address or account.owner_address)}; normalized 18 decimals): {_source(account.vault_rpc.native_gas)}")
+    print(f"Native gas balance (eth_getBalance, owner/login address={_masked(account.owner_address)}; normalized 18 decimals): {_source(account.vault_rpc.native_gas)}")
     print(f"Open-orders source status: {account.open_orders_status}")
     print(f"Fills source status: {account.fills_status}")
     print(f"Reconciliation complete: {'YES' if report.completed else 'NO'}")
+    print(f"Account address semantics: {account.account_address_semantics}")
+    print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")
     print(f"Hypothetical trading blocked reason: {report.reason if report.trading_blocked else ', '.join(validation.reasons) or 'none'}")
     print(f"Dry-run approved: {'YES' if validation.approved else 'NO'}")
     print(f"Dry-run reasons: {', '.join(validation.reasons) or 'none'}")

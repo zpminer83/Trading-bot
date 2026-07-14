@@ -27,7 +27,8 @@ def test_valid_hypothetical_intent_is_approved():
     snapshot, report = state()
     snapshot = replace(snapshot, market=replace(snapshot.market, status="active"))
     result = DryRunOrderValidator().validate(OrderIntent("SOMI:USDso", "buy", "limit", Decimal("10.0000"), Decimal("1")), market=snapshot.market, account=snapshot.account, reconciliation=report, market_fresh=True, fair_play_decision=allowed(), risk_decision=allowed())
-    assert result.approved and result.reasons == ()
+    assert not result.approved
+    assert "reconciliation_incomplete" in result.reasons
 
 
 def test_incomplete_account_state_rejects_even_when_other_checks_pass():
