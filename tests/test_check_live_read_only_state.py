@@ -29,3 +29,9 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "Real submission enabled: NO" in output
     assert "private-account-id" not in output
     assert "create_order" not in output
+    assert "Authenticated account source: unconfigured" in output
+    assert "Authenticated balances: unavailable" in output
+    assert "Authenticated open orders: unavailable" in output
+    assert "Authenticated fills: unavailable" in output
+    assert "Authenticated pagination complete: NO" in output
+    assert "authenticated_account_state_unavailable" in output

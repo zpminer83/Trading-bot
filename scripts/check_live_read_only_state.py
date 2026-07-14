@@ -134,6 +134,13 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Native gas balance (eth_getBalance, owner/login address={_masked(account.owner_address)}; normalized 18 decimals): {_source(account.vault_rpc.native_gas)}")
     print(f"Open-orders source status: {account.open_orders_status}")
     print(f"Fills source status: {account.fills_status}")
+    authenticated = account.authenticated
+    auth_unconfigured = authenticated.balances_status.error_code == "authenticated_transport_unconfigured"
+    print(f"Authenticated account source: {'unconfigured' if auth_unconfigured else ('available' if authenticated.available else 'unavailable')}")
+    print(f"Authenticated balances: {authenticated.balances_status.status}")
+    print(f"Authenticated open orders: {authenticated.open_orders_status.status}")
+    print(f"Authenticated fills: {authenticated.fills_status.status}")
+    print(f"Authenticated pagination complete: {'YES' if authenticated.pagination_complete else 'NO'}")
     print(f"Reconciliation complete: {'YES' if report.completed else 'NO'}")
     print(f"Account address semantics: {account.account_address_semantics}")
     print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")

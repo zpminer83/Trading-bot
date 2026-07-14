@@ -18,6 +18,12 @@ import os
 import re
 from urllib.parse import quote
 
+from bot.integrations.dreamdex_auth_models import (
+    AuthenticatedAccountSnapshot,
+    AuthenticatedReadOnlyTransport,
+    UnconfiguredAuthenticatedReadOnlyTransport,
+)
+
 
 def _dec(value: Any, default: Decimal | None = None) -> Decimal | None:
     if value is None or value == "":
@@ -686,16 +692,44 @@ class AccountSnapshot:
     owner_diagnostics: AddressReadOnlyDiagnostics | None = None
     trading_diagnostics: AddressReadOnlyDiagnostics | None = None
     account_address_semantics: str = "unresolved"
+    authenticated: AuthenticatedAccountSnapshot = field(default_factory=AuthenticatedAccountSnapshot.unavailable)
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
 
     @property
     def incomplete(self) -> bool:
-        return not all((self.account_address_semantics == "resolved", self.trading_address_status == "available", self.orderbook_status == "available", self.vault_rest.available, self.vault_rpc.base_vault.available, self.vault_rpc.quote_vault.available, self.vault_rpc.base_wallet.available, self.vault_rpc.quote_wallet.available, self.vault_rpc.native_gas.available, self.open_orders_status != "source_unavailable", self.fills_status != "source_unavailable"))
+        authenticated_authoritative = self.authenticated.authoritative_for(self.trading_address)
+        balance_source_available = authenticated_authoritative or (
+            self.vault_rest.available and self.vault_rpc.base_vault.available and self.vault_rpc.quote_vault.available
+        )
+        return not all((
+            self.account_address_semantics == "resolved",
+            self.trading_address_status == "available",
+            self.orderbook_status == "available",
+            balance_source_available,
+            self.vault_rpc.base_wallet.available,
+            self.vault_rpc.quote_wallet.available,
+            self.vault_rpc.native_gas.available,
+            self.open_orders_status != "source_unavailable",
+            self.fills_status != "source_unavailable",
+        ))
 
     def safe_dict(self) -> dict[str, Any]:
-        return {"account_identifier": mask_account_id(self.account_identifier), "owner_address": mask_account_id(self.owner_address), "trading_address": mask_account_id(self.trading_address), "trading_address_status": self.trading_address_status, "account_address_semantics": self.account_address_semantics, "balances": {key: {"total": str(value.total), "available": str(value.available), "locked": str(value.locked), "status": value.status} for key, value in self.balances.items()}, "open_orders_status": self.open_orders_status, "fills_status": self.fills_status, "observed_at": self.observed_at.isoformat(), "source": self.source}
+        return {
+            "account_identifier": mask_account_id(self.account_identifier),
+            "owner_address": mask_account_id(self.owner_address),
+            "trading_address": mask_account_id(self.trading_address),
+            "trading_address_status": self.trading_address_status,
+            "account_address_semantics": self.account_address_semantics,
+            "balances": {key: {"total": str(value.total), "available": str(value.available), "locked": str(value.locked), "status": value.status} for key, value in self.balances.items()},
+            "open_orders_status": self.open_orders_status,
+            "fills_status": self.fills_status,
+            "authenticated_account_source": "available" if self.authenticated.available else (self.authenticated.balances_status.reason or "unavailable"),
+            "authenticated_pagination_complete": self.authenticated.pagination_complete,
+            "observed_at": self.observed_at.isoformat(),
+            "source": self.source,
+        }
 
 
 @dataclass(frozen=True)
@@ -733,7 +767,7 @@ class ReconciliationReport:
 class DreamDexReadOnlyAdapter:
     """Compose confirmed market, vault and RPC sources; never mutates state."""
 
-    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None) -> None:
         if not owner or not str(owner).strip() or not _is_address(owner):
             raise ValueError("owner must be a public address")
         if trading_address is not None and not _is_address(trading_address):
@@ -741,6 +775,7 @@ class DreamDexReadOnlyAdapter:
         if not symbol or ":" not in symbol:
             raise ValueError("market symbol must be BASE:QUOTE")
         self.owner, self.trading_address, self.symbol, self.clock = str(owner), (str(trading_address) if trading_address else None), symbol, clock or (lambda: datetime.now(timezone.utc))
+        self.authenticated_transport = authenticated_transport or UnconfiguredAuthenticatedReadOnlyTransport()
         self.market_source = MarketReadOnlySource(transport, symbol, self.clock)
         self._transport, self._rpc_transport = transport, rpc_transport
 
@@ -748,6 +783,38 @@ class DreamDexReadOnlyAdapter:
         return self.market_source.snapshot()
 
     fetch_market_metadata = lambda self: self.market_source.metadata()
+
+    def _fetch_authenticated_account(self) -> AuthenticatedAccountSnapshot:
+        account_identifier = self.trading_address or self.owner
+        try:
+            balances = self.authenticated_transport.fetch_account_balances(account_identifier, (self.symbol,))
+            open_orders = self.authenticated_transport.fetch_open_orders(account_identifier, self.symbol)
+            recent_orders = self.authenticated_transport.fetch_recent_orders(account_identifier, self.symbol)
+            fills = self.authenticated_transport.fetch_fills(account_identifier, self.symbol)
+            commissions = self.authenticated_transport.fetch_commissions(account_identifier, self.symbol)
+            observed = max((item.source_status.observed_at for item in (balances, open_orders, recent_orders, fills, commissions)), default=self.clock())
+            return AuthenticatedAccountSnapshot(
+                mask_account_id(account_identifier), balances.records, open_orders.records,
+                recent_orders.records, fills.records, commissions.records,
+                balances.source_status, open_orders.source_status, recent_orders.source_status,
+                fills.source_status, commissions.source_status, observed,
+            )
+        except Exception as exc:
+            observed = self.clock()
+            reason = re.sub(r"0x[0-9a-fA-F]{8,}", "<hex>", str(exc))[:180]
+            unavailable = AuthenticatedAccountSnapshot.unavailable(account_identifier)
+            # Keep the source-level reason explicit without exposing account
+            # identifiers, tokens, headers, or exception payloads.
+            from dataclasses import replace
+            statuses = {
+                "balances_status": replace(unavailable.balances_status, reason="authenticated_source_error:" + reason, error_code="authenticated_source_error", observed_at=observed),
+                "open_orders_status": replace(unavailable.open_orders_status, reason="authenticated_source_error:" + reason, error_code="authenticated_source_error", observed_at=observed),
+                "recent_orders_status": replace(unavailable.recent_orders_status, reason="authenticated_source_error:" + reason, error_code="authenticated_source_error", observed_at=observed),
+                "fills_status": replace(unavailable.fills_status, reason="authenticated_source_error:" + reason, error_code="authenticated_source_error", observed_at=observed),
+                "commissions_status": replace(unavailable.commissions_status, reason="authenticated_source_error:" + reason, error_code="authenticated_source_error", observed_at=observed),
+                "observed_at": observed,
+            }
+            return replace(unavailable, **statuses)
 
     def fetch_snapshot(self) -> ReadOnlySnapshot:
         market = self.fetch_market()
@@ -782,8 +849,26 @@ class DreamDexReadOnlyAdapter:
             observed = self.clock()
             unavailable = lambda source: rpc_source._error(source, observed, "unavailable")
             rpc = RpcAccountReadOnlySnapshot("", unavailable("rpc_pool_vault"), unavailable("rpc_pool_vault"), unavailable("rpc_erc20_balance"), unavailable("rpc_erc20_balance"), owner_diagnostics.native_gas, observed, self.owner)
-        balances = {base_asset: BalanceSnapshot(base_asset, rpc.base_wallet.value, rpc.base_wallet.value, None, rpc.base_wallet.status), quote_asset: BalanceSnapshot(quote_asset, rpc.quote_wallet.value, rpc.quote_wallet.value, None, rpc.quote_wallet.status)}
-        account = AccountSnapshot(self.trading_address or self.owner, balances, vault, rpc, "source_unavailable", "source_unavailable", self.clock(), owner_address=self.owner, trading_address=self.trading_address, trading_address_status="available" if self.trading_address else "unresolved", orderbook_status=orderbook_status, vault_address_semantics="unresolved", owner_diagnostics=owner_diagnostics, trading_diagnostics=trading_diagnostics, account_address_semantics="unresolved")
+        authenticated = self._fetch_authenticated_account()
+        authenticated_authoritative = authenticated.authoritative_for(self.trading_address, now=self.clock())
+        authenticated_balances = {item.asset: item for item in authenticated.balances}
+        base_auth = authenticated_balances.get(base_asset)
+        quote_auth = authenticated_balances.get(quote_asset)
+        balances = {
+            base_asset: BalanceSnapshot(base_asset, base_auth.total if base_auth else rpc.base_wallet.value, base_auth.available if base_auth else rpc.base_wallet.value, base_auth.locked if base_auth else None, base_auth.source_status.status if base_auth else rpc.base_wallet.status),
+            quote_asset: BalanceSnapshot(quote_asset, quote_auth.total if quote_auth else rpc.quote_wallet.value, quote_auth.available if quote_auth else rpc.quote_wallet.value, quote_auth.locked if quote_auth else None, quote_auth.source_status.status if quote_auth else rpc.quote_wallet.status),
+        }
+        account = AccountSnapshot(
+            self.trading_address or self.owner, balances, vault, rpc,
+            "confirmed" if authenticated.open_orders_status.available else "source_unavailable",
+            "confirmed" if authenticated.fills_status.available else "source_unavailable",
+            self.clock(), owner_address=self.owner, trading_address=self.trading_address,
+            trading_address_status="available" if self.trading_address else "unresolved",
+            orderbook_status=orderbook_status, vault_address_semantics="unresolved",
+            owner_diagnostics=owner_diagnostics, trading_diagnostics=trading_diagnostics,
+            account_address_semantics="resolved" if authenticated_authoritative else "unresolved",
+            authenticated=authenticated,
+        )
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics)
 
     def fetch_account_snapshot(self) -> AccountSnapshot:
@@ -792,9 +877,16 @@ class DreamDexReadOnlyAdapter:
     def reconcile(self, snapshot: ReadOnlySnapshot, *, local_cash: Decimal | None = None, local_inventory: Decimal | None = None) -> ReconciliationReport:
         account = snapshot.account
         quote, base = snapshot.market.quote_asset or "USDso", snapshot.market.base_asset or "SOMI"
-        # Neither login owner nor profile trading address is authoritative yet.
-        exchange_cash = account.vault_rpc.quote_vault.value if account.account_address_semantics == "resolved" and account.vault_rpc.quote_vault.available else None
-        exchange_inventory = account.vault_rpc.base_vault.value if account.account_address_semantics == "resolved" and account.vault_rpc.base_vault.available else None
+        authenticated_authoritative = account.authenticated.authoritative_for(account.trading_address)
+        authenticated_balances = {item.asset: item for item in account.authenticated.balances}
+        auth_quote = authenticated_balances.get(quote)
+        auth_base = authenticated_balances.get(base)
+        exchange_cash = auth_quote.available if authenticated_authoritative and auth_quote else (
+            account.vault_rpc.quote_vault.value if account.account_address_semantics == "resolved" and account.vault_rpc.quote_vault.available else None
+        )
+        exchange_inventory = auth_base.available if authenticated_authoritative and auth_base else (
+            account.vault_rpc.base_vault.value if account.account_address_semantics == "resolved" and account.vault_rpc.base_vault.available else None
+        )
         mismatches: list[str] = []
         if account.incomplete:
             mismatches.append("incomplete_account_state")
@@ -804,14 +896,18 @@ class DreamDexReadOnlyAdapter:
             mismatches.append("trading_address_unresolved")
         if account.orderbook_status != "available":
             mismatches.append("orderbook_unavailable")
-        if not account.vault_rest.available or not account.vault_rpc.base_vault.available or not account.vault_rpc.quote_vault.available:
+        if not authenticated_authoritative:
+            mismatches.append("authenticated_account_state_unavailable")
+        if not authenticated_authoritative and (not account.vault_rest.available or not account.vault_rpc.base_vault.available or not account.vault_rpc.quote_vault.available):
             mismatches.append("balance_source_unavailable")
-        if account.vault_rest.base.available and account.vault_rpc.base_vault.available and account.vault_rest.base.value != account.vault_rpc.base_vault.value:
+        if not authenticated_authoritative and account.vault_rest.base.available and account.vault_rpc.base_vault.available and account.vault_rest.base.value != account.vault_rpc.base_vault.value:
             mismatches.append("base_vault_mismatch")
-        if account.vault_rest.quote.available and account.vault_rpc.quote_vault.available and account.vault_rest.quote.value != account.vault_rpc.quote_vault.value:
+        if not authenticated_authoritative and account.vault_rest.quote.available and account.vault_rpc.quote_vault.available and account.vault_rest.quote.value != account.vault_rpc.quote_vault.value:
             mismatches.append("quote_vault_mismatch")
-        if account.open_orders_status == "source_unavailable": mismatches.append("incomplete_open_orders_source")
-        if account.fills_status == "source_unavailable": mismatches.append("incomplete_fills_source")
+        if account.open_orders_status == "source_unavailable" or not account.authenticated.open_orders_status.available:
+            mismatches.append("incomplete_open_orders_source")
+        if account.fills_status == "source_unavailable" or not account.authenticated.fills_status.available:
+            mismatches.append("incomplete_fills_source")
         if local_cash is not None and exchange_cash is not None and local_cash != exchange_cash: mismatches.append("cash_mismatch")
         if local_inventory is not None and exchange_inventory is not None and local_inventory != exchange_inventory: mismatches.append("inventory_mismatch")
         complete = not mismatches
