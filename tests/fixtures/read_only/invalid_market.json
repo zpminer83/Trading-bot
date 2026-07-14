@@ -1,0 +1,20 @@
+{
+  "markets": [
+    {
+      "symbol": "SOMI:USDso",
+      "baseToken": "SOMI",
+      "quoteToken": "USDso",
+      "tickSize": "0.03",
+      "quantityStepSize": "0.07",
+      "minQuantity": "1",
+      "minimumNotional": "50",
+      "status": "active",
+      "supportedOrderTypes": ["limit"]
+    }
+  ],
+  "account": {
+    "accountIdentifier": "wallet-secret-like-value",
+    "balances": {"USDso": {"total": "1", "available": "1", "locked": "0"}, "SOMI": {"total": "0", "available": "0", "locked": "0"}},
+    "openOrders": [], "recentOrders": [], "recentFills": [], "commissions": []
+  }
+}
