@@ -12,6 +12,7 @@ from bot.integrations.dreamdex_auth_models import DreamDexAuthManager
 from bot.integrations.dreamdex_authenticated_read_only import build_authenticated_read_only_transport_from_env
 from bot.integrations.dreamdex_read_only import DreamDexReadOnlyAdapter, FixtureRpcTransport, FixtureTransport, load_fixture, mask_account_id
 from bot.integrations.dreamdex_siwe_http_transport import build_siwe_http_transport_from_env
+from bot.integrations.dreamdex_siwe_signer import build_production_siwe_signer_from_env, resolve_auth_mode
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -157,14 +158,23 @@ def _print_authentication_state(account) -> None:
     snapshot = getattr(account, "auth_snapshot", None)
     print("AUTHENTICATION STATE:")
     if snapshot is None:
+        print("  auth mode: none")
         print("  manager configured: NO")
+        print("  managed auth manager configured: NO")
         print("  signer configured: NO")
+        print("  signer status: unavailable")
+        print("  signer capability: unavailable")
+        print("  signer address: <unresolved>")
+        print("  signer address match: unresolved")
         print("  transport configured: NO")
         print("  SIWE HTTP transport configured: NO")
+        print("  manual bearer transport configured: NO")
+        print("  manual authenticated transport configured: NO")
         print("  SIWE HTTP transport status: disabled")
         print("  auth state: unconfigured")
         print("  auth network attempt performed: NO")
         print("  nonce request performed: NO")
+        print("  signer invocation performed: NO")
         print("  login request performed: NO")
         print("  token present: NO")
         print("  expiry status: unavailable")
@@ -178,14 +188,28 @@ def _print_authentication_state(account) -> None:
         print("  unresolved reasons: authentication_manager_unconfigured")
         return
     safe = snapshot.safe_dict()
+    manual_configured = bool(getattr(account, "authenticated_transport_status", "") == "configured")
+    auth_mode = resolve_auth_mode(
+        manual_bearer_configured=manual_configured,
+        managed_siwe_configured=bool(safe.get('manager_configured')),
+    )
+    print(f"  auth mode: {auth_mode}")
     print(f"  manager configured: {'YES' if safe.get('manager_configured') else 'NO'}")
+    print(f"  managed auth manager configured: {'YES' if safe.get('manager_configured') else 'NO'}")
     print(f"  signer configured: {'YES' if safe.get('signer_configured') else 'NO'}")
+    print(f"  signer status: {safe.get('signer_status', 'unavailable')}")
+    print(f"  signer capability: {safe.get('signer_capability') or 'unavailable'}")
+    print(f"  signer address: {safe.get('signer_address', '<unresolved>')}")
+    print(f"  signer address match: {safe.get('signer_address_match', 'unresolved')}")
     print(f"  transport configured: {'YES' if safe.get('transport_configured') else 'NO'}")
     print(f"  SIWE HTTP transport configured: {'YES' if safe.get('transport_configured') else 'NO'}")
+    print(f"  manual bearer transport configured: {'YES' if manual_configured else 'NO'}")
+    print(f"  manual authenticated transport configured: {'YES' if manual_configured else 'NO'}")
     print(f"  SIWE HTTP transport status: {safe.get('transport_status', 'unconfigured')}")
     print(f"  auth state: {safe.get('state', 'failed_closed')}")
     print(f"  auth network attempt performed: {'YES' if safe.get('auth_network_attempt_performed') else 'NO'}")
     print(f"  nonce request performed: {'YES' if safe.get('nonce_request_performed') else 'NO'}")
+    print(f"  signer invocation performed: {'YES' if safe.get('signer_invocation_performed') else 'NO'}")
     print(f"  login request performed: {'YES' if safe.get('login_request_performed') else 'NO'}")
     print(f"  token present: {'YES' if safe.get('token_present') else 'NO'}")
     print(f"  expiry status: {safe.get('expiry_status', 'unavailable')}")
@@ -262,7 +286,10 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Fills source status: {account.fills_status}")
     authenticated = account.authenticated
     auth_unconfigured = authenticated.balances_status.error_code == "authenticated_transport_unconfigured"
-    print(f"Authenticated account source: {'unconfigured' if auth_unconfigured else ('available' if authenticated.available else 'unavailable')}")
+    confirmed_account_observations = authenticated.balances_status.available and authenticated.open_orders_status.available
+    account_evidence = "observed_non_authoritative" if confirmed_account_observations and not authenticated.authoritative_for(account.trading_address) else ("unconfigured" if auth_unconfigured else ("available" if authenticated.available else "unavailable"))
+    print(f"Authenticated account source: {account_evidence}")
+    print(f"Authenticated account evidence: {account_evidence}")
     print(f"Authenticated transport: {account.authenticated_transport_status}")
     print(f"Authenticated transport configured: {'YES' if account.authenticated_transport_status == 'configured' else 'NO'}")
     print(f"Authenticated request execution: {'enabled' if account.authenticated_request_execution_enabled else 'disabled'}")
@@ -344,9 +371,10 @@ def main() -> int:
         # variable. Construction is side-effect free; GET I/O remains gated.
         authenticated_transport = build_authenticated_read_only_transport_from_env(os.environ)
         siwe_transport = build_siwe_http_transport_from_env(os.environ)
-        # The SIWE transport is telemetry-only until an explicit signer is
-        # supplied. No nonce/login call is made by this read-only check.
-        auth_manager = DreamDexAuthManager(transport=siwe_transport)
+        # The production signer factory is deliberately unavailable and never
+        # reads secrets. This keeps the read-only check from attempting SIWE.
+        signer = build_production_siwe_signer_from_env(os.environ)
+        auth_manager = DreamDexAuthManager(transport=siwe_transport, signer=signer, owner_address=owner)
         adapter = DreamDexReadOnlyAdapter(
             transport=rest_transport,
             rpc_transport=rpc_transport,
