@@ -864,7 +864,10 @@ class DreamDexAuthSnapshot:
     external_signer_describe_performed: bool = False
     external_signer_sign_performed: bool = False
     external_signer_exit_status: str = "unavailable"
-    external_signer_environment_isolated: bool = True
+    external_signer_address_match: str = "unresolved"
+    external_signer_environment_isolated: str = "unavailable"
+    external_signer_message_integrity: str = "unavailable"
+    external_signer_signature_verification: str = "unavailable"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", _utc(self.observed_at))
@@ -904,7 +907,10 @@ class DreamDexAuthSnapshot:
             "external_signer_describe_performed": bool(getattr(self, "external_signer_describe_performed", False)),
             "external_signer_sign_performed": bool(getattr(self, "external_signer_sign_performed", False)),
             "external_signer_exit_status": getattr(self, "external_signer_exit_status", "unavailable"),
-            "external_signer_environment_isolated": bool(getattr(self, "external_signer_environment_isolated", True)),
+            "external_signer_address_match": getattr(self, "external_signer_address_match", "unresolved"),
+            "external_signer_environment_isolated": getattr(self, "external_signer_environment_isolated", "unavailable"),
+            "external_signer_message_integrity": getattr(self, "external_signer_message_integrity", "unavailable"),
+            "external_signer_signature_verification": getattr(self, "external_signer_signature_verification", "unavailable"),
             "token_present": self.token_present, "expiry_status": self.token_state.expiry_status(self.observed_at),
             "refresh_required": self.token_state.refresh_required(self.observed_at),
             "authenticated_subject": _mask(self.identity.authenticated_subject),
@@ -1208,7 +1214,10 @@ class DreamDexAuthManager:
                 bool(getattr(self.signer, "describe_performed", False)),
                 bool(getattr(self.signer, "sign_performed", False)),
                 str(getattr(self.signer, "exit_status", "unavailable")),
-                bool(getattr(self.signer, "environment_isolated", True)),
+                str(getattr(getattr(self.signer, "diagnostics", None), "address_match", getattr(self.signer, "address_match", "unresolved"))),
+                str(getattr(getattr(self.signer, "diagnostics", None), "environment_isolated", getattr(self.signer, "environment_isolated", "unavailable"))),
+                str(getattr(getattr(self.signer, "diagnostics", None), "message_integrity", getattr(self.signer, "message_integrity", "unavailable"))),
+                str(getattr(getattr(self.signer, "diagnostics", None), "signature_verification", getattr(self.signer, "signature_verification", "unavailable"))),
             )
 
     def _failed(self, code: str, started: datetime, *, status: int | None = None) -> DreamDexAuthSnapshot:
@@ -1308,6 +1317,12 @@ class DreamDexAuthManager:
                         signature,
                         self.owner_address or self._read_signer_address() or "",
                     )
+                    recorder = getattr(self.signer, "record_signature_verification", None)
+                    if callable(recorder):
+                        recorder(
+                            valid=self._signature_verification.status == "valid",
+                            message_integrity="confirmed" if self._signature_verification.status == "valid" else "mismatch",
+                        )
                     if self._signature_verification.status != "valid":
                         reason = {
                             "address_mismatch": "recovered_address_mismatch",

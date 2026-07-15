@@ -48,7 +48,11 @@ def test_describe_then_exact_sign_uses_only_allowed_capability_and_closes_proces
     signature = client.sign_message("exact message")
     assert signature.startswith("0x")
     assert client.diagnostics.describe_performed and client.diagnostics.sign_performed
-    assert client.diagnostics.exit_status == "closed"
+    assert client.diagnostics.exit_status == "clean"
+    assert client.diagnostics.address_match == "confirmed"
+    assert client.diagnostics.environment_isolated == "confirmed"
+    assert client.diagnostics.message_integrity == "confirmed"
+    assert client.diagnostics.signature_verification == "unavailable"
 
 
 @pytest.mark.parametrize("mode", ["wrong_protocol", "wrong_capability", "address_mismatch", "wrong_request_id", "malformed_json", "extra_stdout"])
@@ -63,6 +67,22 @@ def test_timeout_is_bounded_and_child_is_killed():
     with pytest.raises(RuntimeError, match="describe_failed"):
         client.get_address()
     assert client.launcher.process is None
+    assert client.diagnostics.exit_status == "killed_timeout"
+
+
+def test_nonzero_exit_status_is_safe_diagnostic_only():
+    client = DreamDexExternalSiweSignerClient(launcher("nonzero_exit"), owner_address=OWNER)
+    with pytest.raises(RuntimeError):
+        client.get_address()
+    assert client.diagnostics.exit_status == "nonzero_exit"
+
+
+def test_address_mismatch_does_not_confirm_identity():
+    client = DreamDexExternalSiweSignerClient(launcher("address_mismatch"), owner_address=OWNER)
+    with pytest.raises(RuntimeError):
+        client.get_address()
+    assert client.diagnostics.address_match == "mismatch"
+    assert client.diagnostics.signature_verification == "unavailable"
 
 
 def test_minimal_environment_does_not_forward_parent_secret():
@@ -81,6 +101,12 @@ def test_external_client_integrates_with_auth_manager_and_invalid_signature_bloc
     assert result.state == "authenticated"
     assert transport.nonce_calls == 1 and transport.login_calls == 1
     assert result.signature_verification.status == "valid"
+    safe = result.safe_dict()
+    assert safe["external_signer_exit_status"] == "clean"
+    assert safe["external_signer_address_match"] == "confirmed"
+    assert safe["external_signer_environment_isolated"] == "confirmed"
+    assert safe["external_signer_message_integrity"] == "confirmed"
+    assert safe["external_signer_signature_verification"] == "valid"
     assert not result.signature_verification.authoritative_for_dreamdex_wallet_binding
 
     bad_transport = FixtureDreamDexAuthTransport(auth_fixture(), now=NOW)
@@ -89,6 +115,17 @@ def test_external_client_integrates_with_auth_manager_and_invalid_signature_bloc
     assert bad.state == "failed_closed"
     assert bad_transport.login_calls == 0
     assert bad.signature_verification.status == "invalid_format"
+    assert bad_client.diagnostics.signature_verification == "invalid"
+
+
+def test_message_mutation_is_not_confirmed():
+    transport = FixtureDreamDexAuthTransport(auth_fixture(), now=NOW)
+    client = DreamDexExternalSiweSignerClient(launcher("message_mutation"), owner_address=OWNER)
+    result = DreamDexAuthManager(signer=client, transport=transport, owner_address=OWNER, clock=lambda: NOW).authenticate()
+    assert result.state == "failed_closed"
+    assert transport.login_calls == 0
+    assert client.diagnostics.message_integrity == "mismatch"
+    assert client.diagnostics.signature_verification == "invalid"
 
 
 def test_external_managed_flow_preserves_single_flight():
