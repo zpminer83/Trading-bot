@@ -37,10 +37,11 @@ from bot.integrations.dreamdex_order_metadata import (
     normalize_order_metadata,
 )
 from bot.integrations.dreamdex_authenticated_read_only import AuthenticatedResponseSchemaFingerprint, DreamDexAuthenticatedReadOnlyTransport
+from bot.integrations.dreamdex_market_rules import DreamDexMarketTradingRules, PublicMarketSchemaFingerprint, fingerprint_market_payload, parse_market_trading_rules
 
 
 def _dec(value: Any, default: Decimal | None = None) -> Decimal | None:
-    if value is None or value == "":
+    if isinstance(value, bool) or value is None or value == "":
         return default
     try:
         return Decimal(str(value))
@@ -59,11 +60,13 @@ def _parse_int(row: Mapping[str, Any], primary: str, alias: str) -> int | None:
     value = row.get(primary, row.get(alias))
     if value is None:
         return None
+    if isinstance(value, bool):
+        raise ValueError(f"invalid {primary}")
     try:
         parsed = int(value)
     except (TypeError, ValueError):
         raise ValueError(f"invalid {primary}")
-    if parsed < 0:
+    if parsed < 0 or parsed > 255:
         raise ValueError(f"invalid {primary}")
     return parsed
 
@@ -252,10 +255,14 @@ class MarketMetadata:
     source: str = "markets"
     base_asset_kind: AssetKind = AssetKind.unknown
     quote_asset_kind: AssetKind = AssetKind.unknown
+    trading_rules: DreamDexMarketTradingRules | None = None
+    schema_fingerprint: PublicMarketSchemaFingerprint | None = None
 
     @property
     def active(self) -> bool:
-        return (self.status or "").lower() in {"active", "enabled", "online", "trading"}
+        if self.trading_rules is not None:
+            return self.trading_rules.trading_enabled is True and self.trading_rules.status_for("market_status") == "confirmed"
+        return (self.status or "").lower() in {"active", "trading", "open"}
 
     @property
     def base_is_native(self) -> bool:
@@ -300,6 +307,7 @@ class MarketReadOnlySource:
         self.transport = transport
         self.symbol = symbol
         self.clock = clock or (lambda: datetime.now(timezone.utc))
+        self._last_schema_fingerprint: PublicMarketSchemaFingerprint | None = None
 
     def _get(self, path: str, params: Mapping[str, str] | None = None) -> Any:
         try:
@@ -313,12 +321,29 @@ class MarketReadOnlySource:
             return self.transport.get(path)  # type: ignore[attr-defined]
 
     def markets(self) -> list[Mapping[str, Any]]:
-        return _rows(self._get("/markets"), "markets", "items")
+        payload = self._get("/markets")
+        self._last_schema_fingerprint = fingerprint_market_payload(payload, observed_at=self.clock())
+        return _rows(payload, "markets", "items")
+
+    @property
+    def schema_fingerprint(self) -> PublicMarketSchemaFingerprint | None:
+        return self._last_schema_fingerprint
 
     def metadata(self) -> MarketMetadata:
-        row = next((item for item in self.markets() if str(_first(item, "symbol", "market", default="")) == self.symbol), None)
-        if row is None:
+        rows = [item for item in self.markets() if str(_first(item, "symbol", "market", default="")) == self.symbol]
+        if not rows:
             raise ValueError(f"market {self.symbol} was not found")
+        row = rows[0]
+        duplicate_conflicts: dict[str, tuple[Any, ...]] = {}
+        if len(rows) > 1:
+            # Duplicate rows are not silently selected. Identical duplicates are
+            # harmless fixture noise; conflicting fields remain visible as
+            # conflict evidence and fail closed in the validator.
+            keys = set().union(*(item.keys() for item in rows))
+            for key in keys:
+                values = tuple(item.get(key) for item in rows)
+                if len(set(repr(value) for value in values)) > 1:
+                    duplicate_conflicts[key] = values
         types = _first(row, "supportedOrderTypes", "supported_order_types", "orderTypes", default=())
         if isinstance(types, str):
             types = (types,)
@@ -332,27 +357,51 @@ class MarketReadOnlySource:
         for name, value in (("pool_contract", pool_contract), ("base_token_address", base_address), ("quote_token_address", quote_address), ("stop_registry", _first(row, "stopRegistry", "stop_registry"))):
             if value is not None and not _is_address(value):
                 raise ValueError(f"invalid {name} address")
+        trading_rules = parse_market_trading_rules(
+            row, symbol=self.symbol, observed_at=self.clock(),
+            allow_legacy_aliases=bool(getattr(self.transport, "is_fixture", False)),
+        )
+        if duplicate_conflicts:
+            evidence = dict(trading_rules.field_statuses)
+            mapped = {
+                "contract": "market_address", "base": "base_token_address", "quote": "quote_token_address",
+                "tickSize": "tick_size", "lotSize": "quantity_step", "quantityStepSize": "quantity_step",
+                "minQuantity": "minimum_quantity", "minimumNotional": "minimum_notional", "status": "market_status",
+                "marketStatus": "market_status", "baseDecimals": "base_decimals", "quoteDecimals": "quote_decimals",
+            }
+            for key in duplicate_conflicts:
+                field_name = mapped.get(key)
+                if field_name and field_name in evidence:
+                    evidence[field_name] = replace(evidence[field_name], status="conflicting", source="conflicting", reason=f"conflicting duplicate {key}")
+            trading_rules = replace(
+                trading_rules, source_status="conflicting", schema_status="conflicting",
+                authoritative_fields=tuple(name for name in trading_rules.authoritative_fields if evidence.get(name, None) and evidence[name].status == "confirmed"),
+                conflicts=tuple(sorted(duplicate_conflicts)), conflicting_values=duplicate_conflicts,
+                field_statuses=evidence,
+            )
         return MarketMetadata(
             symbol=self.symbol,
             base_asset=base_asset,
             quote_asset=quote_asset,
-            base_token_address=base_address,
-            quote_token_address=quote_address,
-            pool_contract=pool_contract,
-            price_tick_size=_dec(_first(row, "tickSize", "tick_size", "priceTickSize")),
-            quantity_step_size=_dec(_first(row, "quantityStepSize", "quantity_step_size", "lotSize", "stepSize")),
-            minimum_quantity=_dec(_first(row, "minimumQuantity", "minQuantity", "min_quantity")),
-            minimum_notional=_dec(_first(row, "minimumNotional", "minNotional", "minimum_notional")),
-            status=_first(row, "status", "marketStatus"),
-            supported_order_types=tuple(str(item) for item in (types or ())),
+            base_token_address=trading_rules.base_token_address,
+            quote_token_address=trading_rules.quote_token_address,
+            pool_contract=trading_rules.market_address,
+            price_tick_size=trading_rules.tick_size,
+            quantity_step_size=trading_rules.quantity_step,
+            minimum_quantity=trading_rules.minimum_quantity,
+            minimum_notional=trading_rules.minimum_notional,
+            status=trading_rules.market_status,
+            supported_order_types=tuple(trading_rules.confirmed_order_types or ()),
             maker_fee=_dec(_first(row, "makerFee", "maker_fee", "makerFeeBps")),
             taker_fee=_dec(_first(row, "takerFee", "taker_fee", "takerFeeBps")),
             observed_at=_utc(_first(row, "timestamp", "updatedAt", "updated_at"), self.clock()),
-            base_decimals=base_decimals,
-            quote_decimals=quote_decimals,
-            stop_registry=_first(row, "stopRegistry", "stop_registry"),
+            base_decimals=trading_rules.base_decimals,
+            quote_decimals=trading_rules.quote_decimals,
+            stop_registry=trading_rules.stop_registry,
             base_asset_kind=_asset_kind(self.symbol, base_address, side="base"),
             quote_asset_kind=_asset_kind(self.symbol, quote_address, side="quote"),
+            trading_rules=trading_rules,
+            schema_fingerprint=self._last_schema_fingerprint,
         )
 
     def orderbook(self) -> Mapping[str, Any]:
@@ -1116,6 +1165,8 @@ def load_fixture(path: str | Path) -> Mapping[str, Any]:
 
 
 class FixtureTransport:
+    is_fixture = True
+
     def __init__(self, fixture: Mapping[str, Any]) -> None: self.fixture, self.paths = fixture, []
     def get(self, path: str, *, params: Mapping[str, str] | None = None) -> Any:
         self.paths.append((path, dict(params or {})))
@@ -1182,4 +1233,4 @@ ReadOnlyAccountSnapshot = AccountSnapshot
 ReadOnlyReconciliationReport = ReconciliationReport
 DreamDexReadOnlyClient = DreamDexReadOnlyAdapter
 
-__all__ = ["AccountSnapshot", "AddressReadOnlyDiagnostics", "AssetKind", "BalanceSnapshot", "DreamDexReadOnlyAdapter", "DreamDexReadOnlyClient", "FixtureRpcTransport", "FixtureTransport", "HttpGetTransport", "HttpRpcTransport", "MarketMetadata", "MarketReadOnlySnapshot", "MarketReadOnlySource", "NATIVE_SENTINEL", "ReadOnlyAccountSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyReconciliationReport", "ReadOnlySnapshot", "ReconciliationReport", "RpcAccountReadOnlySnapshot", "RpcAccountReadOnlySource", "SourceValue", "TokenReadOnlyDiagnostics", "VaultReadOnlySnapshot", "VaultReadOnlySource", "load_fixture", "mask_account_id"]
+__all__ = ["AccountSnapshot", "AddressReadOnlyDiagnostics", "AssetKind", "BalanceSnapshot", "DreamDexMarketTradingRules", "DreamDexReadOnlyAdapter", "DreamDexReadOnlyClient", "FixtureRpcTransport", "FixtureTransport", "HttpGetTransport", "HttpRpcTransport", "MarketMetadata", "MarketReadOnlySnapshot", "MarketReadOnlySource", "NATIVE_SENTINEL", "PublicMarketSchemaFingerprint", "ReadOnlyAccountSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyReconciliationReport", "ReadOnlySnapshot", "ReconciliationReport", "RpcAccountReadOnlySnapshot", "RpcAccountReadOnlySource", "SourceValue", "TokenReadOnlyDiagnostics", "VaultReadOnlySnapshot", "VaultReadOnlySource", "load_fixture", "mask_account_id", "parse_market_trading_rules"]

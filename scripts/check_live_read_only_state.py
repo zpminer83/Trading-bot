@@ -90,6 +90,37 @@ def _print_address_diagnostics(label: str, diagnostics, fallback_address: str | 
         print(f"  {name}: {_source(value)}")
 
 
+def _print_market_trading_rules(market) -> None:
+    rules = getattr(market, "trading_rules", None)
+    print("MARKET TRADING RULES:")
+    if rules is None:
+        print("  source status: unavailable")
+        print("  schema status: unavailable")
+        return
+    print(f"  symbol: {rules.symbol or market.symbol}")
+    print(f"  source status: {rules.source_status}")
+    print(f"  schema status: {rules.schema_status}")
+    print(f"  market status: {rules.market_status or 'unavailable'}")
+    print(f"  trading enabled: {'YES' if rules.trading_enabled is True else 'NO'}")
+    for label, value in (("tick size", rules.tick_size), ("quantity step", rules.quantity_step), ("minimum quantity", rules.minimum_quantity), ("minimum notional", rules.minimum_notional), ("base decimals", rules.base_decimals), ("quote decimals", rules.quote_decimals), ("price decimals", rules.price_decimals), ("quantity decimals", rules.quantity_decimals)):
+        print(f"  {label}: {value if value is not None else 'unavailable'}")
+    print(f"  confirmed order types: {', '.join(rules.confirmed_order_types) if rules.confirmed_order_types is not None else 'unavailable'}")
+    print(f"  authoritative fields: {', '.join(rules.authoritative_fields) or 'none'}")
+    print(f"  unavailable fields: {', '.join(rules.unavailable_fields) or 'none'}")
+    print(f"  conflicts: {', '.join(rules.conflicts) or 'none'}")
+    fingerprint = getattr(market, "schema_fingerprint", None)
+    if fingerprint is not None:
+        fields = ", ".join(f"{name}:{kind}" for name, kind in fingerprint.field_types) or "none"
+        nested = ", ".join(f"{name}:{kind}" for name, kind in fingerprint.nested_field_types) or "none"
+        print("  public schema fingerprint: observed")
+        print(f"    endpoint: {fingerprint.endpoint_name}")
+        print(f"    HTTP status: {fingerprint.http_status if fingerprint.http_status is not None else 'unavailable'}")
+        print(f"    top-level type: {fingerprint.top_level_type}")
+        print(f"    fields: {fields}")
+        print(f"    nested fields: {nested}")
+        print(f"    list lengths: {', '.join(f'{name}={length}' for name, length in fingerprint.list_lengths) or 'none'}")
+
+
 def _orderbook_timestamp(book) -> datetime | None:
     value = book.get("timestamp", book.get("updatedAt", book.get("updated_at"))) if isinstance(book, dict) else None
     if value is None:
@@ -115,12 +146,8 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Pool address: {market.pool_address or '<unavailable>'}")
     print(f"Base token address: {market.base_token_address or '<unavailable>'}")
     print(f"Quote token address: {market.quote_token_address or '<unavailable>'}")
-    print("Market metadata status: available")
-    print(f"Market status: {market.status or 'unavailable'}")
-    print(f"Tick size: {market.price_tick_size}")
-    print(f"Quantity step: {market.quantity_step_size}")
-    print(f"Minimum quantity: {market.minimum_quantity}")
-    print(f"Minimum notional: {market.minimum_notional if market.minimum_notional is not None else 'unavailable'}")
+    print(f"Market metadata status: {getattr(getattr(market, 'trading_rules', None), 'source_status', 'unavailable')}")
+    _print_market_trading_rules(market)
     _print_address_diagnostics("OWNER/LOGIN", snapshot.owner_diagnostics, account.owner_address or account.account_identifier)
     _print_address_diagnostics("TRADING/SMART", snapshot.trading_diagnostics, account.trading_address)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}

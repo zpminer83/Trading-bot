@@ -70,22 +70,57 @@ class DryRunOrderValidator:
         quantity = _floor_step(intent.quantity, market.quantity_step_size)
         notional = price * quantity
         reasons: list[str] = []
+        rules = getattr(market, "trading_rules", None)
         if market.symbol != intent.symbol:
             reasons.append("market_not_found")
-        if market.status is None:
-            reasons.append("market_status_unavailable")
-        elif not market.active:
-            reasons.append("market_not_active")
-        if market.supported_order_types and intent.order_type not in {item.lower() for item in market.supported_order_types}:
-            reasons.append("unsupported_order_type")
-        if market.price_tick_size and not _aligned(intent.price, market.price_tick_size):
-            reasons.append("invalid_price_tick")
-        if market.quantity_step_size and not _aligned(intent.quantity, market.quantity_step_size):
-            reasons.append("invalid_quantity_step")
-        if market.minimum_quantity is not None and quantity < market.minimum_quantity:
-            reasons.append("minimum_quantity")
-        if market.minimum_notional is not None and notional < market.minimum_notional:
-            reasons.append("minimum_notional")
+        if rules is not None:
+            if rules.source_status == "conflicting" or rules.conflicts:
+                reasons.append("market_rules_conflicting")
+            elif rules.source_status not in {"available", "both_confirmed"}:
+                reasons.append("market_rules_unavailable")
+            status_state = rules.status_for("market_status")
+            if status_state != "confirmed" or rules.market_status is None:
+                reasons.append("market_status_unavailable")
+            elif not rules.trading_enabled:
+                reasons.append("market_not_active")
+            tick = rules.tick_size
+            step = rules.quantity_step
+            minimum_quantity = rules.minimum_quantity
+            if rules.status_for("tick_size") != "confirmed" or tick is None:
+                reasons.append("tick_size_unavailable")
+            elif not _aligned(intent.price, tick):
+                reasons.append("invalid_price_tick")
+            if rules.status_for("quantity_step") != "confirmed" or step is None:
+                reasons.append("quantity_step_unavailable")
+            elif not _aligned(intent.quantity, step):
+                reasons.append("invalid_quantity_step")
+            if rules.status_for("minimum_quantity") != "confirmed" or minimum_quantity is None:
+                reasons.append("minimum_quantity_unavailable")
+            elif quantity < minimum_quantity:
+                reasons.append("minimum_quantity")
+            if rules.status_for("minimum_notional") != "confirmed" or rules.minimum_notional is None:
+                reasons.append("minimum_notional_unavailable")
+            elif notional < rules.minimum_notional:
+                reasons.append("minimum_notional")
+            if rules.status_for("confirmed_order_types") != "confirmed" or rules.confirmed_order_types is None:
+                reasons.append("order_types_unavailable")
+            elif intent.order_type.lower() not in set(rules.confirmed_order_types):
+                reasons.append("unsupported_order_type")
+        else:
+            if market.status is None:
+                reasons.append("market_status_unavailable")
+            elif not market.active:
+                reasons.append("market_not_active")
+            if market.supported_order_types and intent.order_type not in {item.lower() for item in market.supported_order_types}:
+                reasons.append("unsupported_order_type")
+            if market.price_tick_size and not _aligned(intent.price, market.price_tick_size):
+                reasons.append("invalid_price_tick")
+            if market.quantity_step_size and not _aligned(intent.quantity, market.quantity_step_size):
+                reasons.append("invalid_quantity_step")
+            if market.minimum_quantity is not None and quantity < market.minimum_quantity:
+                reasons.append("minimum_quantity")
+            if market.minimum_notional is not None and notional < market.minimum_notional:
+                reasons.append("minimum_notional")
         quote = market.quote_asset or "USDso"
         base = market.base_asset or "SOMI"
         if getattr(account, "incomplete", False):

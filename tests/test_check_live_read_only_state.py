@@ -27,6 +27,11 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert code == 0
     assert "READ-ONLY ACCOUNT CHECK" in output
+    assert "MARKET TRADING RULES:" in output
+    assert "tick size: 0.0001" in output
+    assert "quantity step: 0.01" in output
+    assert "minimum notional: unavailable" in output
+    assert "public schema fingerprint: observed" in output
     assert "Real submission enabled: NO" in output
     assert "private-account-id" not in output
     assert "create_order" not in output
