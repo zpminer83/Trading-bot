@@ -185,6 +185,63 @@ def test_dual_address_types_and_no_authoritative_choice():
     assert report.exchange_cash is None and report.exchange_inventory is None
 
 
+def test_platform_role_and_onchain_code_type_are_independent_and_non_authoritative():
+    fixture = load_fixture(FIXTURE)
+    owner = "0x1234567890abcdef1234567890abcdef12345678"
+    trading = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    fixture["rpc"]["code_by_address"] = {owner.lower(): "0x", trading.lower(): "0x"}
+    adapter = DreamDexReadOnlyAdapter(
+        transport=FixtureTransport(fixture), rpc_transport=FixtureRpcTransport(fixture),
+        owner=owner, trading_address=trading,
+        owner_platform_role="owner_login_wallet", trading_platform_role="dreamdex_smart_wallet",
+    )
+    snapshot = adapter.fetch_snapshot()
+    assert snapshot.owner_diagnostics.platform_role == "owner_login_wallet"
+    assert snapshot.owner_diagnostics.platform_role_status == "user_confirmed"
+    assert snapshot.owner_diagnostics.onchain_code_type == "eoa_no_code"
+    assert snapshot.trading_diagnostics.platform_role == "dreamdex_smart_wallet"
+    assert snapshot.trading_diagnostics.onchain_code_type == "eoa_no_code"
+    evidence = snapshot.account.identity_binding_evidence
+    assert evidence.binding_status == "observed"
+    assert evidence.authoritative is False
+    assert evidence.authenticated_query_address_match == "yes"
+    assert "1234567890abcdef" not in repr(evidence)
+    assert snapshot.account.account_address_semantics == "observed_non_authoritative"
+    assert not adapter.reconcile(snapshot).completed
+
+
+def test_contract_code_does_not_prove_smart_wallet_role_and_invalid_role_is_rejected():
+    fixture = load_fixture(FIXTURE)
+    owner = "0x1234567890abcdef1234567890abcdef12345678"
+    trading = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    fixture["rpc"]["code_by_address"] = {owner.lower(): "0x", trading.lower(): "0x60006000"}
+    adapter = DreamDexReadOnlyAdapter(
+        transport=FixtureTransport(fixture), rpc_transport=FixtureRpcTransport(fixture),
+        owner=owner, trading_address=trading, trading_platform_role="dreamdex_smart_wallet",
+    )
+    evidence = adapter.fetch_snapshot().account.identity_binding_evidence
+    assert evidence.trading_platform_role == "dreamdex_smart_wallet"
+    assert evidence.trading_onchain_code_type == "contract_code_present"
+    assert evidence.authoritative is False
+    with pytest.raises(ValueError, match="platform role"):
+        DreamDexReadOnlyAdapter(transport=FixtureTransport(fixture), rpc_transport=FixtureRpcTransport(fixture), owner=owner, trading_address=trading, trading_platform_role="not-a-role")
+
+
+def test_identity_binding_query_mismatch_is_conflicting():
+    from bot.integrations.dreamdex_read_only import DreamDexIdentityBindingEvidence
+    owner = "0x1234567890abcdef1234567890abcdef12345678"
+    trading = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
+    other = "0x1111111111111111111111111111111111111111"
+    evidence = DreamDexIdentityBindingEvidence(
+        owner, trading, "owner_login_wallet", "dreamdex_smart_wallet",
+        "eoa_no_code", "eoa_no_code", "user_confirmed", "available", "available",
+        other, "observed", "unavailable", "observed", False,
+    )
+    assert evidence.binding_status == "conflicting"
+    assert evidence.authenticated_query_address_match == "no"
+    assert "authenticated_query_address_mismatch" in evidence.unresolved_reasons
+
+
 class _DiagnosticRpc:
     def __init__(self, mode="success"):
         self.mode = mode

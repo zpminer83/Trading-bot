@@ -61,6 +61,24 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "authenticated_account_state_unavailable" in output
 
 
+def test_cli_prints_platform_roles_and_identity_binding_without_authorizing(monkeypatch, capsys):
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "0x1234567890abcdef1234567890abcdef12345678")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_TRADING_ADDRESS", "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_TRADING_PLATFORM_ROLE", "dreamdex_smart_wallet")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_PLATFORM_ROLE", "owner_login_wallet")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_FIXTURE", str(FIXTURE))
+    code = check_live_read_only_state.main()
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "platform role: owner_login_wallet" in output
+    assert "platform role: dreamdex_smart_wallet" in output
+    assert "on-chain code type: eoa_no_code" in output
+    assert "IDENTITY BINDING:" in output
+    assert "binding status: observed" in output
+    assert "authoritative: NO" in output
+    assert "1234567890abcdef" not in output
+
+
 def test_cli_authenticated_factory_wires_configured_transport_without_leaking_token(monkeypatch, capsys):
     token = "offline-test-bearer"
     monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "0x1234567890abcdef1234567890abcdef12345678")

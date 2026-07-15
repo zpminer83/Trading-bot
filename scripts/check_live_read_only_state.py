@@ -71,13 +71,23 @@ def _print_address_diagnostics(label: str, diagnostics, fallback_address: str | 
     print(f"{label}:")
     if diagnostics is None:
         print(f"  address masked: {_masked(fallback_address)}")
-        print("  type: unavailable (error_code=unavailable)")
+        print("  platform role: unknown")
+        print("  platform role status: unavailable")
+        print("  on-chain code type: unavailable")
+        print("  on-chain code status: unavailable (error_code=unavailable)")
+        print("  deployment status: unavailable")
+        print("  account abstraction status: unavailable")
         for name in ("native SOMI", "wallet SOMI", "wallet USDso", "vault SOMI", "vault USDso"):
             print(f"  {name}: unavailable (error_code=unavailable)")
         return
     print(f"  address masked: {_masked(diagnostics.address)}")
-    type_suffix = "" if diagnostics.address_type != "unavailable" else f" (error_code={diagnostics.code.error_code})"
-    print(f"  type: {diagnostics.address_type}{type_suffix}")
+    code_suffix = "" if diagnostics.onchain_code_status == "available" else f" (error_code={diagnostics.code.error_code})"
+    print(f"  platform role: {diagnostics.platform_role}")
+    print(f"  platform role status: {diagnostics.platform_role_status}")
+    print(f"  on-chain code type: {diagnostics.onchain_code_type}")
+    print(f"  on-chain code status: {diagnostics.onchain_code_status}{code_suffix}")
+    print(f"  deployment status: {diagnostics.deployment_status}")
+    print(f"  account abstraction status: {diagnostics.account_abstraction_status}")
     print(f"  base asset kind: {diagnostics.base_token.asset_kind.value}")
     print(f"  base token code status: {_source_status(diagnostics.base_token.code)}")
     print(f"  base raw balance status: {_source_status(diagnostics.base_token.raw_balance)}")
@@ -90,6 +100,26 @@ def _print_address_diagnostics(label: str, diagnostics, fallback_address: str | 
     print(f"  quote balance read method: {diagnostics.quote_token.balance_method}")
     for name, value in (("native SOMI", diagnostics.native_gas), ("wallet SOMI", diagnostics.wallet_somi), ("wallet USDso", diagnostics.wallet_usdso), ("vault SOMI", diagnostics.vault_somi), ("vault USDso", diagnostics.vault_usdso)):
         print(f"  {name}: {_source(value)}")
+
+
+def _print_identity_binding_evidence(evidence) -> None:
+    print("IDENTITY BINDING:")
+    if evidence is None:
+        print("  binding status: unavailable")
+        print("  authoritative: NO")
+        print("  unresolved reasons: identity_binding_evidence_unavailable")
+        return
+    safe = evidence.safe_dict()
+    print(f"  owner: {safe['owner_address']} ({safe['owner_platform_role']})")
+    print(f"  trading: {safe['trading_address']} ({safe['trading_platform_role']})")
+    print(f"  UI role confirmation: {safe['ui_role_confirmation']}")
+    print(f"  authenticated vault evidence: {safe['authenticated_vault_probe_status']}")
+    print(f"  authenticated orders evidence: {safe['authenticated_order_probe_status']}")
+    print(f"  configured query address match: {safe['authenticated_query_address_match']}")
+    print(f"  official mapping status: {safe['official_mapping_status']}")
+    print(f"  binding status: {safe['binding_status']}")
+    print(f"  authoritative: {'YES' if safe['authoritative'] else 'NO'}")
+    print(f"  unresolved reasons: {', '.join(safe['unresolved_reasons']) or 'none'}")
 
 
 def _print_market_trading_rules(market) -> None:
@@ -199,6 +229,7 @@ def _print_report(snapshot, report, validation) -> None:
     _print_market_trading_rules(market)
     _print_address_diagnostics("OWNER/LOGIN", snapshot.owner_diagnostics, account.owner_address or account.account_identifier)
     _print_address_diagnostics("TRADING/SMART", snapshot.trading_diagnostics, account.trading_address)
+    _print_identity_binding_evidence(account.identity_binding_evidence)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
     best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
@@ -240,7 +271,12 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Authenticated order list status: {authenticated.open_orders_status.schema_status or authenticated.open_orders_status.status}")
     print(f"Authenticated order-by-id status: {account.authenticated_order_by_id_status}")
     print(f"Authenticated schema fingerprint status: {account.authenticated_schema_fingerprint_status}")
-    print(f"Authenticated identity verified: {'YES' if authenticated.authoritative_for(account.trading_address) else 'NO'}")
+    identity_verified = bool(
+        account.identity_binding_evidence is not None
+        and account.identity_binding_evidence.authoritative
+        and authenticated.authoritative_for(account.trading_address)
+    )
+    print(f"Authenticated identity verified: {'YES' if identity_verified else 'NO'}")
     _print_schema_fingerprint("vault", account.authenticated_vault_fingerprint)
     _print_schema_fingerprint("order list", account.authenticated_order_list_fingerprint)
     _print_schema_fingerprint("order-by-id", account.authenticated_order_by_id_fingerprint)
@@ -311,7 +347,17 @@ def main() -> int:
         # The SIWE transport is telemetry-only until an explicit signer is
         # supplied. No nonce/login call is made by this read-only check.
         auth_manager = DreamDexAuthManager(transport=siwe_transport)
-        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, trading_address=trading_address, symbol=symbol, authenticated_transport=authenticated_transport, auth_manager=auth_manager)
+        adapter = DreamDexReadOnlyAdapter(
+            transport=rest_transport,
+            rpc_transport=rpc_transport,
+            owner=owner,
+            trading_address=trading_address,
+            symbol=symbol,
+            authenticated_transport=authenticated_transport,
+            auth_manager=auth_manager,
+            owner_platform_role=os.environ.get("DREAMDEX_READ_ONLY_OWNER_PLATFORM_ROLE"),
+            trading_platform_role=os.environ.get("DREAMDEX_READ_ONLY_TRADING_PLATFORM_ROLE"),
+        )
         snapshot = adapter.fetch_snapshot()
         local_cash = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_CASH")
         local_inventory = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_INVENTORY")

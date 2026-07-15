@@ -166,6 +166,31 @@ def mask_account_id(value: str | None) -> str:
     return "***" if len(text) <= 8 else f"{text[:4]}...{text[-4:]}"
 
 
+PLATFORM_ROLES = frozenset({"owner_login_wallet", "dreamdex_smart_wallet", "operator_wallet", "unknown"})
+EVIDENCE_LEVELS = frozenset({"unavailable", "user_confirmed", "observed", "independently_confirmed", "conflicting", "authoritative"})
+ONCHAIN_CODE_TYPES = frozenset({"eoa_no_code", "contract_code_present", "unavailable", "conflicting"})
+
+
+def _platform_role(value: str | None) -> tuple[str, str]:
+    if value is None or value == "":
+        return "unknown", "unavailable"
+    role = str(value).strip().lower()
+    if role not in PLATFORM_ROLES:
+        raise ValueError("invalid platform role")
+    return role, "user_confirmed"
+
+
+def _onchain_code_type(code: SourceValue) -> str:
+    if code.status == "conflicting":
+        return "conflicting"
+    if not code.available or code.value is None:
+        return "unavailable"
+    raw = str(code.value).lower()
+    if raw in {"0x", "0x0"}:
+        return "eoa_no_code"
+    return "contract_code_present"
+
+
 class ReadOnlyTransport(Protocol):
     def get(self, path: str, *, params: Mapping[str, str] | None = None) -> Any: ...
 
@@ -529,7 +554,7 @@ class TokenReadOnlyDiagnostics:
     balance_method: str
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, repr=False)
 class AddressReadOnlyDiagnostics:
     """Independent public-RPC observations for one candidate account address."""
 
@@ -545,6 +570,32 @@ class AddressReadOnlyDiagnostics:
     vault_quote: SourceValue
     base_token: TokenReadOnlyDiagnostics | None = None
     quote_token: TokenReadOnlyDiagnostics | None = None
+    platform_role: str = "unknown"
+    platform_role_status: str = "unavailable"
+    onchain_code_type: str = "unavailable"
+    onchain_code_status: str = "unavailable"
+    deployment_status: str = "unavailable"
+    account_abstraction_status: str = "unavailable"
+
+    def __post_init__(self) -> None:
+        role, role_status = _platform_role(self.platform_role)
+        object.__setattr__(self, "platform_role", role)
+        if self.platform_role_status not in EVIDENCE_LEVELS:
+            raise ValueError("invalid platform role status")
+        if self.platform_role_status == "unavailable" and role != "unknown":
+            object.__setattr__(self, "platform_role_status", role_status)
+        code_type = self.onchain_code_type if self.onchain_code_type != "unavailable" else _onchain_code_type(self.code)
+        if code_type not in ONCHAIN_CODE_TYPES:
+            raise ValueError("invalid onchain code type")
+        object.__setattr__(self, "onchain_code_type", code_type)
+        object.__setattr__(self, "onchain_code_status", self.onchain_code_status if self.onchain_code_status != "unavailable" else self.code.status)
+
+    def __repr__(self) -> str:
+        return (
+            f"AddressReadOnlyDiagnostics(address={mask_account_id(self.address)!r}, "
+            f"platform_role={self.platform_role!r}, onchain_code_type={self.onchain_code_type!r}, "
+            f"onchain_code_status={self.onchain_code_status!r})"
+        )
 
     @property
     def wallet_somi(self) -> SourceValue:
@@ -561,6 +612,83 @@ class AddressReadOnlyDiagnostics:
     @property
     def vault_usdso(self) -> SourceValue:
         return self.vault_quote
+
+
+@dataclass(frozen=True, repr=False)
+class DreamDexIdentityBindingEvidence:
+    owner_address: str | None
+    trading_address: str | None
+    owner_platform_role: str
+    trading_platform_role: str
+    owner_onchain_code_type: str
+    trading_onchain_code_type: str
+    ui_role_confirmation: str
+    authenticated_vault_probe_status: str
+    authenticated_order_probe_status: str
+    authenticated_query_address: str | None
+    token_subject_status: str
+    official_mapping_status: str
+    binding_status: str
+    authoritative: bool
+    evidence_sources: tuple[str, ...] = ()
+    unresolved_reasons: tuple[str, ...] = ()
+    observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    authenticated_query_address_match: str = "unresolved"
+
+    def __post_init__(self) -> None:
+        for name in ("owner_address", "trading_address", "authenticated_query_address"):
+            value = getattr(self, name)
+            if value is not None and not _is_address(value):
+                raise ValueError(f"invalid {name}")
+        for name in ("owner_platform_role", "trading_platform_role"):
+            role = getattr(self, name)
+            if role not in PLATFORM_ROLES:
+                raise ValueError(f"invalid {name}")
+        for name in ("ui_role_confirmation", "token_subject_status", "official_mapping_status", "binding_status"):
+            if getattr(self, name) not in EVIDENCE_LEVELS:
+                raise ValueError(f"invalid {name}")
+        if self.owner_onchain_code_type not in ONCHAIN_CODE_TYPES or self.trading_onchain_code_type not in ONCHAIN_CODE_TYPES:
+            raise ValueError("invalid onchain code type")
+        if self.authenticated_query_address_match not in {"yes", "no", "unresolved"}:
+            raise ValueError("invalid authenticated query address match")
+        if self.trading_address and self.authenticated_query_address:
+            matched = self.trading_address.lower() == self.authenticated_query_address.lower()
+            object.__setattr__(self, "authenticated_query_address_match", "yes" if matched else "no")
+            if not matched:
+                object.__setattr__(self, "binding_status", "conflicting")
+                object.__setattr__(self, "unresolved_reasons", tuple(dict.fromkeys((*self.unresolved_reasons, "authenticated_query_address_mismatch"))))
+        object.__setattr__(self, "observed_at", _utc(self.observed_at))
+        if self.authoritative and self.binding_status != "authoritative":
+            raise ValueError("authoritative binding requires authoritative status")
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "owner_address": mask_account_id(self.owner_address),
+            "trading_address": mask_account_id(self.trading_address),
+            "owner_platform_role": self.owner_platform_role,
+            "trading_platform_role": self.trading_platform_role,
+            "owner_onchain_code_type": self.owner_onchain_code_type,
+            "trading_onchain_code_type": self.trading_onchain_code_type,
+            "ui_role_confirmation": self.ui_role_confirmation,
+            "authenticated_vault_probe_status": self.authenticated_vault_probe_status,
+            "authenticated_order_probe_status": self.authenticated_order_probe_status,
+            "authenticated_query_address": mask_account_id(self.authenticated_query_address),
+            "authenticated_query_address_match": self.authenticated_query_address_match,
+            "token_subject_status": self.token_subject_status,
+            "official_mapping_status": self.official_mapping_status,
+            "binding_status": self.binding_status,
+            "authoritative": self.authoritative,
+            "evidence_sources": self.evidence_sources,
+            "unresolved_reasons": self.unresolved_reasons,
+            "observed_at": self.observed_at.isoformat(),
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"DreamDexIdentityBindingEvidence(owner_address={mask_account_id(self.owner_address)!r}, "
+            f"trading_address={mask_account_id(self.trading_address)!r}, binding_status={self.binding_status!r}, "
+            f"authoritative={self.authoritative})"
+        )
 
 
 class RpcAccountReadOnlySource:
@@ -767,6 +895,7 @@ class AccountSnapshot:
     authenticated_order_list_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
     authenticated_order_by_id_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
     auth_snapshot: Any | None = None
+    identity_binding_evidence: DreamDexIdentityBindingEvidence | None = None
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
@@ -796,6 +925,15 @@ class AccountSnapshot:
             "trading_address": mask_account_id(self.trading_address),
             "trading_address_status": self.trading_address_status,
             "account_address_semantics": self.account_address_semantics,
+            "identity_binding_evidence": self.identity_binding_evidence.safe_dict() if self.identity_binding_evidence is not None else None,
+            "owner_platform_role": self.owner_diagnostics.platform_role if self.owner_diagnostics else "unknown",
+            "owner_platform_role_status": self.owner_diagnostics.platform_role_status if self.owner_diagnostics else "unavailable",
+            "owner_onchain_code_type": self.owner_diagnostics.onchain_code_type if self.owner_diagnostics else "unavailable",
+            "owner_onchain_code_status": self.owner_diagnostics.onchain_code_status if self.owner_diagnostics else "unavailable",
+            "trading_platform_role": self.trading_diagnostics.platform_role if self.trading_diagnostics else "unknown",
+            "trading_platform_role_status": self.trading_diagnostics.platform_role_status if self.trading_diagnostics else "unavailable",
+            "trading_onchain_code_type": self.trading_diagnostics.onchain_code_type if self.trading_diagnostics else "unavailable",
+            "trading_onchain_code_status": self.trading_diagnostics.onchain_code_status if self.trading_diagnostics else "unavailable",
             "balances": {key: {"total": str(value.total), "available": str(value.available), "locked": str(value.locked), "status": value.status} for key, value in self.balances.items()},
             "open_orders_status": self.open_orders_status,
             "fills_status": self.fills_status,
@@ -864,7 +1002,7 @@ class ReconciliationReport:
 class DreamDexReadOnlyAdapter:
     """Compose confirmed market, vault and RPC sources; never mutates state."""
 
-    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None, fill_event_indexer: OrderFilledEventIndexer | None = None, order_metadata_resolver: OrderMetadataResolver | None = None, auth_manager: DreamDexAuthManager | None = None) -> None:
+    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None, fill_event_indexer: OrderFilledEventIndexer | None = None, order_metadata_resolver: OrderMetadataResolver | None = None, auth_manager: DreamDexAuthManager | None = None, owner_platform_role: str | None = None, trading_platform_role: str | None = None) -> None:
         if not owner or not str(owner).strip() or not _is_address(owner):
             raise ValueError("owner must be a public address")
         if trading_address is not None and not _is_address(trading_address):
@@ -874,6 +1012,8 @@ class DreamDexReadOnlyAdapter:
         self.owner, self.trading_address, self.symbol, self.clock = str(owner), (str(trading_address) if trading_address else None), symbol, clock or (lambda: datetime.now(timezone.utc))
         self.authenticated_transport = authenticated_transport or UnconfiguredAuthenticatedReadOnlyTransport()
         self.auth_manager = auth_manager
+        self.owner_platform_role, self._owner_platform_role_status = _platform_role(owner_platform_role)
+        self.trading_platform_role, self._trading_platform_role_status = _platform_role(trading_platform_role)
         self.fill_event_indexer = fill_event_indexer
         self.order_metadata_resolver = order_metadata_resolver
         self._last_authenticated_vault_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
@@ -1018,6 +1158,84 @@ class DreamDexReadOnlyAdapter:
             recent_status, fills_status, commissions_status, observed,
         )
 
+    def _build_identity_binding_evidence(
+        self,
+        *,
+        owner_diagnostics: AddressReadOnlyDiagnostics,
+        trading_diagnostics: AddressReadOnlyDiagnostics | None,
+        authenticated: AuthenticatedAccountSnapshot,
+        queried_address: str | None,
+    ) -> DreamDexIdentityBindingEvidence:
+        trading_address = self.trading_address
+        query_match = "yes" if trading_address and queried_address == trading_address else "unresolved"
+        if trading_address and queried_address and queried_address != trading_address:
+            query_match = "no"
+        vault_status = authenticated.balances_status.status
+        order_status = authenticated.open_orders_status.status
+        probe_available = vault_status in {"available", "valid_confirmed_schema"}
+        order_probe_available = order_status in {"available", "available_empty", "valid_confirmed_schema"}
+        role_declared = self.trading_platform_role != "unknown"
+        if query_match == "no":
+            binding_status = "conflicting"
+        elif role_declared and probe_available and order_probe_available:
+            binding_status = "observed"
+        elif role_declared or probe_available or order_probe_available:
+            binding_status = "observed"
+        else:
+            binding_status = "unavailable"
+        token_subject_status = "unresolved"
+        auth_state = None
+        if self.auth_manager is not None:
+            token_subject_status = str(getattr(self.auth_manager.identity, "identity_status", "unresolved"))
+            auth_state = getattr(self.auth_manager.snapshot(), "state", None)
+            if auth_state == "authenticated":
+                token_subject_status = "observed"
+        if token_subject_status not in EVIDENCE_LEVELS:
+            token_subject_status = "unavailable"
+        reasons: list[str] = [
+            "official_mapping_unconfirmed",
+            "authenticated_subject_wallet_binding_unconfirmed",
+            "role_does_not_prove_ownership",
+        ]
+        if not role_declared:
+            reasons.append("trading_platform_role_not_declared")
+        if query_match == "no":
+            reasons.append("authenticated_query_address_mismatch")
+        if not probe_available:
+            reasons.append("authenticated_vault_probe_unavailable")
+        if not order_probe_available:
+            reasons.append("authenticated_order_probe_unavailable")
+        sources = ["eth_getCode"]
+        if role_declared:
+            sources.append("local_platform_role_declaration")
+        if probe_available:
+            sources.append("authenticated_vault_probe")
+        if order_probe_available:
+            sources.append("authenticated_order_probe")
+        if auth_state == "authenticated":
+            sources.append("successful_authenticated_login_workflow")
+        ui_confirmation = "user_confirmed" if role_declared else "unavailable"
+        return DreamDexIdentityBindingEvidence(
+            owner_address=self.owner,
+            trading_address=trading_address,
+            owner_platform_role=self.owner_platform_role,
+            trading_platform_role=self.trading_platform_role,
+            owner_onchain_code_type=owner_diagnostics.onchain_code_type,
+            trading_onchain_code_type=trading_diagnostics.onchain_code_type if trading_diagnostics else "unavailable",
+            ui_role_confirmation=ui_confirmation,
+            authenticated_vault_probe_status=vault_status,
+            authenticated_order_probe_status=order_status,
+            authenticated_query_address=queried_address,
+            token_subject_status=token_subject_status,
+            official_mapping_status="unavailable",
+            binding_status=binding_status,
+            authoritative=False,
+            evidence_sources=tuple(sources),
+            unresolved_reasons=tuple(dict.fromkeys(reasons)),
+            observed_at=self.clock(),
+            authenticated_query_address_match=query_match,
+        )
+
     def fetch_snapshot(self) -> ReadOnlySnapshot:
         market = self.fetch_market()
         metadata = market.metadata
@@ -1037,8 +1255,19 @@ class DreamDexReadOnlyAdapter:
         quote_asset = metadata.quote_asset or self.symbol.split(":", 1)[1]
         orderbook_status = _orderbook_status(market.orderbook, self.clock())
         rpc_source = RpcAccountReadOnlySource(self._rpc_transport, account_address=self.trading_address, gas_address=self.owner, pool_address=metadata.pool_contract, base_token_address=metadata.base_token_address, quote_token_address=metadata.quote_token_address, base_decimals=metadata.base_decimals, quote_decimals=metadata.quote_decimals, base_asset_kind=metadata.base_asset_kind, quote_asset_kind=metadata.quote_asset_kind, clock=self.clock)
-        owner_diagnostics = rpc_source.fetch_address(self.owner)
-        trading_diagnostics = rpc_source.fetch_address(self.trading_address) if self.trading_address else None
+        owner_diagnostics = replace(
+            rpc_source.fetch_address(self.owner),
+            platform_role=self.owner_platform_role,
+            platform_role_status=self._owner_platform_role_status,
+        )
+        trading_diagnostics = (
+            replace(
+                rpc_source.fetch_address(self.trading_address),
+                platform_role=self.trading_platform_role,
+                platform_role_status=self._trading_platform_role_status,
+            )
+            if self.trading_address else None
+        )
         if self.trading_address:
             vault = VaultReadOnlySource(self._transport, self.symbol, base_asset, quote_asset, self.clock).fetch(self.trading_address)
         else:
@@ -1069,6 +1298,12 @@ class DreamDexReadOnlyAdapter:
             base_asset: BalanceSnapshot(base_asset, base_auth.total if base_auth else rpc.base_wallet.value, base_auth.available if base_auth else rpc.base_wallet.value, base_auth.locked if base_auth else None, base_auth.source_status.status if base_auth else rpc.base_wallet.status),
             quote_asset: BalanceSnapshot(quote_asset, quote_auth.total if quote_auth else rpc.quote_wallet.value, quote_auth.available if quote_auth else rpc.quote_wallet.value, quote_auth.locked if quote_auth else None, quote_auth.source_status.status if quote_auth else rpc.quote_wallet.status),
         }
+        identity_binding_evidence = self._build_identity_binding_evidence(
+            owner_diagnostics=owner_diagnostics,
+            trading_diagnostics=trading_diagnostics,
+            authenticated=authenticated,
+            queried_address=self.trading_address or self.owner,
+        )
         account = AccountSnapshot(
             self.trading_address or self.owner, balances, vault, rpc,
             "confirmed" if authenticated.open_orders_status.available else "source_unavailable",
@@ -1077,7 +1312,13 @@ class DreamDexReadOnlyAdapter:
             trading_address_status="available" if self.trading_address else "unresolved",
             orderbook_status=orderbook_status, vault_address_semantics="unresolved",
             owner_diagnostics=owner_diagnostics, trading_diagnostics=trading_diagnostics,
-            account_address_semantics="resolved" if authenticated_authoritative or onchain_authoritative else "unresolved",
+            account_address_semantics=(
+                "observed_non_authoritative"
+                if (
+                    self.auth_manager is not None and not self.auth_manager.identity.authoritative
+                ) or self.trading_platform_role != "unknown" or self.owner_platform_role != "unknown"
+                else "resolved" if authenticated_authoritative or onchain_authoritative else "unresolved"
+            ),
             authenticated=authenticated,
             onchain_fills=onchain_fills,
             order_metadata_report=order_metadata_report,
@@ -1102,6 +1343,7 @@ class DreamDexReadOnlyAdapter:
             authenticated_order_list_fingerprint=self._last_authenticated_order_list_fingerprint,
             authenticated_order_by_id_fingerprint=self._last_authenticated_order_by_id_fingerprint,
             auth_snapshot=auth_snapshot,
+            identity_binding_evidence=identity_binding_evidence,
         )
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc+onchain_order_filled", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics, onchain_fills)
 
@@ -1239,4 +1481,4 @@ ReadOnlyAccountSnapshot = AccountSnapshot
 ReadOnlyReconciliationReport = ReconciliationReport
 DreamDexReadOnlyClient = DreamDexReadOnlyAdapter
 
-__all__ = ["AccountSnapshot", "AddressReadOnlyDiagnostics", "AssetKind", "BalanceSnapshot", "DreamDexMarketTradingRules", "DreamDexReadOnlyAdapter", "DreamDexReadOnlyClient", "FixtureRpcTransport", "FixtureTransport", "HttpGetTransport", "HttpRpcTransport", "MarketMetadata", "MarketReadOnlySnapshot", "MarketReadOnlySource", "NATIVE_SENTINEL", "PublicMarketSchemaFingerprint", "ReadOnlyAccountSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyReconciliationReport", "ReadOnlySnapshot", "ReconciliationReport", "RpcAccountReadOnlySnapshot", "RpcAccountReadOnlySource", "SourceValue", "TokenReadOnlyDiagnostics", "VaultReadOnlySnapshot", "VaultReadOnlySource", "load_fixture", "mask_account_id", "parse_market_trading_rules"]
+__all__ = ["AccountSnapshot", "AddressReadOnlyDiagnostics", "AssetKind", "BalanceSnapshot", "DreamDexIdentityBindingEvidence", "DreamDexMarketTradingRules", "DreamDexReadOnlyAdapter", "DreamDexReadOnlyClient", "EVIDENCE_LEVELS", "FixtureRpcTransport", "FixtureTransport", "HttpGetTransport", "HttpRpcTransport", "MarketMetadata", "MarketReadOnlySnapshot", "MarketReadOnlySource", "NATIVE_SENTINEL", "ONCHAIN_CODE_TYPES", "PLATFORM_ROLES", "PublicMarketSchemaFingerprint", "ReadOnlyAccountSnapshot", "ReadOnlyMarketMetadata", "ReadOnlyReconciliationReport", "ReadOnlySnapshot", "ReconciliationReport", "RpcAccountReadOnlySnapshot", "RpcAccountReadOnlySource", "SourceValue", "TokenReadOnlyDiagnostics", "VaultReadOnlySnapshot", "VaultReadOnlySource", "load_fixture", "mask_account_id", "parse_market_trading_rules"]
