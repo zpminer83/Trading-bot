@@ -858,6 +858,13 @@ class DreamDexAuthSnapshot:
     auth_mode: str = "none"
     message_fingerprint: str | None = None
     signature_verification: Any | None = None
+    external_signer_configured: bool = False
+    external_signer_process_started: bool = False
+    external_signer_protocol_status: str = "unavailable"
+    external_signer_describe_performed: bool = False
+    external_signer_sign_performed: bool = False
+    external_signer_exit_status: str = "unavailable"
+    external_signer_environment_isolated: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", _utc(self.observed_at))
@@ -891,6 +898,13 @@ class DreamDexAuthSnapshot:
             "recovered_signer_address_match": getattr(getattr(self, "signature_verification", None), "address_match", "unresolved"),
             "signed_message_integrity": "confirmed" if getattr(self, "signature_verification", None) is not None and getattr(self.signature_verification, "status", None) == "valid" else ("failed" if getattr(self, "signature_verification", None) is not None else "unresolved"),
             "signer_owner_cryptographic_match": "confirmed" if getattr(self, "signature_verification", None) is not None and getattr(self.signature_verification, "address_match", None) == "confirmed" else ("conflicting" if getattr(self, "signature_verification", None) is not None and getattr(self.signature_verification, "address_match", None) == "conflicting" else "unresolved"),
+            "external_signer_configured": bool(getattr(self, "external_signer_configured", False)),
+            "external_signer_process_started": bool(getattr(self, "external_signer_process_started", False)),
+            "external_signer_protocol_status": getattr(self, "external_signer_protocol_status", "unavailable"),
+            "external_signer_describe_performed": bool(getattr(self, "external_signer_describe_performed", False)),
+            "external_signer_sign_performed": bool(getattr(self, "external_signer_sign_performed", False)),
+            "external_signer_exit_status": getattr(self, "external_signer_exit_status", "unavailable"),
+            "external_signer_environment_isolated": bool(getattr(self, "external_signer_environment_isolated", True)),
             "token_present": self.token_present, "expiry_status": self.token_state.expiry_status(self.observed_at),
             "refresh_required": self.token_state.refresh_required(self.observed_at),
             "authenticated_subject": _mask(self.identity.authenticated_subject),
@@ -1188,6 +1202,13 @@ class DreamDexAuthManager:
                 "managed_siwe" if self.manager_configured else "none",
                 self._message_fingerprint,
                 self._signature_verification,
+                bool(getattr(self.signer, "configured", False) and hasattr(self.signer, "process_started")),
+                bool(getattr(self.signer, "process_started", False)),
+                str(getattr(self.signer, "protocol_status", "unavailable")),
+                bool(getattr(self.signer, "describe_performed", False)),
+                bool(getattr(self.signer, "sign_performed", False)),
+                str(getattr(self.signer, "exit_status", "unavailable")),
+                bool(getattr(self.signer, "environment_isolated", True)),
             )
 
     def _failed(self, code: str, started: datetime, *, status: int | None = None) -> DreamDexAuthSnapshot:
@@ -1197,6 +1218,12 @@ class DreamDexAuthManager:
         self._nonce = None
         self._message = None
         self._message_fingerprint = None
+        closer = getattr(self.signer, "close", None)
+        if callable(closer):
+            try:
+                closer()
+            except Exception:
+                pass
         return self.snapshot()
 
     def get_nonce(self) -> DreamDexAuthSnapshot:
