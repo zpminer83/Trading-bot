@@ -182,10 +182,15 @@ class AuthenticatedSourceStatus:
     pagination_complete: bool = False
     duplicate_count: int = 0
     malformed_count: int = 0
+    response_body_status: str = "unknown"
+    schema_status: str = "unknown"
+    records_status: str = "unknown"
+    pagination_status: str = "unresolved"
+    authority_status: str = "non_authoritative"
 
     @property
     def available(self) -> bool:
-        return self.status == "available"
+        return self.status in {"available", "valid_confirmed_schema", "available_empty"}
 
     def is_fresh(self, *, now: datetime | None = None, max_age_seconds: Decimal = Decimal("30")) -> bool:
         current = _utc(now)

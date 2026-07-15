@@ -74,6 +74,10 @@ def test_cli_authenticated_factory_wires_configured_transport_without_leaking_to
     assert "Authenticated transport configured: YES" in output
     assert "Authenticated request execution: enabled" in output
     assert "Authenticated vault REST status: unauthorized" in output
+    assert "Authenticated vault schema:" in output
+    assert "Authenticated order list schema:" in output
+    assert "top-level type: null" in output
+    assert "unauthorized" not in output.split("Authenticated vault schema:", 1)[1].split("Authenticated order list schema:", 1)[0]
     assert "Reconciliation complete: NO" in output
     assert token not in output
     assert "Authorization" not in output

@@ -36,7 +36,7 @@ from bot.integrations.dreamdex_order_metadata import (
     OrderMetadataResolverReport,
     normalize_order_metadata,
 )
-from bot.integrations.dreamdex_authenticated_read_only import DreamDexAuthenticatedReadOnlyTransport
+from bot.integrations.dreamdex_authenticated_read_only import AuthenticatedResponseSchemaFingerprint, DreamDexAuthenticatedReadOnlyTransport
 
 
 def _dec(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -713,6 +713,9 @@ class AccountSnapshot:
     authenticated_request_execution_enabled: bool = False
     authenticated_order_by_id_status: str = "unconfigured"
     authenticated_schema_fingerprint_status: str = "unavailable"
+    authenticated_vault_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
+    authenticated_order_list_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
+    authenticated_order_by_id_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
@@ -751,6 +754,9 @@ class AccountSnapshot:
             "authenticated_request_execution_enabled": self.authenticated_request_execution_enabled,
             "authenticated_order_by_id_status": self.authenticated_order_by_id_status,
             "authenticated_schema_fingerprint_status": self.authenticated_schema_fingerprint_status,
+            "authenticated_vault_fingerprint_observed": self.authenticated_vault_fingerprint is not None,
+            "authenticated_order_list_fingerprint_observed": self.authenticated_order_list_fingerprint is not None,
+            "authenticated_order_by_id_fingerprint_observed": self.authenticated_order_by_id_fingerprint is not None,
             "onchain_fills_source": self.onchain_fills.source_status.status,
             "onchain_fills_reason": self.onchain_fills.source_status.reason,
             "onchain_fills_error_code": self.onchain_fills.source_status.error_code,
@@ -817,6 +823,9 @@ class DreamDexReadOnlyAdapter:
         self.authenticated_transport = authenticated_transport or UnconfiguredAuthenticatedReadOnlyTransport()
         self.fill_event_indexer = fill_event_indexer
         self.order_metadata_resolver = order_metadata_resolver
+        self._last_authenticated_vault_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
+        self._last_authenticated_order_list_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
+        self._last_authenticated_order_by_id_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
         self.market_source = MarketReadOnlySource(transport, symbol, self.clock)
         self._transport, self._rpc_transport = transport, rpc_transport
 
@@ -868,9 +877,14 @@ class DreamDexReadOnlyAdapter:
         commissions, and authoritative pagination remain unavailable.
         """
         transport = self.authenticated_transport
+        self._last_authenticated_vault_fingerprint = None
+        self._last_authenticated_order_list_fingerprint = None
+        self._last_authenticated_order_by_id_fingerprint = None
         try:
             vault = transport.fetch_vault_balance(self.symbol, account_identifier)
             raw_orders, order_status = transport.fetch_orders_page(self.symbol, status="open")
+            self._last_authenticated_vault_fingerprint = vault.schema_fingerprint
+            self._last_authenticated_order_list_fingerprint = order_status.schema_fingerprint
         except Exception as exc:
             observed = self.clock()
             safe_reason = re.sub(r"0x[0-9a-fA-F]{8,}", "<hex>", str(exc))[:180]
@@ -897,7 +911,7 @@ class DreamDexReadOnlyAdapter:
                 observed_at=raw.observed_at,
                 account_identifier=account_identifier,
                 source_status=AuthenticatedSourceStatus(
-                    order_status.status,
+                    "available_empty" if order_status.records_status == "available_empty" else order_status.status,
                     order_status.endpoint_name,
                     order_status.observed_at,
                     order_status.raw_status_name,
@@ -906,6 +920,11 @@ class DreamDexReadOnlyAdapter:
                     order_status.pagination_complete,
                     order_status.duplicate_count,
                     order_status.malformed_count,
+                    order_status.response_body_status,
+                    order_status.schema_status,
+                    order_status.records_status,
+                    order_status.pagination_status,
+                    order_status.authority_status,
                 ),
             ))
         observed = max((status.observed_at for status in (vault.source_status, order_status)), default=self.clock())
@@ -933,9 +952,15 @@ class DreamDexReadOnlyAdapter:
             mask_account_id(account_identifier), balances, tuple(orders), (), (), (),
             vault.source_status,
             AuthenticatedSourceStatus(
-                order_status.status, order_status.endpoint_name, order_status.observed_at,
+                "available_empty" if order_status.records_status == "available_empty" else order_status.status,
+                order_status.endpoint_name, order_status.observed_at,
                 order_status.raw_status_name, order_status.reason, order_status.error_code,
                 order_status.pagination_complete, order_status.duplicate_count, order_status.malformed_count,
+                response_body_status=order_status.response_body_status,
+                schema_status=order_status.schema_status,
+                records_status=order_status.records_status,
+                pagination_status=order_status.pagination_status,
+                authority_status=order_status.authority_status,
             ),
             recent_status, fills_status, commissions_status, observed,
         )
@@ -1012,9 +1037,16 @@ class DreamDexReadOnlyAdapter:
                 else str(getattr(self.authenticated_transport, "configuration_status", "unconfigured"))
             ),
             authenticated_schema_fingerprint_status=(
-                "observed" if bool(getattr(self.authenticated_transport, "configured", False))
+                "observed" if any((
+                    self._last_authenticated_vault_fingerprint,
+                    self._last_authenticated_order_list_fingerprint,
+                    self._last_authenticated_order_by_id_fingerprint,
+                ))
                 else "unavailable"
             ),
+            authenticated_vault_fingerprint=self._last_authenticated_vault_fingerprint,
+            authenticated_order_list_fingerprint=self._last_authenticated_order_list_fingerprint,
+            authenticated_order_by_id_fingerprint=self._last_authenticated_order_by_id_fingerprint,
         )
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc+onchain_order_filled", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics, onchain_fills)
 
@@ -1051,7 +1083,11 @@ class DreamDexReadOnlyAdapter:
             mismatches.append("base_vault_mismatch")
         if not authenticated_authoritative and account.vault_rest.quote.available and account.vault_rpc.quote_vault.available and account.vault_rest.quote.value != account.vault_rpc.quote_vault.value:
             mismatches.append("quote_vault_mismatch")
-        if account.open_orders_status == "source_unavailable" or not account.authenticated.open_orders_status.available:
+        if (
+            account.open_orders_status == "source_unavailable"
+            or not account.authenticated.open_orders_status.available
+            or not account.authenticated.open_orders_status.pagination_complete
+        ):
             mismatches.append("incomplete_open_orders_source")
         onchain_fills_authoritative = account.onchain_fills.source_status.authoritative and account.onchain_fills.source_status.account_match_status == "matched"
         if (account.fills_status == "source_unavailable" or not account.authenticated.fills_status.available) and not onchain_fills_authoritative:

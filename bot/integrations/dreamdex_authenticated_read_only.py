@@ -110,33 +110,101 @@ def _safe_json_type(value: Any) -> str:
     return type(value).__name__
 
 
-def _schema_fields(value: Any, *, depth: int = 0, max_depth: int = 2) -> tuple[tuple[str, str], ...]:
-    if not isinstance(value, Mapping) or depth >= max_depth:
-        return ()
-    fields: list[tuple[str, str]] = []
-    for key in sorted(str(item) for item in value.keys()):
-        item = value.get(key)
-        fields.append((key, _safe_json_type(item)))
-        if isinstance(item, Mapping) and depth + 1 < max_depth:
-            fields.extend((f"{key}.{name}", kind) for name, kind in _schema_fields(item, depth=depth + 1, max_depth=max_depth))
-    return tuple(fields)
+_PAGINATION_NAME_PARTS = frozenset({"page", "pages", "cursor", "next", "offset", "limit", "total", "pagination", "continuation", "hasmore", "hasnext"})
+
+
+def _is_pagination_name(name: str) -> bool:
+    parts = {part for part in re.split(r"[^a-z0-9]+", name.lower()) if part}
+    compact = "".join(parts)
+    return bool(parts & _PAGINATION_NAME_PARTS) or any(token in compact for token in _PAGINATION_NAME_PARTS)
+
+
+def _schema_structure(value: Any, *, max_depth: int = 3) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...], tuple[str, ...], tuple[tuple[str, str], ...], tuple[tuple[str, int], ...], tuple[str, ...]]:
+    """Return structure-only metadata; never retain payload values.
+
+    Arrays contribute their length and are traversed through their first item
+    only.  Nested traversal is bounded to three object/array levels.
+    """
+    top_names: list[str] = []
+    top_types: list[tuple[str, str]] = []
+    nested_names: list[str] = []
+    nested_types: list[tuple[str, str]] = []
+    list_lengths: list[tuple[str, int]] = []
+    pagination_names: list[str] = []
+
+    def walk(node: Any, path: str, depth: int, *, top: bool = False) -> None:
+        if isinstance(node, list):
+            list_lengths.append((path or "$", len(node)))
+            if node and depth < max_depth:
+                walk(node[0], path + "[]", depth + 1)
+            return
+        if not isinstance(node, Mapping) or depth > max_depth:
+            return
+        for raw_key in sorted(node.keys(), key=lambda item: str(item)):
+            key = str(raw_key)
+            item = node[raw_key]
+            field_path = key if not path else f"{path}.{key}"
+            kind = _safe_json_type(item)
+            if top:
+                top_names.append(key)
+                top_types.append((key, kind))
+            else:
+                nested_names.append(field_path)
+                nested_types.append((field_path, kind))
+            if _is_pagination_name(key) or _is_pagination_name(field_path):
+                pagination_names.append(field_path)
+            if depth >= max_depth:
+                continue
+            if isinstance(item, (Mapping, list)):
+                walk(item, field_path, depth + 1)
+
+    if isinstance(value, list):
+        list_lengths.append(("$", len(value)))
+        if value:
+            # The first array element is the only sample used for structure;
+            # its fields are presented as the array's item schema.
+            walk(value[0], "", 1, top=True)
+    elif isinstance(value, Mapping):
+        walk(value, "", 0, top=True)
+    else:
+        # Scalar values are represented only by their type in the caller.
+        pass
+    return (
+        tuple(top_names), tuple(top_types), tuple(nested_names),
+        tuple(nested_types), tuple(list_lengths), tuple(sorted(set(pagination_names))),
+    )
 
 
 @dataclass(frozen=True)
 class AuthenticatedResponseSchemaFingerprint:
     endpoint_name: str
     top_level_type: str
-    field_names: tuple[str, ...] = ()
+    top_level_field_names: tuple[str, ...] = ()
     field_types: tuple[tuple[str, str], ...] = ()
-    nested_fields: tuple[tuple[str, str], ...] = ()
-    list_length: int | None = None
+    nested_field_names: tuple[str, ...] = ()
+    nested_field_types: tuple[tuple[str, str], ...] = ()
+    list_lengths: tuple[tuple[str, int], ...] = ()
+    pagination_field_names: tuple[str, ...] = ()
     observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     http_status: int | None = None
 
     @classmethod
     def from_payload(cls, endpoint_name: str, payload: Any, *, observed_at: datetime, http_status: int | None) -> "AuthenticatedResponseSchemaFingerprint":
-        fields = _schema_fields(payload)
-        return cls(endpoint_name, _safe_json_type(payload), tuple(name for name, _ in fields if "." not in name), tuple(fields), tuple((name, kind) for name, kind in fields if "." in name), len(payload) if isinstance(payload, list) else None, observed_at, http_status)
+        top_names, top_types, nested_names, nested_types, list_lengths, pagination_names = _schema_structure(payload)
+        return cls(endpoint_name, _safe_json_type(payload), top_names, top_types, nested_names, nested_types, list_lengths, pagination_names, observed_at, http_status)
+
+    # Compatibility aliases used by the first fingerprint implementation.
+    @property
+    def field_names(self) -> tuple[str, ...]:
+        return self.top_level_field_names
+
+    @property
+    def nested_fields(self) -> tuple[tuple[str, str], ...]:
+        return self.nested_field_types
+
+    @property
+    def list_length(self) -> int | None:
+        return next((length for path, length in self.list_lengths if path == "$"), None)
 
 
 @dataclass(frozen=True)
@@ -249,11 +317,13 @@ class DreamDexAuthenticatedReadOnlyTransport:
             follow_redirects=False,
         )
         content = response.content
+        if response.status_code == 200 and (not content or not content.strip()):
+            return response.status_code, response.headers, None, "empty_response"
         if len(content) > self._max_response_body_bytes:
             return response.status_code, response.headers, None, "response_too_large"
         content_type = str(response.headers.get("content-type", "")).lower()
         if response.status_code == 200 and "json" not in content_type:
-            return response.status_code, response.headers, None, "malformed_response"
+            return response.status_code, response.headers, None, "malformed_json"
         if response.status_code in {301, 302, 303, 307, 308}:
             return response.status_code, response.headers, None, "redirect_blocked"
         if response.status_code != 200:
@@ -261,7 +331,7 @@ class DreamDexAuthenticatedReadOnlyTransport:
         try:
             return response.status_code, response.headers, response.json(), None
         except (TypeError, ValueError, json.JSONDecodeError):
-            return response.status_code, response.headers, None, "malformed_response"
+            return response.status_code, response.headers, None, "malformed_json"
 
     def fetch_vault_balance(self, symbol: str, wallet_address: str) -> AuthenticatedVaultBalanceResult:
         endpoint = "account_vault_balances"
@@ -279,18 +349,23 @@ class DreamDexAuthenticatedReadOnlyTransport:
             return AuthenticatedVaultBalanceResult((), status)
         fingerprint = AuthenticatedResponseSchemaFingerprint.from_payload(endpoint, payload, observed_at=observed, http_status=http_status)
         if error:
-            return AuthenticatedVaultBalanceResult((), AuthenticatedSourceStatus("unavailable", endpoint, observed, reason=error, error_code=error, pagination_complete=False), fingerprint)
+            return AuthenticatedVaultBalanceResult((), AuthenticatedSourceStatus(error, endpoint, observed, reason=error, error_code=error, pagination_complete=False, response_body_status="absent" if error == "empty_response" else "present", schema_status=error, records_status="unavailable"), fingerprint)
         if http_status in {401, 403, 404, 429} or http_status >= 500:
             mapping = {401: ("unauthorized", "unauthorized"), 403: ("forbidden", "forbidden"), 404: ("not_found", "not_found"), 429: ("rate_limited", "rate_limited")}
             status_name, code = mapping.get(http_status, ("upstream_unavailable", "upstream_unavailable"))
             return AuthenticatedVaultBalanceResult((), AuthenticatedSourceStatus(status_name, endpoint, observed, error_code=code, pagination_complete=False), fingerprint)
+        if not isinstance(payload, (Mapping, list)):
+            status = AuthenticatedSourceStatus("unsupported_top_level_type", endpoint, observed, reason="unsupported_top_level_type", error_code="unsupported_top_level_type", pagination_complete=False, response_body_status="present", schema_status="unsupported_top_level_type", records_status="unavailable")
+            return AuthenticatedVaultBalanceResult((), status, fingerprint)
         if not isinstance(payload, Mapping) or not isinstance(payload.get("balances"), list):
-            status = AuthenticatedSourceStatus("available_but_unverified_schema", endpoint, observed, reason="unverified_vault_schema", error_code="unverified_schema", pagination_complete=False)
+            status = AuthenticatedSourceStatus("available_but_unverified_schema", endpoint, observed, reason="unverified_vault_schema", error_code="unverified_schema", pagination_complete=False, response_body_status="present", schema_status="available_but_unverified_schema", records_status="unavailable")
             return AuthenticatedVaultBalanceResult((), status, fingerprint)
         balances: list[AuthenticatedBalanceSnapshot] = []
         malformed = 0
+        conflicting_duplicates = False
+        seen_amounts: dict[str, Decimal] = {}
         for row in payload["balances"]:
-            if not isinstance(row, Mapping) or not row.get("currency") or row.get("amount") is None:
+            if not isinstance(row, Mapping) or not isinstance(row.get("currency"), str) or not row.get("currency") or not isinstance(row.get("amount"), str):
                 malformed += 1
                 continue
             try:
@@ -298,10 +373,19 @@ class DreamDexAuthenticatedReadOnlyTransport:
             except (InvalidOperation, TypeError, ValueError):
                 malformed += 1
                 continue
+            currency = row["currency"]
+            previous = seen_amounts.get(currency)
+            if previous is not None and previous != amount:
+                conflicting_duplicates = True
+            seen_amounts[currency] = amount
             source = AuthenticatedSourceStatus("available", endpoint, observed, raw_status_name="200", pagination_complete=True)
-            balances.append(AuthenticatedBalanceSnapshot(str(row["currency"]), amount, amount, None, _mask(wallet_address), source))
-        status_name = "malformed" if malformed else "available"
-        status = AuthenticatedSourceStatus(status_name, endpoint, observed, raw_status_name="200", pagination_complete=True, malformed_count=malformed, reason="malformed_balance_record" if malformed else None, error_code="malformed_record" if malformed else None)
+            balances.append(AuthenticatedBalanceSnapshot(currency, amount, amount, None, _mask(wallet_address), source))
+        # Preserve the existing vault ``available`` status for compatibility;
+        # the stricter schema labels below are used for order-list diagnostics.
+        status_name = "malformed_confirmed_field" if malformed or conflicting_duplicates else "available"
+        status = AuthenticatedSourceStatus(status_name, endpoint, observed, raw_status_name="200", pagination_complete=True, malformed_count=malformed + (1 if conflicting_duplicates else 0), reason="conflicting_duplicate_currency" if conflicting_duplicates else "malformed_balance_record" if malformed else None, error_code="conflicting_duplicate_currency" if conflicting_duplicates else "malformed_record" if malformed else None, response_body_status="present", schema_status="valid_confirmed_schema", records_status="available" if balances else "available_empty", pagination_status="not_applicable", authority_status="source_available")
+        if conflicting_duplicates:
+            balances = []
         balances = [replace(item, source_status=status) for item in balances]
         return AuthenticatedVaultBalanceResult(tuple(balances), status, fingerprint)
 
@@ -318,26 +402,27 @@ class DreamDexAuthenticatedReadOnlyTransport:
             http_status, _, payload, error = self._perform_get(endpoint, symbol, order_id=order_id)
         except Exception as exc:
             return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("unavailable", endpoint, observed, reason=_sanitize(exc, secret=self._token), error_code="transport_error", pagination_complete=False))
+        fingerprint = AuthenticatedResponseSchemaFingerprint.from_payload(endpoint, payload, observed_at=observed, http_status=http_status)
         if error:
-            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("unavailable", endpoint, observed, reason=error, error_code=error, pagination_complete=False))
+            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus(error, endpoint, observed, reason=error, error_code=error, pagination_complete=False, schema_fingerprint=fingerprint))
         if http_status == 401:
-            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("unauthorized", endpoint, observed, error_code="unauthorized", pagination_complete=False))
+            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("unauthorized", endpoint, observed, error_code="unauthorized", pagination_complete=False, schema_fingerprint=fingerprint))
         if http_status == 403:
-            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("forbidden", endpoint, observed, error_code="forbidden", pagination_complete=False))
+            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("forbidden", endpoint, observed, error_code="forbidden", pagination_complete=False, schema_fingerprint=fingerprint))
         if http_status == 404:
-            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("not_found", endpoint, observed, error_code="not_found", pagination_complete=False))
+            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("not_found", endpoint, observed, error_code="not_found", pagination_complete=False, schema_fingerprint=fingerprint))
         if http_status == 429:
-            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("rate_limited", endpoint, observed, error_code="rate_limited", pagination_complete=False))
+            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("rate_limited", endpoint, observed, error_code="rate_limited", pagination_complete=False, schema_fingerprint=fingerprint))
         if http_status >= 500:
-            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("upstream_unavailable", endpoint, observed, error_code="upstream_unavailable", pagination_complete=False))
+            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("upstream_unavailable", endpoint, observed, error_code="upstream_unavailable", pagination_complete=False, schema_fingerprint=fingerprint))
         if not isinstance(payload, Mapping):
-            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("malformed", endpoint, observed, reason="order_response_not_object", error_code="malformed_response", pagination_complete=False))
+            return OrderMetadataLookupResult(key, None, OrderMetadataSourceStatus("unsupported_top_level_type", endpoint, observed, reason="unsupported_top_level_type", error_code="unsupported_top_level_type", pagination_complete=False, schema_fingerprint=fingerprint))
         raw = RawOrderMetadata(key, payload, "GET /markets/{symbol}/orders/{orderId}", observed)
         normalized = normalize_order_metadata(raw)
         if normalized.order_id != str(order_id):
-            status = OrderMetadataSourceStatus("malformed", endpoint, observed, reason="order_id_mismatch", error_code="malformed_record", pagination_complete=False, malformed_count=1)
+            status = OrderMetadataSourceStatus("available_but_unverified_schema", endpoint, observed, reason="unverified_order_schema", error_code="unverified_schema", pagination_complete=False, malformed_count=1, schema_fingerprint=fingerprint)
             return OrderMetadataLookupResult(key, replace(normalized, source_available=False), status)
-        status = OrderMetadataSourceStatus("malformed" if normalized.malformed else "available", endpoint, observed, raw_status_name=str(payload.get("status")) if payload.get("status") is not None else None, pagination_complete=True, malformed_count=len(normalized.malformed_fields), reason="malformed_order_record" if normalized.malformed else None, error_code="malformed_record" if normalized.malformed else None)
+        status = OrderMetadataSourceStatus("malformed_confirmed_field" if normalized.malformed else "valid_confirmed_schema", endpoint, observed, raw_status_name=str(payload.get("status")) if payload.get("status") is not None else None, pagination_complete=True, malformed_count=len(normalized.malformed_fields), reason="malformed_order_record" if normalized.malformed else None, error_code="malformed_record" if normalized.malformed else None, schema_fingerprint=fingerprint)
         return OrderMetadataLookupResult(key, replace(normalized, source_available=status.available), status)
 
     def fetch_orders_page(self, symbol: str, status: str | None = None, cursor: str | None = None) -> tuple[tuple[RawOrderMetadata, ...], OrderMetadataSourceStatus]:
@@ -354,15 +439,22 @@ class DreamDexAuthenticatedReadOnlyTransport:
             http_status, _, payload, error = self._perform_get("orders_page", symbol, params={"status": status} if status else None)
         except Exception as exc:
             return (), OrderMetadataSourceStatus("unavailable", endpoint, observed, reason=_sanitize(exc, secret=self._token), error_code="transport_error", pagination_complete=False)
+        fingerprint = AuthenticatedResponseSchemaFingerprint.from_payload(endpoint, payload, observed_at=observed, http_status=http_status)
         if error:
-            return (), OrderMetadataSourceStatus("unavailable", endpoint, observed, reason=error, error_code=error, pagination_complete=False)
+            return (), OrderMetadataSourceStatus(error, endpoint, observed, reason=error, error_code=error, pagination_complete=False, schema_fingerprint=fingerprint, response_body_status="absent" if error == "empty_response" else "present", schema_status=error, records_status="unavailable")
         status_map = {401: ("unauthorized", "unauthorized"), 403: ("forbidden", "forbidden"), 404: ("not_found", "not_found"), 429: ("rate_limited", "rate_limited")}
         if http_status in status_map or http_status >= 500:
             name, code = status_map.get(http_status, ("upstream_unavailable", "upstream_unavailable"))
-            return (), OrderMetadataSourceStatus(name, endpoint, observed, error_code=code, pagination_complete=False)
+            return (), OrderMetadataSourceStatus(name, endpoint, observed, error_code=code, pagination_complete=False, schema_fingerprint=fingerprint, response_body_status="present", schema_status=name, records_status="unavailable")
+        if not isinstance(payload, (list, Mapping)):
+            return (), OrderMetadataSourceStatus("unsupported_top_level_type", endpoint, observed, reason="unsupported_top_level_type", error_code="unsupported_top_level_type", pagination_complete=False, schema_fingerprint=fingerprint, response_body_status="present", schema_status="unsupported_top_level_type", records_status="unavailable")
+        if isinstance(payload, Mapping) and "orders" in payload and not isinstance(payload.get("orders"), list):
+            return (), OrderMetadataSourceStatus("malformed_confirmed_field", endpoint, observed, reason="orders_must_be_array", error_code="malformed_confirmed_field", pagination_complete=False, schema_fingerprint=fingerprint, response_body_status="present", schema_status="malformed_confirmed_field", records_status="unavailable")
         rows = payload if isinstance(payload, list) else payload.get("orders") if isinstance(payload, Mapping) else None
         if not isinstance(rows, list):
-            return (), OrderMetadataSourceStatus("malformed", endpoint, observed, reason="orders_response_shape_unknown", error_code="malformed_response", pagination_complete=False)
+            return (), OrderMetadataSourceStatus("available_but_unverified_schema", endpoint, observed, reason="unverified_order_list_schema", error_code="unverified_schema", pagination_complete=False, schema_fingerprint=fingerprint, response_body_status="present", schema_status="available_but_unverified_schema", records_status="unavailable")
+        if not rows:
+            return (), OrderMetadataSourceStatus("valid_confirmed_schema", endpoint, observed, raw_status_name="200", reason="no_open_orders", error_code=None, pagination_complete=False, schema_fingerprint=fingerprint, response_body_status="present", schema_status="valid_confirmed_schema", records_status="available_empty", pagination_status="unresolved", authority_status="non_authoritative")
         malformed = 0
         records_list: list[RawOrderMetadata] = []
         for row in rows:
@@ -375,7 +467,8 @@ class DreamDexAuthenticatedReadOnlyTransport:
                 continue
             records_list.append(RawOrderMetadata(OrderMetadataKey(symbol, str(order_id)), row, "GET /markets/{symbol}/orders", observed))
         records = tuple(records_list)
-        return records, OrderMetadataSourceStatus("malformed" if malformed else "available", endpoint, observed, raw_status_name="200", pagination_complete=False, malformed_count=malformed, reason="pagination_not_confirmed", error_code="pagination_not_confirmed")
+        status_name = "malformed_confirmed_field" if malformed else "valid_confirmed_schema"
+        return records, OrderMetadataSourceStatus(status_name, endpoint, observed, raw_status_name="200", pagination_complete=False, malformed_count=malformed, reason="pagination_not_confirmed", error_code="pagination_not_confirmed", schema_fingerprint=fingerprint, response_body_status="present", schema_status="valid_confirmed_schema", records_status="malformed" if malformed else "available", pagination_status="unresolved", authority_status="non_authoritative")
 
 
 __all__ = [

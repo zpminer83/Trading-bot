@@ -47,6 +47,24 @@ def _masked(value: str | None) -> str:
     return mask_account_id(value) if value else "<unresolved>"
 
 
+def _print_schema_fingerprint(label: str, fingerprint) -> None:
+    if fingerprint is None:
+        print(f"Authenticated {label} schema: unavailable")
+        return
+    print(f"Authenticated {label} schema:")
+    print(f"  HTTP status: {fingerprint.http_status if fingerprint.http_status is not None else 'unavailable'}")
+    print(f"  top-level type: {fingerprint.top_level_type}")
+    fields = ", ".join(f"{name}:{kind}" for name, kind in fingerprint.field_types) or "none"
+    nested = ", ".join(f"{name}:{kind}" for name, kind in fingerprint.nested_field_types) or "none"
+    lengths = ", ".join(f"{name}={length}" for name, length in fingerprint.list_lengths) or "none"
+    pagination = ", ".join(fingerprint.pagination_field_names) or "none"
+    print(f"  fields: {fields}")
+    print(f"  nested fields: {nested}")
+    print(f"  list lengths: {lengths}")
+    if label == "order list":
+        print(f"  pagination field names: {pagination}")
+
+
 def _print_address_diagnostics(label: str, diagnostics, fallback_address: str | None = None) -> None:
     print(f"{label}:")
     if diagnostics is None:
@@ -143,10 +161,13 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Authenticated request execution: {'enabled' if account.authenticated_request_execution_enabled else 'disabled'}")
     print(f"Authenticated request execution enabled: {'YES' if account.authenticated_request_execution_enabled else 'NO'}")
     print(f"Authenticated vault REST status: {authenticated.balances_status.status}")
-    print(f"Authenticated order list status: {authenticated.open_orders_status.status}")
+    print(f"Authenticated order list status: {authenticated.open_orders_status.schema_status or authenticated.open_orders_status.status}")
     print(f"Authenticated order-by-id status: {account.authenticated_order_by_id_status}")
     print(f"Authenticated schema fingerprint status: {account.authenticated_schema_fingerprint_status}")
     print(f"Authenticated identity verified: {'YES' if authenticated.authoritative_for(account.trading_address) else 'NO'}")
+    _print_schema_fingerprint("vault", account.authenticated_vault_fingerprint)
+    _print_schema_fingerprint("order list", account.authenticated_order_list_fingerprint)
+    _print_schema_fingerprint("order-by-id", account.authenticated_order_by_id_fingerprint)
     print(f"Authenticated balances: {authenticated.balances_status.status}")
     # Keep the historical summary wording while exposing the more precise
     # configured/unconfigured status above.
@@ -154,6 +175,7 @@ def _print_report(snapshot, report, validation) -> None:
     if authenticated.open_orders_status.error_code in {"authenticated_transport_unconfigured", "authenticated_token_missing"}:
         legacy_open_orders_status = "unavailable"
     print(f"Authenticated open orders: {legacy_open_orders_status}")
+    print(f"Authenticated open-order record count: {len(authenticated.open_orders)}")
     print(f"Authenticated fills: {authenticated.fills_status.status}")
     print(f"Authenticated pagination complete: {'YES' if authenticated.pagination_complete else 'NO'}")
     onchain = account.onchain_fills

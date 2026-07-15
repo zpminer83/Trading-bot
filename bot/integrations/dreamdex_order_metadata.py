@@ -167,10 +167,16 @@ class OrderMetadataSourceStatus:
     malformed_count: int = 0
     reason: str | None = None
     error_code: str | None = None
+    schema_fingerprint: Any | None = None
+    response_body_status: str = "unknown"
+    schema_status: str = "unknown"
+    records_status: str = "unknown"
+    pagination_status: str = "unresolved"
+    authority_status: str = "non_authoritative"
 
     @property
     def available(self) -> bool:
-        return self.status == "available"
+        return self.status in {"available", "valid_confirmed_schema", "available_empty"}
 
 
 @dataclass(frozen=True)
@@ -182,6 +188,10 @@ class OrderMetadataLookupResult:
     @property
     def status(self) -> str:
         return self.source_status.status
+
+    @property
+    def schema_fingerprint(self) -> Any | None:
+        return self.source_status.schema_fingerprint
 
 
 @dataclass(frozen=True)

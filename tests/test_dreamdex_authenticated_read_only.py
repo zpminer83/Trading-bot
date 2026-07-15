@@ -133,6 +133,106 @@ def test_unknown_vault_schema_is_not_authoritative_and_missing_values_are_not_ze
     assert result.balances == ()
 
 
+def test_fingerprint_is_structure_only_and_excludes_payload_values(monkeypatch):
+    address = "0x" + "ab" * 20
+    jwt = "eyJaaaaaaaaaaaa.eyJbbbbbb.cccccccccccccc"
+    payload = {
+        "owner": address,
+        "walletAddress": address,
+        "orderId": "order-secret-123",
+        "balance": "999.5",
+        "price": "123.45",
+        "quantity": "quantity-secret",
+        "timestamp": "2026-07-15T00:00:00Z",
+        "token": jwt,
+        "nested": {"level2": {"level3": {"level4": {"secret": "value"}}}},
+        "pagination": {"nextCursor": "cursor-secret", "hasMore": True},
+    }
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload=payload, content=b"{}"))
+    fingerprint = _transport().fetch_vault_balance(SYMBOL, OWNER).schema_fingerprint
+    assert fingerprint is not None
+    rendered = repr(fingerprint)
+    for value in (address, "order-secret-123", "999.5", "123.45", "quantity-secret", "2026-07-15T00:00:00Z", jwt, "cursor-secret", "value"):
+        assert value not in rendered
+    assert "owner" in fingerprint.top_level_field_names
+    assert "pagination" in fingerprint.pagination_field_names
+    assert any(name.startswith("nested.level2.level3") for name in fingerprint.nested_field_names)
+    assert not any(name.endswith("level4.secret") for name in fingerprint.nested_field_names)
+
+
+def test_list_fingerprint_uses_first_item_structure_only(monkeypatch):
+    payload = [
+        {"id": "first-secret", "price": "1.2", "nested": {"side": "buy"}},
+        {"differentOnly": "must-not-appear", "id": "second-secret"},
+    ]
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload=payload, content=b"[]"))
+    fingerprint = _transport().fetch_orders_page(SYMBOL)[1].schema_fingerprint
+    assert fingerprint is not None
+    assert fingerprint.top_level_type == "array"
+    assert fingerprint.list_lengths == (("$", 2),)
+    assert "id" in fingerprint.top_level_field_names
+    assert "differentOnly" not in fingerprint.top_level_field_names
+    assert "first-secret" not in repr(fingerprint)
+    assert "second-secret" not in repr(fingerprint)
+    assert "buy" not in repr(fingerprint)
+
+
+@pytest.mark.parametrize(
+    "payload,content,status_name,error_code",
+    [
+        ({"unknown": True}, b'{"unknown":true}', "available_but_unverified_schema", "unverified_schema"),
+        (ValueError("bad-json"), b"not-json", "malformed_json", "malformed_json"),
+        (None, b"", "empty_response", "empty_response"),
+        (7, b"7", "unsupported_top_level_type", "unsupported_top_level_type"),
+    ],
+)
+def test_order_list_schema_statuses_are_specific(monkeypatch, payload, content, status_name, error_code):
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload=payload, content=content))
+    _, status = _transport().fetch_orders_page(SYMBOL, status="open")
+    assert status.status == status_name
+    assert status.error_code == error_code
+    assert status.schema_fingerprint is not None
+
+
+def test_empty_confirmed_order_container_is_not_empty_response(monkeypatch):
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload={"orders": []}, content=b'{"orders":[]}'))
+    records, status = _transport().fetch_orders_page(SYMBOL, status="open")
+    assert records == ()
+    assert status.status == "valid_confirmed_schema"
+    assert status.schema_status == "valid_confirmed_schema"
+    assert status.records_status == "available_empty"
+    assert status.response_body_status == "present"
+    assert status.pagination_status == "unresolved"
+    assert status.authority_status == "non_authoritative"
+
+
+@pytest.mark.parametrize("payload", [{"orders": {}}, {"orders": None}])
+def test_malformed_confirmed_order_container_is_not_unverified(monkeypatch, payload):
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload=payload, content=b"{}"))
+    _, status = _transport().fetch_orders_page(SYMBOL, status="open")
+    assert status.status == "malformed_confirmed_field"
+    assert status.error_code == "malformed_confirmed_field"
+
+
+def test_confirmed_vault_decimal_strings_and_conflicting_duplicates(monkeypatch):
+    payload = {"balances": [
+        {"currency": "USDso", "amount": "2.50", "extra": "ignored"},
+        {"currency": "USDso", "amount": "3.50"},
+        {"currency": "SOMI", "amount": "1.25"},
+        {"amount": "9"},
+    ]}
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload=payload, content=b"{}"))
+    result = _transport().fetch_vault_balance(SYMBOL, OWNER)
+    assert result.source_status.status == "malformed_confirmed_field"
+    assert result.source_status.error_code == "conflicting_duplicate_currency"
+    assert result.balances == ()
+
+    monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(payload={"balances": [{"currency": "USDso", "amount": 1.5}]}, content=b"{}"))
+    numeric = _transport().fetch_vault_balance(SYMBOL, OWNER)
+    assert numeric.source_status.status == "malformed_confirmed_field"
+    assert numeric.balances == ()
+
+
 def test_order_by_id_and_order_list_are_get_only_and_pagination_stays_incomplete(monkeypatch):
     responses = [
         FakeResponse(payload={"id": "7", "symbol": SYMBOL, "price": "10.5", "amount": "2", "remaining": "1", "status": "open", "owner": OWNER}, content=b"{}"),
@@ -147,13 +247,13 @@ def test_order_by_id_and_order_list_are_get_only_and_pagination_stays_incomplete
     monkeypatch.setattr("httpx.get", fake_get)
     transport = _transport()
     order = transport.fetch_order_by_id(SYMBOL, "7")
-    assert order.status == "available"
+    assert order.status == "valid_confirmed_schema"
     assert order.metadata is not None
     assert order.metadata.price == Decimal("10.5")
     assert order.metadata.quantity == Decimal("2")
     records, status = transport.fetch_orders_page(SYMBOL, status="open")
     assert len(records) == 1
-    assert status.status == "available"
+    assert status.status == "valid_confirmed_schema"
     assert status.pagination_complete is False
     assert status.error_code == "pagination_not_confirmed"
     assert all(call[1]["headers"]["Accept"] == "application/json" for call in calls)
@@ -176,7 +276,7 @@ def test_redirect_malformed_json_and_oversized_body_are_blocked(monkeypatch):
     assert redirect.source_status.error_code == "redirect_blocked"
     monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(status_code=200, payload=ValueError("bad-json"), content=b"not-json"))
     malformed = _transport().fetch_vault_balance(SYMBOL, OWNER)
-    assert malformed.source_status.error_code == "malformed_response"
+    assert malformed.source_status.error_code == "malformed_json"
     monkeypatch.setattr("httpx.get", lambda *args, **kwargs: FakeResponse(status_code=200, payload={}, content=b"x" * 1_000_001))
     oversized = _transport().fetch_vault_balance(SYMBOL, OWNER)
     assert oversized.source_status.error_code == "response_too_large"
