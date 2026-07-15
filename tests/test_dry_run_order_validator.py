@@ -44,7 +44,20 @@ def test_invalid_tick_step_minimum_and_stale_market_are_rejected():
     snapshot, report = state()
     result = DryRunOrderValidator().validate(OrderIntent("SOMI:USDso", "buy", "limit", Decimal("10.00005"), Decimal("0.005")), market=snapshot.market, account=snapshot.account, reconciliation=report, market_fresh=False, fair_play_decision=allowed(), risk_decision=allowed())
     assert not result.approved
-    assert {"invalid_price_tick", "invalid_quantity_step", "minimum_quantity", "market_data_stale"}.issubset(result.reasons)
+    assert {"invalid_price_tick", "invalid_quantity_step", "quantity_below_minimum", "market_data_stale"}.issubset(result.reasons)
+
+
+def test_unavailable_minimum_quantity_has_explicit_reason():
+    snapshot, report = state()
+    rules = replace(snapshot.market.trading_rules, minimum_quantity=None)
+    market = replace(snapshot.market, trading_rules=rules)
+    result = DryRunOrderValidator().validate(
+        OrderIntent("SOMI:USDso", "buy", "limit", Decimal("10"), Decimal("1")),
+        market=market, account=snapshot.account, reconciliation=report,
+        market_fresh=True, fair_play_decision=allowed(), risk_decision=allowed(),
+    )
+    assert "minimum_quantity_unavailable" in result.reasons
+    assert "quantity_below_minimum" not in result.reasons
 
 
 def test_limits_and_fair_play_risk_are_enforced():

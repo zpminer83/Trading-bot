@@ -594,6 +594,7 @@ class DreamDexNonceResponse:
     source_status: str = "confirmed"
     error_code: str | None = None
     observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    http_status: int | None = None
 
     def __post_init__(self) -> None:
         if self.nonce is not None and (not isinstance(self.nonce, str) or not self.nonce.strip()):
@@ -702,6 +703,7 @@ class DreamDexLoginResponse:
     source_status: str = "confirmed"
     error_code: str | None = None
     observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    http_status: int | None = None
 
     def __post_init__(self) -> None:
         if self.token is not None and (not isinstance(self.token, str) or not self.token.strip()):
@@ -839,6 +841,10 @@ class DreamDexAuthSnapshot:
     transport_configured: bool = False
     unresolved_reasons: tuple[str, ...] = ()
     observed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    transport_status: str = "unconfigured"
+    auth_network_attempt_performed: bool = False
+    nonce_request_performed: bool = False
+    login_request_performed: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", _utc(self.observed_at))
@@ -855,6 +861,10 @@ class DreamDexAuthSnapshot:
         return {
             "state": self.state, "manager_configured": self.manager_configured,
             "signer_configured": self.signer_configured, "transport_configured": self.transport_configured,
+            "transport_status": getattr(self, "transport_status", "configured" if self.transport_configured else "unconfigured"),
+            "auth_network_attempt_performed": bool(getattr(self, "auth_network_attempt_performed", False)),
+            "nonce_request_performed": bool(getattr(self, "nonce_request_performed", False)),
+            "login_request_performed": bool(getattr(self, "login_request_performed", False)),
             "token_present": self.token_present, "expiry_status": self.token_state.expiry_status(self.observed_at),
             "refresh_required": self.token_state.refresh_required(self.observed_at),
             "authenticated_subject": _mask(self.identity.authenticated_subject),
@@ -908,6 +918,7 @@ class FixtureMessageSigner:
 class AuthTransportResponse:
     status: int
     payload: Any = None
+    error_code: str | None = None
 
     def __repr__(self) -> str:
         # Auth responses can contain bearer material in fixtures; never make
@@ -1048,6 +1059,10 @@ class DreamDexAuthManager:
                 self._state, self.identity, self._token_state, self._nonce, self._message, self._attempt,
                 self.manager_configured, self.signer is not None, bool(getattr(self.transport, "configured", False)),
                 tuple(self.identity.unresolved_reasons) if not self.identity.authoritative else (), observed,
+                str(getattr(self.transport, "configuration_status", "configured" if getattr(self.transport, "configured", False) else "unconfigured")),
+                bool(getattr(self.transport, "network_attempt_performed", False)),
+                bool(getattr(self.transport, "nonce_request_performed", False)),
+                bool(getattr(self.transport, "login_request_performed", False)),
             )
 
     def _failed(self, code: str, started: datetime, *, status: int | None = None) -> DreamDexAuthSnapshot:

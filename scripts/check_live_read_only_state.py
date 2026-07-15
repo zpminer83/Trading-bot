@@ -8,8 +8,10 @@ import re
 
 from bot.execution.dry_run_order_validator import DryRunOrderValidator, DryRunValidationLimits
 from bot.execution.order import OrderIntent
+from bot.integrations.dreamdex_auth_models import DreamDexAuthManager
 from bot.integrations.dreamdex_authenticated_read_only import build_authenticated_read_only_transport_from_env
 from bot.integrations.dreamdex_read_only import DreamDexReadOnlyAdapter, FixtureRpcTransport, FixtureTransport, load_fixture, mask_account_id
+from bot.integrations.dreamdex_siwe_http_transport import build_siwe_http_transport_from_env
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -128,7 +130,12 @@ def _print_authentication_state(account) -> None:
         print("  manager configured: NO")
         print("  signer configured: NO")
         print("  transport configured: NO")
+        print("  SIWE HTTP transport configured: NO")
+        print("  SIWE HTTP transport status: disabled")
         print("  auth state: unconfigured")
+        print("  auth network attempt performed: NO")
+        print("  nonce request performed: NO")
+        print("  login request performed: NO")
         print("  token present: NO")
         print("  expiry status: unavailable")
         print("  refresh required: NO")
@@ -144,7 +151,12 @@ def _print_authentication_state(account) -> None:
     print(f"  manager configured: {'YES' if safe.get('manager_configured') else 'NO'}")
     print(f"  signer configured: {'YES' if safe.get('signer_configured') else 'NO'}")
     print(f"  transport configured: {'YES' if safe.get('transport_configured') else 'NO'}")
+    print(f"  SIWE HTTP transport configured: {'YES' if safe.get('transport_configured') else 'NO'}")
+    print(f"  SIWE HTTP transport status: {safe.get('transport_status', 'unconfigured')}")
     print(f"  auth state: {safe.get('state', 'failed_closed')}")
+    print(f"  auth network attempt performed: {'YES' if safe.get('auth_network_attempt_performed') else 'NO'}")
+    print(f"  nonce request performed: {'YES' if safe.get('nonce_request_performed') else 'NO'}")
+    print(f"  login request performed: {'YES' if safe.get('login_request_performed') else 'NO'}")
     print(f"  token present: {'YES' if safe.get('token_present') else 'NO'}")
     print(f"  expiry status: {safe.get('expiry_status', 'unavailable')}")
     print(f"  refresh required: {'YES' if safe.get('refresh_required') else 'NO'}")
@@ -295,7 +307,11 @@ def main() -> int:
         # The factory reads only the explicit enable flag and bearer-token
         # variable. Construction is side-effect free; GET I/O remains gated.
         authenticated_transport = build_authenticated_read_only_transport_from_env(os.environ)
-        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, trading_address=trading_address, symbol=symbol, authenticated_transport=authenticated_transport)
+        siwe_transport = build_siwe_http_transport_from_env(os.environ)
+        # The SIWE transport is telemetry-only until an explicit signer is
+        # supplied. No nonce/login call is made by this read-only check.
+        auth_manager = DreamDexAuthManager(transport=siwe_transport)
+        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, trading_address=trading_address, symbol=symbol, authenticated_transport=authenticated_transport, auth_manager=auth_manager)
         snapshot = adapter.fetch_snapshot()
         local_cash = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_CASH")
         local_inventory = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_INVENTORY")

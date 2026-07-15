@@ -43,6 +43,11 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "AUTHENTICATION STATE:" in output
     assert "manager configured: NO" in output
     assert "signer configured: NO" in output
+    assert "SIWE HTTP transport configured: NO" in output
+    assert "SIWE HTTP transport status: disabled" in output
+    assert "auth network attempt performed: NO" in output
+    assert "nonce request performed: NO" in output
+    assert "login request performed: NO" in output
     assert "auth state: unconfigured" in output
     assert "token present: NO" in output
     assert "identity authoritative: NO" in output

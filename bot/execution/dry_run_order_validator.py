@@ -97,7 +97,7 @@ class DryRunOrderValidator:
             if rules.status_for("minimum_quantity") != "confirmed" or minimum_quantity is None:
                 reasons.append("minimum_quantity_unavailable")
             elif quantity < minimum_quantity:
-                reasons.append("minimum_quantity")
+                reasons.append("quantity_below_minimum")
             if rules.status_for("minimum_notional") != "confirmed" or rules.minimum_notional is None:
                 reasons.append("minimum_notional_unavailable")
             elif notional < rules.minimum_notional:
@@ -118,7 +118,7 @@ class DryRunOrderValidator:
             if market.quantity_step_size and not _aligned(intent.quantity, market.quantity_step_size):
                 reasons.append("invalid_quantity_step")
             if market.minimum_quantity is not None and quantity < market.minimum_quantity:
-                reasons.append("minimum_quantity")
+                reasons.append("quantity_below_minimum")
             if market.minimum_notional is not None and notional < market.minimum_notional:
                 reasons.append("minimum_notional")
         quote = market.quote_asset or "USDso"
