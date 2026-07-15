@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from eth_account import Account
+from eth_account.messages import encode_defunct
 
 from bot.integrations.dreamdex_auth_models import DreamDexAuthManager, FixtureDreamDexAuthTransport
 from bot.integrations.dreamdex_siwe_signer import (
@@ -14,6 +16,32 @@ from bot.integrations.dreamdex_siwe_signer import (
 ADDRESS = "0x1234567890abcdef1234567890abcdef12345678"
 OTHER = "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd"
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=timezone.utc)
+
+
+class _TestOnlyEthereumSigner:
+    """Deterministic test key; never imported by production code."""
+
+    configured = True
+    status = "configured"
+    capabilities = frozenset({SIWE_LOGIN_CAPABILITY})
+    _private_key = "0x" + "01" * 32
+
+    def __init__(self, *, reject: bool = False):
+        self.account = Account.from_key(self._private_key)
+        self.call_count = 0
+        self.reject = reject
+        self.last_message_fingerprint = None
+
+    def get_address(self):
+        return self.account.address
+
+    def sign_message(self, message):
+        self.call_count += 1
+        import hashlib
+        self.last_message_fingerprint = hashlib.sha256(message.encode("utf-8")).hexdigest()
+        if self.reject:
+            raise RuntimeError("fixture_signer_rejected")
+        return Account.sign_message(encode_defunct(text=message), private_key=self._private_key).signature.hex()
 
 
 def fixture():
@@ -59,8 +87,9 @@ def test_fixture_signer_exact_message_call_count_and_capability():
 
 def test_managed_flow_binds_address_and_passes_identical_message():
     transport = FixtureDreamDexAuthTransport(fixture(), now=NOW)
-    signer = FixtureSiweMessageSigner(ADDRESS)
-    manager = DreamDexAuthManager(signer=signer, transport=transport, owner_address=ADDRESS, clock=lambda: NOW)
+    signer = _TestOnlyEthereumSigner()
+    owner = signer.get_address()
+    manager = DreamDexAuthManager(signer=signer, transport=transport, owner_address=owner, clock=lambda: NOW)
     message = manager.get_nonce()
     assert message.state == "nonce_available"
     built = manager.build_message()
@@ -74,7 +103,7 @@ def test_managed_flow_binds_address_and_passes_identical_message():
 
     mismatched = DreamDexAuthManager(
         signer=FixtureSiweMessageSigner(OTHER), transport=FixtureDreamDexAuthTransport(fixture(), now=NOW),
-        owner_address=ADDRESS, clock=lambda: NOW,
+        owner_address=owner, clock=lambda: NOW,
     )
     blocked = mismatched.authenticate()
     assert blocked.state == "signer_address_mismatch"

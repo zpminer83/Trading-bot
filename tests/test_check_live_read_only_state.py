@@ -43,6 +43,10 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "AUTHENTICATION STATE:" in output
     assert "manager configured: NO" in output
     assert "signer configured: NO" in output
+    assert "signature verification performed: NO" in output
+    assert "signature verification status: unavailable" in output
+    assert "recovered signer address: <missing>" in output
+    assert "signer/owner cryptographic match: unresolved" in output
     assert "SIWE HTTP transport configured: NO" in output
     assert "SIWE HTTP transport status: disabled" in output
     assert "auth network attempt performed: NO" in output

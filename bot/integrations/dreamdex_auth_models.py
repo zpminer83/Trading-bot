@@ -15,6 +15,8 @@ import re
 import threading
 from typing import Any, Callable, Generic, Mapping, Protocol, Sequence, TypeVar
 
+from .dreamdex_siwe_signature_verifier import verify_siwe_signature
+
 
 def _utc(value: Any = None) -> datetime:
     if isinstance(value, datetime):
@@ -855,6 +857,7 @@ class DreamDexAuthSnapshot:
     signer_invocation_performed: bool = False
     auth_mode: str = "none"
     message_fingerprint: str | None = None
+    signature_verification: Any | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "observed_at", _utc(self.observed_at))
@@ -882,6 +885,12 @@ class DreamDexAuthSnapshot:
             "signer_invocation_performed": bool(getattr(self, "signer_invocation_performed", False)),
             "auth_mode": getattr(self, "auth_mode", "none"),
             "message_fingerprint": getattr(self, "message_fingerprint", None),
+            "signature_verification_performed": bool(getattr(self, "signature_verification", None) is not None),
+            "signature_verification_status": getattr(getattr(self, "signature_verification", None), "status", "unavailable"),
+            "recovered_signer_address": getattr(getattr(self, "signature_verification", None), "recovered_address_masked", "<missing>"),
+            "recovered_signer_address_match": getattr(getattr(self, "signature_verification", None), "address_match", "unresolved"),
+            "signed_message_integrity": "confirmed" if getattr(self, "signature_verification", None) is not None and getattr(self.signature_verification, "status", None) == "valid" else ("failed" if getattr(self, "signature_verification", None) is not None else "unresolved"),
+            "signer_owner_cryptographic_match": "confirmed" if getattr(self, "signature_verification", None) is not None and getattr(self.signature_verification, "address_match", None) == "confirmed" else ("conflicting" if getattr(self, "signature_verification", None) is not None and getattr(self.signature_verification, "address_match", None) == "conflicting" else "unresolved"),
             "token_present": self.token_present, "expiry_status": self.token_state.expiry_status(self.observed_at),
             "refresh_required": self.token_state.refresh_required(self.observed_at),
             "authenticated_subject": _mask(self.identity.authenticated_subject),
@@ -1097,6 +1106,7 @@ class DreamDexAuthManager:
         self._last_now: datetime | None = None
         self._signer_invocation_performed = False
         self._message_fingerprint: str | None = None
+        self._signature_verification: Any | None = None
         self._lock = threading.RLock()
 
     def _read_signer_address(self) -> str | None:
@@ -1177,6 +1187,7 @@ class DreamDexAuthManager:
                 self._signer_invocation_performed,
                 "managed_siwe" if self.manager_configured else "none",
                 self._message_fingerprint,
+                self._signature_verification,
             )
 
     def _failed(self, code: str, started: datetime, *, status: int | None = None) -> DreamDexAuthSnapshot:
@@ -1238,6 +1249,7 @@ class DreamDexAuthManager:
                 self._state = DreamDexAuthState.unconfigured.value
                 return self.snapshot()
             self._signer_invocation_performed = False
+            self._signature_verification = None
             if self._token_state.token_present and self._token_state.refresh_required(now):
                 self._state = DreamDexAuthState.refresh_required.value
                 self._nonce = None
@@ -1260,9 +1272,22 @@ class DreamDexAuthManager:
                 _validate_siwe_message(self._message, expected_address=self.owner_address)
                 self._signer_invocation_performed = True
                 signature = self.signer.sign_message(signing_message)  # type: ignore[union-attr]
-                if self._signer_capability() == "siwe_login_message":
-                    _validate_structural_signature(signature)
                 self._state = DreamDexAuthState.signature_available.value
+                if self._signer_capability() == "siwe_login_message":
+                    if hashlib.sha256(signing_message.encode("utf-8")).hexdigest() != self._message_fingerprint:
+                        return self._failed("signed_message_mutated", started)
+                    self._signature_verification = verify_siwe_signature(
+                        signing_message,
+                        signature,
+                        self.owner_address or self._read_signer_address() or "",
+                    )
+                    if self._signature_verification.status != "valid":
+                        reason = {
+                            "address_mismatch": "recovered_address_mismatch",
+                            "invalid_recovery": "signature_verification_failed",
+                            "unavailable": "signature_recovery_unavailable",
+                        }.get(self._signature_verification.status, "signature_verification_failed")
+                        return self._failed(reason, started)
                 self._attempt = DreamDexAuthAttempt(self._state, started, self._now(), nonce=self._nonce.nonce if self._nonce else None, message=self._message.message if self._message else None, signature=signature)
                 self._state = DreamDexAuthState.login_pending.value
                 response = self.transport.login(self._message.message, signature)  # type: ignore[union-attr]
@@ -1314,6 +1339,7 @@ class DreamDexAuthManager:
             self._message = None
             self._attempt = None
             self._message_fingerprint = None
+            self._signature_verification = None
             self._signer_invocation_performed = False
             return self.snapshot()
 
