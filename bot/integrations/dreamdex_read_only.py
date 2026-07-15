@@ -20,6 +20,9 @@ from urllib.parse import quote
 
 from bot.integrations.dreamdex_auth_models import (
     AuthenticatedAccountSnapshot,
+    AuthenticatedBalanceSnapshot,
+    AuthenticatedOrderSnapshot,
+    AuthenticatedSourceStatus,
     AuthenticatedReadOnlyTransport,
     UnconfiguredAuthenticatedReadOnlyTransport,
 )
@@ -28,9 +31,12 @@ from bot.integrations.dreamdex_fill_events import (
     OrderFilledEventIndexer,
 )
 from bot.integrations.dreamdex_order_metadata import (
+    OrderMetadataKey,
     OrderMetadataResolver,
     OrderMetadataResolverReport,
+    normalize_order_metadata,
 )
+from bot.integrations.dreamdex_authenticated_read_only import DreamDexAuthenticatedReadOnlyTransport
 
 
 def _dec(value: Any, default: Decimal | None = None) -> Decimal | None:
@@ -703,6 +709,10 @@ class AccountSnapshot:
     authenticated: AuthenticatedAccountSnapshot = field(default_factory=AuthenticatedAccountSnapshot.unavailable)
     onchain_fills: FillEventPage = field(default_factory=FillEventPage.unavailable)
     order_metadata_report: OrderMetadataResolverReport = field(default_factory=OrderMetadataResolverReport.unavailable)
+    authenticated_transport_status: str = "unconfigured"
+    authenticated_request_execution_enabled: bool = False
+    authenticated_order_by_id_status: str = "unconfigured"
+    authenticated_schema_fingerprint_status: str = "unavailable"
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
@@ -737,6 +747,10 @@ class AccountSnapshot:
             "fills_status": self.fills_status,
             "authenticated_account_source": "available" if self.authenticated.available else (self.authenticated.balances_status.reason or "unavailable"),
             "authenticated_pagination_complete": self.authenticated.pagination_complete,
+            "authenticated_transport_status": self.authenticated_transport_status,
+            "authenticated_request_execution_enabled": self.authenticated_request_execution_enabled,
+            "authenticated_order_by_id_status": self.authenticated_order_by_id_status,
+            "authenticated_schema_fingerprint_status": self.authenticated_schema_fingerprint_status,
             "onchain_fills_source": self.onchain_fills.source_status.status,
             "onchain_fills_reason": self.onchain_fills.source_status.reason,
             "onchain_fills_error_code": self.onchain_fills.source_status.error_code,
@@ -813,6 +827,8 @@ class DreamDexReadOnlyAdapter:
 
     def _fetch_authenticated_account(self) -> AuthenticatedAccountSnapshot:
         account_identifier = self.trading_address or self.owner
+        if isinstance(self.authenticated_transport, DreamDexAuthenticatedReadOnlyTransport):
+            return self._fetch_pinned_authenticated_account(account_identifier)
         try:
             balances = self.authenticated_transport.fetch_account_balances(account_identifier, (self.symbol,))
             open_orders = self.authenticated_transport.fetch_open_orders(account_identifier, self.symbol)
@@ -842,6 +858,87 @@ class DreamDexReadOnlyAdapter:
                 "observed_at": observed,
             }
             return replace(unavailable, **statuses)
+
+    def _fetch_pinned_authenticated_account(self, account_identifier: str) -> AuthenticatedAccountSnapshot:
+        """Adapt the strict GET-only transport to the existing account model.
+
+        The production transport intentionally exposes no account-wide or fill
+        endpoint.  Consequently only the confirmed vault route and the
+        documented-but-incomplete order list can be represented here; fills,
+        commissions, and authoritative pagination remain unavailable.
+        """
+        transport = self.authenticated_transport
+        try:
+            vault = transport.fetch_vault_balance(self.symbol, account_identifier)
+            raw_orders, order_status = transport.fetch_orders_page(self.symbol, status="open")
+        except Exception as exc:
+            observed = self.clock()
+            safe_reason = re.sub(r"0x[0-9a-fA-F]{8,}", "<hex>", str(exc))[:180]
+            unavailable = AuthenticatedAccountSnapshot.unavailable(account_identifier)
+            return replace(
+                unavailable,
+                balances_status=replace(unavailable.balances_status, reason="authenticated_source_error:" + safe_reason, error_code="authenticated_source_error", observed_at=observed),
+                open_orders_status=replace(unavailable.open_orders_status, reason="authenticated_source_error:" + safe_reason, error_code="authenticated_source_error", observed_at=observed),
+                observed_at=observed,
+            )
+
+        balances = tuple(vault.balances)
+        orders: list[AuthenticatedOrderSnapshot] = []
+        for raw in raw_orders:
+            normalized = normalize_order_metadata(raw)
+            orders.append(AuthenticatedOrderSnapshot(
+                order_id=normalized.order_id or raw.key.order_id,
+                symbol=normalized.symbol or raw.key.symbol,
+                side=normalized.side,
+                price=normalized.price,
+                quantity=normalized.quantity,
+                remaining_quantity=normalized.remaining_quantity,
+                raw_status_name=normalized.raw_status,
+                observed_at=raw.observed_at,
+                account_identifier=account_identifier,
+                source_status=AuthenticatedSourceStatus(
+                    order_status.status,
+                    order_status.endpoint_name,
+                    order_status.observed_at,
+                    order_status.raw_status_name,
+                    order_status.reason,
+                    order_status.error_code,
+                    order_status.pagination_complete,
+                    order_status.duplicate_count,
+                    order_status.malformed_count,
+                ),
+            ))
+        observed = max((status.observed_at for status in (vault.source_status, order_status)), default=self.clock())
+        fills_status = AuthenticatedSourceStatus(
+            "unavailable", "account_fills", observed,
+            reason="authenticated_fills_source_unavailable",
+            error_code="authenticated_fills_source_unavailable",
+            pagination_complete=False,
+        )
+        recent_status = AuthenticatedSourceStatus(
+            "unavailable", "historical_orders", observed,
+            reason="authenticated_historical_orders_source_unavailable",
+            error_code="authenticated_historical_orders_source_unavailable",
+            pagination_complete=False,
+        )
+        commissions_status = AuthenticatedSourceStatus(
+            "unavailable", "account_commissions", observed,
+            reason="authenticated_commissions_source_unavailable",
+            error_code="authenticated_commissions_source_unavailable",
+            pagination_complete=False,
+        )
+        # A configured transport with a missing/invalid response must not be
+        # upgraded to an authoritative account snapshot by this adapter.
+        return AuthenticatedAccountSnapshot(
+            mask_account_id(account_identifier), balances, tuple(orders), (), (), (),
+            vault.source_status,
+            AuthenticatedSourceStatus(
+                order_status.status, order_status.endpoint_name, order_status.observed_at,
+                order_status.raw_status_name, order_status.reason, order_status.error_code,
+                order_status.pagination_complete, order_status.duplicate_count, order_status.malformed_count,
+            ),
+            recent_status, fills_status, commissions_status, observed,
+        )
 
     def fetch_snapshot(self) -> ReadOnlySnapshot:
         market = self.fetch_market()
@@ -905,6 +1002,19 @@ class DreamDexReadOnlyAdapter:
             authenticated=authenticated,
             onchain_fills=onchain_fills,
             order_metadata_report=order_metadata_report,
+            authenticated_transport_status=(
+                "unconfigured" if isinstance(self.authenticated_transport, UnconfiguredAuthenticatedReadOnlyTransport)
+                else str(getattr(self.authenticated_transport, "configuration_status", "configured" if getattr(self.authenticated_transport, "configured", True) else "unconfigured"))
+            ),
+            authenticated_request_execution_enabled=bool(getattr(self.authenticated_transport, "request_execution_enabled", False)),
+            authenticated_order_by_id_status=(
+                "not_requested" if bool(getattr(self.authenticated_transport, "configured", False))
+                else str(getattr(self.authenticated_transport, "configuration_status", "unconfigured"))
+            ),
+            authenticated_schema_fingerprint_status=(
+                "observed" if bool(getattr(self.authenticated_transport, "configured", False))
+                else "unavailable"
+            ),
         )
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc+onchain_order_filled", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics, onchain_fills)
 

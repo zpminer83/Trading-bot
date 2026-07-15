@@ -8,6 +8,7 @@ import re
 
 from bot.execution.dry_run_order_validator import DryRunOrderValidator, DryRunValidationLimits
 from bot.execution.order import OrderIntent
+from bot.integrations.dreamdex_authenticated_read_only import build_authenticated_read_only_transport_from_env
 from bot.integrations.dreamdex_read_only import DreamDexReadOnlyAdapter, FixtureRpcTransport, FixtureTransport, load_fixture, mask_account_id
 
 
@@ -137,8 +138,22 @@ def _print_report(snapshot, report, validation) -> None:
     authenticated = account.authenticated
     auth_unconfigured = authenticated.balances_status.error_code == "authenticated_transport_unconfigured"
     print(f"Authenticated account source: {'unconfigured' if auth_unconfigured else ('available' if authenticated.available else 'unavailable')}")
+    print(f"Authenticated transport: {account.authenticated_transport_status}")
+    print(f"Authenticated transport configured: {'YES' if account.authenticated_transport_status == 'configured' else 'NO'}")
+    print(f"Authenticated request execution: {'enabled' if account.authenticated_request_execution_enabled else 'disabled'}")
+    print(f"Authenticated request execution enabled: {'YES' if account.authenticated_request_execution_enabled else 'NO'}")
+    print(f"Authenticated vault REST status: {authenticated.balances_status.status}")
+    print(f"Authenticated order list status: {authenticated.open_orders_status.status}")
+    print(f"Authenticated order-by-id status: {account.authenticated_order_by_id_status}")
+    print(f"Authenticated schema fingerprint status: {account.authenticated_schema_fingerprint_status}")
+    print(f"Authenticated identity verified: {'YES' if authenticated.authoritative_for(account.trading_address) else 'NO'}")
     print(f"Authenticated balances: {authenticated.balances_status.status}")
-    print(f"Authenticated open orders: {authenticated.open_orders_status.status}")
+    # Keep the historical summary wording while exposing the more precise
+    # configured/unconfigured status above.
+    legacy_open_orders_status = authenticated.open_orders_status.status
+    if authenticated.open_orders_status.error_code in {"authenticated_transport_unconfigured", "authenticated_token_missing"}:
+        legacy_open_orders_status = "unavailable"
+    print(f"Authenticated open orders: {legacy_open_orders_status}")
     print(f"Authenticated fills: {authenticated.fills_status.status}")
     print(f"Authenticated pagination complete: {'YES' if authenticated.pagination_complete else 'NO'}")
     onchain = account.onchain_fills
@@ -190,7 +205,10 @@ def main() -> int:
             from bot.integrations.dreamdex_read_only import HttpGetTransport, HttpRpcTransport
             rest_transport, rpc_transport = HttpGetTransport(os.environ["DREAMDEX_READ_ONLY_BASE_URL"]), HttpRpcTransport(os.environ["DREAMDEX_READ_ONLY_RPC_URL"])
         trading_address = os.environ.get("DREAMDEX_READ_ONLY_TRADING_ADDRESS")
-        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, trading_address=trading_address, symbol=symbol)
+        # The factory reads only the explicit enable flag and bearer-token
+        # variable. Construction is side-effect free; GET I/O remains gated.
+        authenticated_transport = build_authenticated_read_only_transport_from_env(os.environ)
+        adapter = DreamDexReadOnlyAdapter(transport=rest_transport, rpc_transport=rpc_transport, owner=owner, trading_address=trading_address, symbol=symbol, authenticated_transport=authenticated_transport)
         snapshot = adapter.fetch_snapshot()
         local_cash = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_CASH")
         local_inventory = os.environ.get("DREAMDEX_READ_ONLY_LOCAL_INVENTORY")

@@ -181,6 +181,7 @@ class AuthenticatedSourceStatus:
     error_code: str | None = None
     pagination_complete: bool = False
     duplicate_count: int = 0
+    malformed_count: int = 0
 
     @property
     def available(self) -> bool:
