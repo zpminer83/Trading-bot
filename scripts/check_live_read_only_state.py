@@ -121,6 +121,43 @@ def _print_market_trading_rules(market) -> None:
         print(f"    list lengths: {', '.join(f'{name}={length}' for name, length in fingerprint.list_lengths) or 'none'}")
 
 
+def _print_authentication_state(account) -> None:
+    snapshot = getattr(account, "auth_snapshot", None)
+    print("AUTHENTICATION STATE:")
+    if snapshot is None:
+        print("  manager configured: NO")
+        print("  signer configured: NO")
+        print("  transport configured: NO")
+        print("  auth state: unconfigured")
+        print("  token present: NO")
+        print("  expiry status: unavailable")
+        print("  refresh required: NO")
+        print("  authenticated subject: <unresolved>")
+        print("  identity authoritative: NO")
+        print("  owner match: unresolved")
+        print("  trading match: unresolved")
+        print("  operator match: unresolved")
+        print("  address semantics: unresolved")
+        print("  unresolved reasons: authentication_manager_unconfigured")
+        return
+    safe = snapshot.safe_dict()
+    print(f"  manager configured: {'YES' if safe.get('manager_configured') else 'NO'}")
+    print(f"  signer configured: {'YES' if safe.get('signer_configured') else 'NO'}")
+    print(f"  transport configured: {'YES' if safe.get('transport_configured') else 'NO'}")
+    print(f"  auth state: {safe.get('state', 'failed_closed')}")
+    print(f"  token present: {'YES' if safe.get('token_present') else 'NO'}")
+    print(f"  expiry status: {safe.get('expiry_status', 'unavailable')}")
+    print(f"  refresh required: {'YES' if safe.get('refresh_required') else 'NO'}")
+    print(f"  authenticated subject: {safe.get('authenticated_subject', '<unresolved>')}")
+    print(f"  identity authoritative: {'YES' if safe.get('identity_authoritative') else 'NO'}")
+    print(f"  owner match: {safe.get('owner_match', 'unresolved')}")
+    print(f"  trading match: {safe.get('trading_match', 'unresolved')}")
+    print(f"  operator match: {safe.get('operator_match', 'unresolved')}")
+    print(f"  address semantics: {safe.get('address_semantics', 'unresolved')}")
+    reasons = safe.get("unresolved_reasons") or ("none",)
+    print(f"  unresolved reasons: {', '.join(reasons) if isinstance(reasons, (tuple, list)) else reasons}")
+
+
 def _orderbook_timestamp(book) -> datetime | None:
     value = book.get("timestamp", book.get("updatedAt", book.get("updated_at"))) if isinstance(book, dict) else None
     if value is None:
@@ -205,6 +242,7 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Authenticated open-order record count: {len(authenticated.open_orders)}")
     print(f"Authenticated fills: {authenticated.fills_status.status}")
     print(f"Authenticated pagination complete: {'YES' if authenticated.pagination_complete else 'NO'}")
+    _print_authentication_state(account)
     onchain = account.onchain_fills
     onchain_status = onchain.source_status
     print(f"On-chain fills source: {onchain_status.status if onchain_status.status != 'unavailable' else 'unavailable'}")

@@ -25,6 +25,7 @@ from bot.integrations.dreamdex_auth_models import (
     AuthenticatedSourceStatus,
     AuthenticatedReadOnlyTransport,
     UnconfiguredAuthenticatedReadOnlyTransport,
+    DreamDexAuthManager,
 )
 from bot.integrations.dreamdex_fill_events import (
     FillEventPage,
@@ -765,6 +766,7 @@ class AccountSnapshot:
     authenticated_vault_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
     authenticated_order_list_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
     authenticated_order_by_id_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
+    auth_snapshot: Any | None = None
 
     def balance(self, asset: str) -> BalanceSnapshot:
         return self.balances.get(asset, BalanceSnapshot(asset, None, None, None, "source_unavailable"))
@@ -806,6 +808,7 @@ class AccountSnapshot:
             "authenticated_vault_fingerprint_observed": self.authenticated_vault_fingerprint is not None,
             "authenticated_order_list_fingerprint_observed": self.authenticated_order_list_fingerprint is not None,
             "authenticated_order_by_id_fingerprint_observed": self.authenticated_order_by_id_fingerprint is not None,
+            "authentication_state": self.auth_snapshot.safe_dict() if self.auth_snapshot is not None and hasattr(self.auth_snapshot, "safe_dict") else {"state": "unconfigured", "token_present": False, "identity_authoritative": False},
             "onchain_fills_source": self.onchain_fills.source_status.status,
             "onchain_fills_reason": self.onchain_fills.source_status.reason,
             "onchain_fills_error_code": self.onchain_fills.source_status.error_code,
@@ -861,7 +864,7 @@ class ReconciliationReport:
 class DreamDexReadOnlyAdapter:
     """Compose confirmed market, vault and RPC sources; never mutates state."""
 
-    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None, fill_event_indexer: OrderFilledEventIndexer | None = None, order_metadata_resolver: OrderMetadataResolver | None = None) -> None:
+    def __init__(self, *, transport: ReadOnlyTransport | Callable[..., Any], rpc_transport: RpcTransport | Callable[..., Any], owner: str, trading_address: str | None = None, symbol: str = "SOMI:USDso", clock: Callable[[], datetime] | None = None, authenticated_transport: AuthenticatedReadOnlyTransport | None = None, fill_event_indexer: OrderFilledEventIndexer | None = None, order_metadata_resolver: OrderMetadataResolver | None = None, auth_manager: DreamDexAuthManager | None = None) -> None:
         if not owner or not str(owner).strip() or not _is_address(owner):
             raise ValueError("owner must be a public address")
         if trading_address is not None and not _is_address(trading_address):
@@ -870,6 +873,7 @@ class DreamDexReadOnlyAdapter:
             raise ValueError("market symbol must be BASE:QUOTE")
         self.owner, self.trading_address, self.symbol, self.clock = str(owner), (str(trading_address) if trading_address else None), symbol, clock or (lambda: datetime.now(timezone.utc))
         self.authenticated_transport = authenticated_transport or UnconfiguredAuthenticatedReadOnlyTransport()
+        self.auth_manager = auth_manager
         self.fill_event_indexer = fill_event_indexer
         self.order_metadata_resolver = order_metadata_resolver
         self._last_authenticated_vault_fingerprint: AuthenticatedResponseSchemaFingerprint | None = None
@@ -1048,6 +1052,7 @@ class DreamDexReadOnlyAdapter:
             unavailable = lambda source: rpc_source._error(source, observed, "unavailable")
             rpc = RpcAccountReadOnlySnapshot("", unavailable("rpc_pool_vault"), unavailable("rpc_pool_vault"), unavailable("rpc_erc20_balance"), unavailable("rpc_erc20_balance"), owner_diagnostics.native_gas, observed, self.owner)
         authenticated = self._fetch_authenticated_account()
+        auth_snapshot = self.auth_manager.snapshot() if self.auth_manager is not None else None
         onchain_fills = self.fill_event_indexer.fetch() if self.fill_event_indexer is not None else FillEventPage.unavailable()
         order_metadata_report = self.order_metadata_resolver.resolve_fills(onchain_fills.fills) if self.order_metadata_resolver is not None else OrderMetadataResolverReport.unavailable()
         if self.order_metadata_resolver is not None and order_metadata_report.authoritative:
@@ -1096,6 +1101,7 @@ class DreamDexReadOnlyAdapter:
             authenticated_vault_fingerprint=self._last_authenticated_vault_fingerprint,
             authenticated_order_list_fingerprint=self._last_authenticated_order_list_fingerprint,
             authenticated_order_by_id_fingerprint=self._last_authenticated_order_by_id_fingerprint,
+            auth_snapshot=auth_snapshot,
         )
         return ReadOnlySnapshot(market.metadata, account, self.clock(), "markets+orderbook+trades+vault_rest+somnia_rpc+onchain_order_filled", market.orderbook, market.recent_trades, owner_diagnostics, trading_diagnostics, onchain_fills)
 
