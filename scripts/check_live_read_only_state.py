@@ -33,6 +33,10 @@ from bot.execution.dreamdex_direct_order_encoding import (
     build_direct_transaction_signer_requirements,
     direct_owner_blocking_reasons,
 )
+from bot.execution.dreamdex_unsigned_transaction import (
+    UnavailableDreamDexTransactionTransport,
+    build_unsigned_transaction_requirements,
+)
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -269,6 +273,32 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
             f"rest={item['used_as_rest_subject']}, "
             f"authoritative={'YES' if item['authoritative'] else 'NO'}"
         )
+    capabilities = UnavailableDreamDexTransactionTransport().describe_capabilities()
+    requirements = build_unsigned_transaction_requirements(
+        operation="place_order",
+        from_address=binding.direct_signer_address,
+        to_address=getattr(market, "pool_address", None),
+    )
+    print("  unsigned transaction model: available_offline")
+    print(f"  unsigned place builder: {capabilities['build_unsigned_place']}")
+    print(f"  unsigned cancel builder: {capabilities['build_unsigned_cancel']}")
+    print(f"  unsigned reduce builder: {capabilities['build_unsigned_reduce']}")
+    print("  unsigned validation: available_offline")
+    print("  unsigned preview: available_offline")
+    print(f"  transaction chain ID: {requirements.required_chain_id}")
+    print(f"  transaction from binding: {safe_binding['transaction_from_semantics']}")
+    print(f"  transaction target binding: {'source_confirmed' if getattr(market, 'pool_address', None) else 'unavailable'}")
+    print("  raw calldata output allowed: NO")
+    print("  gas resolution: unavailable")
+    print("  nonce resolution: unavailable")
+    print("  fee resolution: unavailable")
+    print(f"  signing capability: {capabilities['sign_transaction']}")
+    print(f"  submission capability: {capabilities['submit_transaction']}")
+    print(f"  receipt capability: {capabilities['wait_for_receipt']}")
+    print("  unsigned request authoritative: NO")
+    print("  unsigned request ready for signing: NO")
+    print("  unsigned request ready for submission: NO")
+    print("  unsigned transaction blockers: direct_transaction_transport_unimplemented; direct_signer_key_unavailable; direct_signer_binding_non_authoritative")
     print(f"  transaction sender: {_masked(audit.identity.transaction_sender_address)}")
     print(f"  contract order owner subject: {audit.identity.contract_order_owner_subject}")
     print(f"  vault owner subject: {audit.identity.vault_owner_subject}")

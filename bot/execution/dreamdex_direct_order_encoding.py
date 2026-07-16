@@ -821,6 +821,7 @@ class DirectOrderCallPreview:
     unresolved_reasons: tuple[str, ...]
     target_contract: str | None = None
     order_id: int | None = None
+    _calldata: bytes | None = field(default=None, repr=False, compare=True)
 
     def safe_dict(self) -> dict[str, Any]:
         return {
@@ -839,7 +840,7 @@ class DirectOrderCallPreview:
 
 
 def _preview(function_name: str, selector: str, target: str, calldata: bytes | None, status: str, reasons: Sequence[str], value_category: str, order_id: int | None = None) -> DirectOrderCallPreview:
-    return DirectOrderCallPreview(_mask(target), function_name, selector, (len(calldata) if calldata is not None else None), (sha256(calldata).hexdigest() if calldata is not None else None), value_category, status, tuple(dict.fromkeys(reasons)), target, order_id)
+    return DirectOrderCallPreview(_mask(target), function_name, selector, (len(calldata) if calldata is not None else None), (sha256(calldata).hexdigest() if calldata is not None else None), value_category, status, tuple(dict.fromkeys(reasons)), target, order_id, calldata)
 
 
 def compute_safe_calldata_fingerprint(value: bytes | bytearray | DirectOrderCallPreview) -> str | None:
