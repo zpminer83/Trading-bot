@@ -11,6 +11,16 @@ from bot.execution.order import OrderIntent
 from bot.integrations.dreamdex_auth_models import DreamDexAuthManager
 from bot.integrations.dreamdex_authenticated_read_only import build_authenticated_read_only_transport_from_env
 from bot.integrations.dreamdex_read_only import DreamDexReadOnlyAdapter, FixtureRpcTransport, FixtureTransport, load_fixture, mask_account_id
+from bot.integrations.dreamdex_operator_permissions import (
+    audit_open_order_semantics,
+    audit_vendor_selectors,
+    build_authority_evidence,
+    build_capability_matrix,
+    build_vendor_snapshot_fingerprint,
+    audit_typescript_python_parity,
+    load_operator_configuration,
+    operator_blocking_reasons,
+)
 from bot.integrations.dreamdex_siwe_http_transport import build_siwe_http_transport_from_env
 from bot.integrations.dreamdex_siwe_signer import build_production_siwe_signer_from_env, resolve_auth_mode
 
@@ -121,6 +131,58 @@ def _print_identity_binding_evidence(evidence) -> None:
     print(f"  binding status: {safe['binding_status']}")
     print(f"  authoritative: {'YES' if safe['authoritative'] else 'NO'}")
     print(f"  unresolved reasons: {', '.join(safe['unresolved_reasons']) or 'none'}")
+
+
+def _print_operator_session_model(account, market) -> tuple[str, ...]:
+    """Print only source/status evidence; never perform an operator RPC call."""
+    print("OPERATOR / SESSION-KEY MODEL:")
+    vendor = build_vendor_snapshot_fingerprint()
+    config = load_operator_configuration(
+        os.environ,
+        contest_owner_address=getattr(account, "owner_address", None),
+        platform_trading_address=getattr(account, "trading_address", None),
+    )
+    identity = config.identity.safe_dict()
+    selectors = {item.capability: item for item in audit_vendor_selectors(vendor)}
+    matrix = build_capability_matrix(vendor)
+    authority = build_authority_evidence(
+        pool=getattr(market, "pool_address", None),
+        owner=config.identity.onchain_fund_owner_address,
+        operator=config.identity.operator_address,
+        selector_evidence=selectors,
+        snapshot=vendor,
+    )
+    open_orders = audit_open_order_semantics(vendor)
+    parity = audit_typescript_python_parity(vendor)
+    print(f"  vendor snapshot status: {vendor.status}")
+    print(f"  vendor source fingerprint: {vendor.fingerprint}")
+    print(f"  vendor package version: {vendor.package_version or 'unavailable'}")
+    print(f"  vendor commit SHA: {vendor.commit_sha or 'unavailable'}")
+    print(f"  contest owner: {identity['contest_owner_address']}")
+    print(f"  platform trading wallet: {identity['platform_trading_address']}")
+    print(f"  on-chain fund owner: {identity['onchain_fund_owner_address']}")
+    print(f"  operator address: {identity['operator_address']}")
+    print(f"  role mapping status: {identity['role_mapping_status']}")
+    print(f"  operator configured: {'YES' if config.operator_configured else 'NO'}")
+    print(f"  fund owner configured: {'YES' if config.fund_owner_configured else 'NO'}")
+    print(f"  registry address status: unavailable")
+    print(f"  pool address status: {'available' if getattr(market, 'pool_address', None) else 'unavailable'}")
+    for name, capability in (("placeOrderFor", matrix.place_order_for), ("cancelOrderFor", matrix.cancel_order_for), ("reduceOrderFor", matrix.reduce_order_for)):
+        selector = capability.selector or "unavailable"
+        print(f"  {name} selector: {selector} ({selectors.get(capability.name).status if selectors.get(capability.name) else 'unavailable'})")
+    print(f"  selector consistency: {matrix.selector_consistency}")
+    print("  per-pool permission evidence: unconfigured")
+    print("  global permission evidence: unconfigured")
+    print("  denial evidence: unconfigured")
+    print(f"  effective place authority: {authority.effective_place_status}")
+    print(f"  effective cancel authority: {authority.effective_cancel_status}")
+    print(f"  effective reduce authority: {authority.effective_reduce_status}")
+    print(f"  open-order subject semantics: {open_orders.status}")
+    print(f"  TypeScript/Python parity: {parity.status}")
+    print(f"  authority authoritative: {'YES' if authority.authoritative else 'NO'}")
+    reasons = list(identity["unresolved_reasons"]) + list(authority.unresolved_reasons) + list(open_orders.unresolved_reasons) + list(operator_blocking_reasons(configuration=config, matrix=matrix, authority=authority, parity=parity))
+    print(f"  unresolved reasons: {', '.join(dict.fromkeys(reasons)) or 'none'}")
+    return tuple(dict.fromkeys(reasons))
 
 
 def _print_market_trading_rules(market) -> None:
@@ -286,6 +348,7 @@ def _print_report(snapshot, report, validation) -> None:
     _print_address_diagnostics("OWNER/LOGIN", snapshot.owner_diagnostics, account.owner_address or account.account_identifier)
     _print_address_diagnostics("TRADING/SMART", snapshot.trading_diagnostics, account.trading_address)
     _print_identity_binding_evidence(account.identity_binding_evidence)
+    operator_reasons = _print_operator_session_model(account, market)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
     best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
@@ -371,7 +434,10 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Reconciliation complete: {'YES' if report.completed else 'NO'}")
     print(f"Account address semantics: {account.account_address_semantics}")
     print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")
-    print(f"Hypothetical trading blocked reason: {report.reason if report.trading_blocked else ', '.join(validation.reasons) or 'none'}")
+    blocked_reason = report.reason if report.trading_blocked else ", ".join(validation.reasons) or "none"
+    if report.trading_blocked:
+        blocked_reason = ";".join(dict.fromkeys([item for item in [blocked_reason, *operator_reasons] if item]))
+    print(f"Hypothetical trading blocked reason: {blocked_reason}")
     print(f"Dry-run approved: {'YES' if validation.approved else 'NO'}")
     print(f"Dry-run reasons: {', '.join(validation.reasons) or 'none'}")
     print("Real submission enabled: NO")
