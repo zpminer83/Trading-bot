@@ -51,6 +51,10 @@ from bot.execution.dreamdex_order_reconciliation import (
     build_order_reconciliation_preview,
     describe_order_reconciliation_capabilities,
 )
+from bot.execution.dreamdex_execution_primitives import (
+    DreamDexExecutionBlockers,
+    build_execution_capability_matrix,
+)
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -475,6 +479,30 @@ def _print_order_reconciliation_graph() -> tuple[str, ...]:
     return graph.blockers
 
 
+def _print_execution_pipeline_summary() -> None:
+    """Print the offline execution architecture without performing I/O."""
+    matrix = build_execution_capability_matrix(
+        blockers=DreamDexExecutionBlockers.PRODUCTION_DEFAULT_ACTIVE,
+    )
+    print("EXECUTION PIPELINE SUMMARY:")
+    print("  encoding: source_confirmed")
+    for label, name in (
+        ("unsigned request", "build_unsigned_place"),
+        ("envelope", "build_unsigned_envelope"),
+        ("lifecycle", "create_prepared_lifecycle"),
+        ("reconciliation", "build_reconciliation_graph"),
+        ("signing", "sign_transaction"),
+        ("submission", "submit_transaction"),
+    ):
+        print(f"  {label}: {matrix.by_name(name).status}")
+    print("  receipt/log fetch: unavailable")
+    print("  pipeline authoritative: NO")
+    print("  pipeline ready for signing: NO")
+    print("  pipeline ready for submission: NO")
+    print(f"  active blocker count: {len(matrix.blockers)}")
+    print(f"  capability fingerprint: {matrix.fingerprint}")
+
+
 def _print_authentication_state(account) -> None:
     snapshot = getattr(account, "auth_snapshot", None)
     print("AUTHENTICATION STATE:")
@@ -610,6 +638,7 @@ def _print_report(snapshot, report, validation) -> None:
     _print_operator_session_model(account, market)
     direct_owner_reasons = _print_direct_owner_execution_model(account, market)
     graph_blockers = _print_order_reconciliation_graph()
+    _print_execution_pipeline_summary()
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
     best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
