@@ -12,12 +12,14 @@ from bot.integrations.dreamdex_auth_models import DreamDexAuthManager
 from bot.integrations.dreamdex_authenticated_read_only import build_authenticated_read_only_transport_from_env
 from bot.integrations.dreamdex_read_only import DreamDexReadOnlyAdapter, FixtureRpcTransport, FixtureTransport, load_fixture, mask_account_id
 from bot.integrations.dreamdex_operator_permissions import (
+    audit_fund_owner_semantics,
     audit_open_order_semantics,
     audit_vendor_selectors,
     build_authority_evidence,
     build_capability_matrix,
     build_vendor_snapshot_fingerprint,
     audit_typescript_python_parity,
+    discover_operator_registry,
     load_operator_configuration,
     operator_blocking_reasons,
 )
@@ -154,6 +156,8 @@ def _print_operator_session_model(account, market) -> tuple[str, ...]:
     )
     open_orders = audit_open_order_semantics(vendor)
     parity = audit_typescript_python_parity(vendor)
+    registry = discover_operator_registry()
+    owner_semantics = audit_fund_owner_semantics(vendor)
     print(f"  vendor snapshot status: {vendor.status}")
     print(f"  vendor source fingerprint: {vendor.fingerprint}")
     print(f"  vendor package version: {vendor.package_version or 'unavailable'}")
@@ -165,7 +169,14 @@ def _print_operator_session_model(account, market) -> tuple[str, ...]:
     print(f"  role mapping status: {identity['role_mapping_status']}")
     print(f"  operator configured: {'YES' if config.operator_configured else 'NO'}")
     print(f"  fund owner configured: {'YES' if config.fund_owner_configured else 'NO'}")
-    print(f"  registry address status: unavailable")
+    print(f"  permission probe enabled: {'YES' if config.permission_probe_enabled else 'NO'}")
+    print(f"  permission probe flag status: {config.enable_flag_status}")
+    print(f"  registry address: {_masked(registry.registry_address)}")
+    print(f"  registry address status: {registry.status}")
+    print(f"  registry chain ID: {registry.chain_id}")
+    print(f"  registry source file: {registry.addresses[0].source_file if registry.addresses else 'unavailable'}")
+    print(f"  registry source fingerprint: {registry.addresses[0].source_fingerprint if registry.addresses else 'unavailable'}")
+    print(f"  registry conflicts: {', '.join(registry.conflicts) or 'none'}")
     print(f"  pool address status: {'available' if getattr(market, 'pool_address', None) else 'unavailable'}")
     for name, capability in (("placeOrderFor", matrix.place_order_for), ("cancelOrderFor", matrix.cancel_order_for), ("reduceOrderFor", matrix.reduce_order_for)):
         selector = capability.selector or "unavailable"
@@ -179,6 +190,10 @@ def _print_operator_session_model(account, market) -> tuple[str, ...]:
     print(f"  effective reduce authority: {authority.effective_reduce_status}")
     print(f"  open-order subject semantics: {open_orders.status}")
     print(f"  TypeScript/Python parity: {parity.status}")
+    print(f"  fund-owner semantics: {owner_semantics.status}")
+    print(f"  isOperatorAuthorized owner parameter: {owner_semantics.owner_parameter}")
+    print(f"  placeOrderFor owner subject: {owner_semantics.place_order_for_owner}")
+    print(f"  cancelOrderFor owner subject: {owner_semantics.cancel_order_for_owner}")
     print(f"  authority authoritative: {'YES' if authority.authoritative else 'NO'}")
     reasons = list(identity["unresolved_reasons"]) + list(authority.unresolved_reasons) + list(open_orders.unresolved_reasons) + list(operator_blocking_reasons(configuration=config, matrix=matrix, authority=authority, parity=parity))
     print(f"  unresolved reasons: {', '.join(dict.fromkeys(reasons)) or 'none'}")

@@ -7,6 +7,7 @@ from bot.integrations.dreamdex_operator_permissions import (
     CAPABILITY_NAMES,
     FUND_OWNER_ENV,
     OPERATOR_ENV,
+    PERMISSION_PROBE_ENABLED_ENV,
     READ_ONLY_RPC_METHODS,
     audit_open_order_semantics,
     audit_typescript_python_parity,
@@ -16,6 +17,9 @@ from bot.integrations.dreamdex_operator_permissions import (
     build_authority_evidence,
     build_vendor_snapshot_fingerprint,
     check_operator_permission_read_only,
+    audit_fund_owner_semantics,
+    discover_operator_registry,
+    probe_operator_permissions_read_only,
     load_operator_configuration,
     parse_is_operator_authorized_result,
     resolve_operator_permission,
@@ -195,3 +199,69 @@ def test_identity_roles_are_separate_and_repr_masks_addresses():
 
 def test_rpc_allowlist_has_no_mutation_or_signing_methods():
     assert READ_ONLY_RPC_METHODS == {"eth_call", "eth_chainId", "eth_getCode", "eth_blockNumber"}
+
+
+def test_mainnet_registry_is_source_confirmed_and_offline():
+    result = discover_operator_registry()
+    assert result.status == "source_confirmed"
+    assert result.registry_address == "0xe7a190736b6024a4dbafadc04e283075877005ce"
+    assert result.network_calls == 0
+    assert result.operator_mode_blocked is True
+    assert result.addresses[0].source_file.endswith("packages/core/src/config/networks.ts")
+
+
+def test_registry_conflict_never_selects_an_address(tmp_path):
+    path = tmp_path / "packages" / "core" / "src" / "config"
+    path.mkdir(parents=True)
+    (path / "networks.ts").write_text(
+        'mainnet: { chainId: 5031, operatorRegistry: "0x1111111111111111111111111111111111111111" },\n'
+        'mainnet: { chainId: 5031, operatorRegistry: "0x2222222222222222222222222222222222222222" },\n',
+        encoding="utf-8",
+    )
+    result = discover_operator_registry(tmp_path)
+    assert result.status == "conflicting"
+    assert result.selected_address is None
+    assert result.network_calls == 0
+
+
+def test_fund_owner_semantics_are_explicit_but_not_authoritative():
+    result = audit_fund_owner_semantics()
+    assert result.status == "source_confirmed"
+    assert "fund owner" in result.place_order_for_owner
+    assert result.authoritative is False
+
+
+def test_permission_probe_flag_defaults_disabled_and_invalid_is_fail_closed():
+    default = load_operator_configuration({})
+    assert default.permission_probe_enabled is False
+    invalid = load_operator_configuration({PERMISSION_PROBE_ENABLED_ENV: "sometimes"})
+    assert invalid.status == "configuration_invalid"
+    assert invalid.enable_flag_status == "configuration_invalid"
+
+
+class PermissionRpcFixture:
+    def __init__(self, result="0x" + "0" * 63 + "1"):
+        self.calls = []
+        self.result = result
+
+    def call(self, method, params):
+        self.calls.append((method, params))
+        if method == "eth_chainId":
+            return "0x13a7"
+        if method == "eth_blockNumber":
+            return "0x20"
+        if method == "eth_getCode":
+            return "0x6000"
+        if method == "eth_call":
+            return self.result
+        raise AssertionError(method)
+
+
+def test_permission_probe_uses_only_read_methods_and_keeps_authority_false():
+    fixture = PermissionRpcFixture()
+    result = probe_operator_permissions_read_only(fixture, pool=POOL, owner=OWNER, operator=OPERATOR)
+    assert result.network_attempt_performed is True
+    assert result.authoritative is False
+    assert result.status == "rpc_confirmed_allowed"
+    assert set(method for method, _ in fixture.calls) <= READ_ONLY_RPC_METHODS
+    assert "eth_sendTransaction" not in set(method for method, _ in fixture.calls)

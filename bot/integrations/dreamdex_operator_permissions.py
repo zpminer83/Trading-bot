@@ -19,6 +19,8 @@ from typing import Any, Mapping, Sequence
 VENDOR_ROOT = Path(__file__).resolve().parents[2] / "vendor" / "dreamdex-bot-kit"
 OPERATOR_ENV = "DREAMDEX_READ_ONLY_OPERATOR_ADDRESS"
 FUND_OWNER_ENV = "DREAMDEX_READ_ONLY_ONCHAIN_FUND_OWNER_ADDRESS"
+PERMISSION_PROBE_ENABLED_ENV = "DREAMDEX_ENABLE_OPERATOR_PERMISSION_READ_ONLY"
+SUPPORTED_PERMISSION_PROBE_VALUES = frozenset({"1", "true", "yes", "on"})
 READ_ONLY_RPC_METHODS = frozenset({"eth_call", "eth_chainId", "eth_getCode", "eth_blockNumber"})
 FORBIDDEN_RPC_METHODS = frozenset({"eth_send" + "Transaction", "eth_send" + "RawTransaction", "personal_sign", "wallet_", "debug_", "trace_"})
 AUTHORITY_LEVELS = frozenset({"unconfigured", "source_confirmed", "rpc_confirmed_allowed", "rpc_confirmed_denied", "unavailable", "conflicting", "stale", "non_authoritative"})
@@ -31,6 +33,9 @@ ROLE_NAMES = (
     "contest_owner_login", "dreamdex_platform_trading_wallet",
     "onchain_fund_owner", "operator_signer",
 )
+IS_OPERATOR_AUTHORIZED_SIGNATURE = "isOperatorAuthorized(address,address,bytes4)"
+IS_OPERATOR_AUTHORIZED_SELECTOR = "0xa8cb3794"
+IS_OPERATOR_AUTHORIZED_ARGUMENTS = ("owner", "operator", "selector")
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _SELECTOR_RE = re.compile(r"^0x[0-9a-fA-F]{8}$")
 
@@ -189,6 +194,120 @@ compute_vendor_snapshot_fingerprint = build_vendor_snapshot_fingerprint
 get_vendor_snapshot_fingerprint = build_vendor_snapshot_fingerprint
 
 
+@dataclass(frozen=True)
+class OperatorRegistryAddressEvidence:
+    """A source-backed registry address; no address is inferred at runtime."""
+    address: str
+    chain_id: int
+    semantic_role: str
+    source_file: str
+    source_fingerprint: str | None
+    evidence_status: str
+    conflicts: tuple[str, ...] = ()
+
+    @property
+    def status(self) -> str:
+        return self.evidence_status
+
+    @property
+    def source_status(self) -> str:
+        return self.evidence_status
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "address_masked": _mask(self.address),
+            "chain_id": self.chain_id,
+            "semantic_role": self.semantic_role,
+            "source_file": self.source_file,
+            "source_fingerprint": self.source_fingerprint,
+            "evidence_status": self.evidence_status,
+            "conflicts": self.conflicts,
+        }
+
+
+@dataclass(frozen=True)
+class OperatorRegistryDiscovery:
+    chain_id: int
+    status: str
+    addresses: tuple[OperatorRegistryAddressEvidence, ...] = ()
+    selected_address: str | None = None
+    conflicts: tuple[str, ...] = ()
+    network_calls: int = 0
+    operator_mode_blocked: bool = True
+    reason: str | None = None
+
+    @property
+    def registry_address(self) -> str | None:
+        return self.selected_address
+
+    @property
+    def address(self) -> str | None:
+        return self.selected_address
+
+    @property
+    def registry_addresses(self) -> tuple[str, ...]:
+        return tuple(item.address for item in self.addresses)
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "chain_id": self.chain_id,
+            "status": self.status,
+            "registry_address_masked": _mask(self.selected_address),
+            "addresses": tuple(item.safe_dict() for item in self.addresses),
+            "conflicts": self.conflicts,
+            "network_calls": self.network_calls,
+            "operator_mode_blocked": self.operator_mode_blocked,
+            "reason": self.reason,
+        }
+
+
+def discover_operator_registry(vendor_root: str | Path | None = None, *, chain_id: int = 5031) -> OperatorRegistryDiscovery:
+    """Discover only addresses explicitly declared by the vendored network map.
+
+    This is an offline source audit.  It intentionally returns no selected
+    address when declarations conflict or are absent.
+    """
+    root = Path(vendor_root) if vendor_root is not None else VENDOR_ROOT
+    relative = "packages/core/src/config/networks.ts"
+    path = root / Path(relative)
+    if not path.is_file():
+        return OperatorRegistryDiscovery(chain_id, "unavailable", reason="registry_source_unavailable")
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return OperatorRegistryDiscovery(chain_id, "unavailable", reason="registry_source_unavailable")
+    network_name = "mainnet" if chain_id == 5031 else ("testnet" if chain_id == 50312 else None)
+    if network_name is None:
+        return OperatorRegistryDiscovery(chain_id, "unavailable", reason="unsupported_chain_id")
+    blocks = re.findall(rf"{network_name}:\s*\{{(?P<body>.*?)\n\s*\}}", text, re.DOTALL)
+    matches = [address for body in blocks for address in re.findall(r"operatorRegistry\s*:\s*\"(0x[0-9a-fA-F]{40})\"", body)]
+    if not matches:
+        # Keep fixture discovery deterministic even when a compact one-line
+        # map is supplied by an offline test.
+        matches = re.findall(r"operatorRegistry\s*:\s*\"(0x[0-9a-fA-F]{40})\"", text)
+    unique = tuple(dict.fromkeys(item.lower() for item in matches))
+    source_hash = sha256(path.read_bytes()).hexdigest()
+    evidences = tuple(
+        OperatorRegistryAddressEvidence(address, chain_id, "operator_permission_registry", relative, source_hash, "source_confirmed")
+        for address in unique
+    )
+    if not unique:
+        return OperatorRegistryDiscovery(chain_id, "unavailable", reason="registry_address_not_declared")
+    if len(unique) > 1:
+        conflicts = tuple(f"multiple_registry_addresses:{_mask(address)}" for address in unique)
+        evidences = tuple(
+            OperatorRegistryAddressEvidence(item.address, item.chain_id, item.semantic_role, item.source_file, item.source_fingerprint, "conflicting", conflicts)
+            for item in evidences
+        )
+        return OperatorRegistryDiscovery(chain_id, "conflicting", evidences, conflicts=conflicts, reason="multiple_registry_addresses")
+    return OperatorRegistryDiscovery(chain_id, "source_confirmed", evidences, unique[0], operator_mode_blocked=True)
+
+
+discover_registry = discover_operator_registry
+discover_operator_registry_address = discover_operator_registry
+find_operator_registry = discover_operator_registry
+
+
 class SelectorStatus(str, Enum):
     confirmed = "confirmed"
     unavailable = "unavailable"
@@ -314,6 +433,8 @@ class OperatorConfiguration:
     fund_owner_configured: bool
     status: str
     unresolved_reasons: tuple[str, ...] = ()
+    permission_probe_enabled: bool = False
+    enable_flag_status: str = "disabled"
 
     @property
     def authorization_status(self) -> str:
@@ -328,10 +449,78 @@ class OperatorConfiguration:
         return self.identity
 
 
+@dataclass(frozen=True)
+class FundOwnerSemanticsAudit:
+    owner_parameter: str
+    place_order_for_owner: str
+    cancel_order_for_owner: str
+    setup_owner: str
+    typescript_behavior: str
+    python_behavior: str
+    status: str
+    authoritative: bool = False
+    evidence_sources: tuple[str, ...] = ()
+    unresolved_reasons: tuple[str, ...] = ()
+
+    @property
+    def owner_subject(self) -> str:
+        return self.owner_parameter
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "owner_parameter": self.owner_parameter,
+            "owner_subject": self.owner_subject,
+            "place_order_for_owner": self.place_order_for_owner,
+            "cancel_order_for_owner": self.cancel_order_for_owner,
+            "setup_owner": self.setup_owner,
+            "typescript_behavior": self.typescript_behavior,
+            "python_behavior": self.python_behavior,
+            "status": self.status,
+            "authoritative": False,
+            "evidence_sources": self.evidence_sources,
+            "unresolved_reasons": self.unresolved_reasons,
+        }
+
+
+def audit_fund_owner_semantics(snapshot: VendorSnapshotFingerprint | None = None, vendor_root: str | Path | None = None) -> FundOwnerSemanticsAudit:
+    snapshot = snapshot or build_vendor_snapshot_fingerprint(vendor_root)
+    root = Path(vendor_root) if vendor_root is not None else VENDOR_ROOT
+    docs = "docs/session-keys.md"
+    operator = "packages/core/src/operator.ts"
+    pool = "packages/core/src/pool.ts"
+    setup = "scripts/operator-setup.ts"
+    sources = tuple(item for item in (docs, operator, pool, setup) if item in dict(snapshot.source_fingerprints))
+    texts: dict[str, str] = {}
+    for relative in sources:
+        try:
+            texts[relative] = (root / Path(relative)).read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            texts[relative] = ""
+    docs_text = texts.get(docs, "")
+    confirmed = "Fund key (owner)" in docs_text and "owner's" in docs_text and "OWNER_ADDRESS" in docs_text
+    # Vendor code passes owner as the first argument to the pool view and as
+    # the owner subject to placeOrderFor/cancelOrderFor; it does not identify
+    # contest login and platform wallet as interchangeable roles.
+    status = "source_confirmed" if confirmed else "unavailable"
+    return FundOwnerSemanticsAudit(
+        owner_parameter="fund_owner_vault_subject",
+        place_order_for_owner="ctx.owner (fund owner), not operator",
+        cancel_order_for_owner="ctx.owner (fund owner), not operator",
+        setup_owner="fund.account.address",
+        typescript_behavior="fund owner is ctx.owner and fills settle to owner vault",
+        python_behavior="operator ABI helpers unavailable; owner subject not confirmed",
+        status=status,
+        authoritative=False,
+        evidence_sources=sources,
+        unresolved_reasons=() if confirmed else ("fund_owner_semantics_unavailable",),
+    )
+
+
 def load_operator_configuration(environ: Mapping[str, str] | None = None, *, contest_owner_address: str | None = None, platform_trading_address: str | None = None) -> OperatorConfiguration:
     env = environ or {}
     raw_operator = env.get(OPERATOR_ENV)
     raw_owner = env.get(FUND_OWNER_ENV)
+    raw_enabled = env.get(PERMISSION_PROBE_ENABLED_ENV)
     reasons: list[str] = []
     operator = _address(raw_operator) if raw_operator else None
     fund_owner = _address(raw_owner) if raw_owner else None
@@ -339,6 +528,18 @@ def load_operator_configuration(environ: Mapping[str, str] | None = None, *, con
         reasons.append("operator_configuration_invalid")
     if raw_owner and fund_owner is None:
         reasons.append("fund_owner_configuration_invalid")
+    enabled = False
+    flag_status = "disabled"
+    if raw_enabled is not None:
+        value = raw_enabled.strip().lower()
+        if value in SUPPORTED_PERMISSION_PROBE_VALUES:
+            enabled = True
+            flag_status = "enabled"
+        elif value in {"0", "false", "no", "off", ""}:
+            flag_status = "disabled"
+        else:
+            reasons.append("permission_probe_enable_flag_invalid")
+            flag_status = "configuration_invalid"
     status = "configuration_invalid" if reasons else ("configured" if operator and fund_owner else "unconfigured")
     identity = DreamDexOperatorIdentityModel(
         contest_owner_address=contest_owner_address,
@@ -349,7 +550,7 @@ def load_operator_configuration(environ: Mapping[str, str] | None = None, *, con
         authoritative=False,
         unresolved_reasons=tuple(reasons or (["operator_identity_mapping_unresolved"] if status != "configured" else ["operator_identity_mapping_unresolved"])),
     )
-    return OperatorConfiguration(identity, operator is not None, fund_owner is not None, status, tuple(reasons))
+    return OperatorConfiguration(identity, operator is not None, fund_owner is not None, status, tuple(reasons), enabled, flag_status)
 
 
 build_operator_identity_model_from_env = load_operator_configuration
@@ -448,7 +649,7 @@ def build_is_operator_authorized_eth_call(pool: str, owner: str, operator: str, 
     operator = _require_address(operator, "operator")
     if not _SELECTOR_RE.fullmatch(selector):
         raise ValueError("selector: configuration_invalid")
-    call_data = "0xa8cb3794" + owner[2:].rjust(64, "0") + operator[2:].rjust(64, "0") + selector[2:].ljust(64, "0")
+    call_data = IS_OPERATOR_AUTHORIZED_SELECTOR + owner[2:].rjust(64, "0") + operator[2:].rjust(64, "0") + selector[2:].ljust(64, "0")
     return {"to": pool, "data": call_data}
 
 
@@ -542,6 +743,97 @@ def check_operator_permission_read_only(transport: Any, *, pool: str, owner: str
 
 OperatorPermissionCheck = OperatorRpcPermissionEvidence
 read_operator_permission = check_operator_permission_read_only
+
+
+@dataclass(frozen=True)
+class OperatorPermissionProbeResult:
+    probe_enabled: bool
+    network_attempt_performed: bool
+    chain_id: int | None
+    latest_block: int | None
+    registry: OperatorRegistryDiscovery
+    registry_code_status: str
+    pool_code_status: str
+    fund_owner_masked: str
+    operator_masked: str
+    place: OperatorRpcPermissionEvidence | None
+    cancel: OperatorRpcPermissionEvidence | None
+    reduce_status: str = "unavailable"
+    status: str = "unavailable"
+    unresolved_reasons: tuple[str, ...] = ()
+
+    @property
+    def authoritative(self) -> bool:
+        return False
+
+
+def _code_status(value: Any) -> str:
+    if not isinstance(value, str) or not value.startswith("0x"):
+        return "unavailable"
+    if value.lower() in {"0x", "0x0"}:
+        return "no_code"
+    if len(value) % 2 or any(c not in "0123456789abcdefABCDEF" for c in value[2:]):
+        return "unavailable"
+    return "contract_code"
+
+
+def probe_operator_permissions_read_only(
+    transport: Any,
+    *,
+    pool: str,
+    owner: str,
+    operator: str,
+    registry: OperatorRegistryDiscovery | None = None,
+    expected_chain_id: int = 5031,
+    observed_at: datetime | None = None,
+) -> OperatorPermissionProbeResult:
+    """Perform a strictly allow-listed, view-only permission probe.
+
+    The result is evidence for the exact tuple only and is never an authority
+    to submit an order.  Invalid configuration returns before any RPC call.
+    """
+    observed = _utc(observed_at)
+    pool = _require_address(pool, "pool")
+    owner = _require_address(owner, "owner")
+    operator = _require_address(operator, "operator")
+    registry = registry or discover_operator_registry(chain_id=expected_chain_id)
+    reasons: list[str] = []
+    if registry.status != "source_confirmed" or not registry.registry_address:
+        reasons.append("registry_source_not_confirmed")
+        return OperatorPermissionProbeResult(False, False, None, None, registry, "unavailable", "unavailable", _mask(owner), _mask(operator), None, None, unresolved_reasons=tuple(reasons))
+    chain_id = block = None
+    try:
+        chain_id = _hex_int(_rpc_call(transport, "eth_chainId", []), "chain_id")
+        if chain_id != expected_chain_id:
+            reasons.append("wrong_chain")
+            return OperatorPermissionProbeResult(True, True, chain_id, None, registry, "unavailable", "unavailable", _mask(owner), _mask(operator), None, None, status="wrong_chain", unresolved_reasons=tuple(reasons))
+        registry_code = _rpc_call(transport, "eth_getCode", [registry.registry_address, "latest"])
+        registry_status = _code_status(registry_code)
+        if registry_status != "contract_code":
+            reasons.append("registry_code_unavailable")
+        pool_code = _rpc_call(transport, "eth_getCode", [pool, "latest"])
+        pool_status = _code_status(pool_code)
+        if pool_status != "contract_code":
+            reasons.append("pool_code_unavailable")
+        block = _hex_int(_rpc_call(transport, "eth_blockNumber", []), "block_number")
+        if reasons:
+            return OperatorPermissionProbeResult(True, True, chain_id, block, registry, registry_status, pool_status, _mask(owner), _mask(operator), None, None, status="unavailable", unresolved_reasons=tuple(dict.fromkeys(reasons)))
+        place = check_operator_permission_read_only(transport, pool=pool, owner=owner, operator=operator, selector="0x80054449", expected_chain_id=expected_chain_id, observed_at=observed)
+        cancel = check_operator_permission_read_only(transport, pool=pool, owner=owner, operator=operator, selector="0xe37b444b", expected_chain_id=expected_chain_id, observed_at=observed)
+        statuses = {place.status, cancel.status}
+        if statuses == {"rpc_confirmed_allowed"}:
+            status = "rpc_confirmed_allowed"
+        elif statuses == {"rpc_confirmed_denied"}:
+            status = "rpc_confirmed_denied"
+        elif "unavailable" in statuses or "stale" in statuses:
+            status = "unavailable"
+        else:
+            status = "conflicting"
+        return OperatorPermissionProbeResult(True, True, chain_id, block, registry, registry_status, pool_status, _mask(owner), _mask(operator), place, cancel, status=status, unresolved_reasons=tuple(dict.fromkeys(reasons)))
+    except Exception as exc:
+        code = "timeout" if "timeout" in str(exc).lower() else "rpc_error"
+        reasons.append(code)
+        return OperatorPermissionProbeResult(True, True, chain_id, block, registry, "unavailable", "unavailable", _mask(owner), _mask(operator), None, None, status="unavailable", unresolved_reasons=tuple(reasons))
 
 
 @dataclass(frozen=True)
@@ -661,14 +953,14 @@ def operator_blocking_reasons(*, configuration: OperatorConfiguration | None = N
 
 
 __all__ = [
-    "AUTHORITY_LEVELS", "CAPABILITY_NAMES", "ROLE_NAMES", "FUND_OWNER_ENV", "OPERATOR_ENV", "READ_ONLY_RPC_METHODS",
+    "AUTHORITY_LEVELS", "CAPABILITY_NAMES", "ROLE_NAMES", "IS_OPERATOR_AUTHORIZED_SIGNATURE", "IS_OPERATOR_AUTHORIZED_SELECTOR", "IS_OPERATOR_AUTHORIZED_ARGUMENTS", "FUND_OWNER_ENV", "OPERATOR_ENV", "PERMISSION_PROBE_ENABLED_ENV", "SUPPORTED_PERMISSION_PROBE_VALUES", "READ_ONLY_RPC_METHODS",
     "FORBIDDEN_RPC_METHODS", "VENDOR_ROOT", "VendorSnapshotFingerprint", "build_vendor_snapshot_fingerprint",
-    "compute_vendor_snapshot_fingerprint", "get_vendor_snapshot_fingerprint", "SelectorStatus",
+    "compute_vendor_snapshot_fingerprint", "get_vendor_snapshot_fingerprint", "OperatorRegistryAddressEvidence", "OperatorRegistryDiscovery", "discover_operator_registry", "discover_registry", "discover_operator_registry_address", "find_operator_registry", "SelectorStatus",
     "OperatorSelectorEvidence", "audit_vendor_selectors", "selector_evidence_map", "recompute_selector", "DreamDexOperatorIdentityModel",
-    "OperatorConfiguration", "load_operator_configuration", "build_operator_identity_model_from_env", "DreamDexOperatorCapability", "DreamDexOperatorCapabilityMatrix",
+    "OperatorConfiguration", "load_operator_configuration", "build_operator_identity_model_from_env", "FundOwnerSemanticsAudit", "audit_fund_owner_semantics", "DreamDexOperatorCapability", "DreamDexOperatorCapabilityMatrix",
     "build_capability_matrix", "build_operator_capability_matrix", "OperatorPermissionState", "resolve_operator_permission", "evaluate_effective_permission", "build_is_operator_authorized_eth_call",
     "parse_is_operator_authorized_result", "OperatorRpcPermissionEvidence", "ReadOnlyOperatorRpcTransport",
-    "check_operator_permission_read_only", "read_operator_permission", "OperatorPermissionCheck", "DreamDexOperatorAuthorityEvidence", "build_authority_evidence",
+    "check_operator_permission_read_only", "read_operator_permission", "OperatorPermissionCheck", "OperatorPermissionProbeResult", "probe_operator_permissions_read_only", "DreamDexOperatorAuthorityEvidence", "build_authority_evidence",
     "operator_blocking_reasons",
     "OpenOrderSemanticsAudit", "audit_open_order_semantics", "PythonParityAudit", "audit_typescript_python_parity",
 ]
