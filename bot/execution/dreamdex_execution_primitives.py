@@ -187,6 +187,22 @@ class DreamDexExecutionBlockers:
     SIGNED_TRANSACTION_VERIFICATION_FAILED = "signed_transaction_verification_failed"
     SIGNED_PAYLOAD_NOT_DURABLY_AVAILABLE = "signed_payload_not_durably_available"
     SIGNED_TRANSACTION_SUBMISSION_UNAVAILABLE = "signed_transaction_submission_unavailable"
+    RAW_TRANSACTION_SUBMISSION_UNAVAILABLE = "raw_transaction_submission_unavailable"
+    SUBMISSION_POLICY_UNAVAILABLE = "submission_policy_unavailable"
+    SUBMISSION_RECORD_UNAVAILABLE = "submission_record_unavailable"
+    SUBMISSION_PRECONDITION_FAILED = "submission_precondition_failed"
+    SUBMISSION_ATTEMPT_ALREADY_STARTED = "submission_attempt_already_started"
+    SUBMISSION_TRANSPORT_UNAVAILABLE = "submission_transport_unavailable"
+    SUBMISSION_RESPONSE_UNAVAILABLE = "submission_response_unavailable"
+    SUBMISSION_HASH_MISMATCH = "submission_hash_mismatch"
+    SUBMISSION_OUTCOME_UNKNOWN = "submission_outcome_unknown"
+    SUBMISSION_RECOVERY_REQUIRED = "submission_recovery_required"
+    SUBMISSION_TRANSACTION_NOT_FOUND = "submission_transaction_not_found"
+    SUBMISSION_TRANSACTION_FIELD_MISMATCH = "submission_transaction_field_mismatch"
+    AUTOMATIC_SUBMISSION_RETRY_DISABLED = "automatic_submission_retry_disabled"
+    TRANSACTION_REPLACEMENT_DISABLED = "transaction_replacement_disabled"
+    RECEIPT_LOOKUP_UNAVAILABLE = "receipt_lookup_unavailable"
+    SUBMISSION_DETERMINISTIC_REJECTION = "submission_deterministic_rejection"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -237,6 +253,15 @@ class DreamDexExecutionBlockers:
         SIGNED_TRANSACTION_CALLDATA_MISMATCH, SIGNED_TRANSACTION_SELECTOR_MISMATCH,
         SIGNED_TRANSACTION_FINGERPRINT_MISMATCH, SIGNED_TRANSACTION_VERIFICATION_FAILED,
         SIGNED_PAYLOAD_NOT_DURABLY_AVAILABLE, SIGNED_TRANSACTION_SUBMISSION_UNAVAILABLE,
+        RAW_TRANSACTION_SUBMISSION_UNAVAILABLE, SUBMISSION_POLICY_UNAVAILABLE,
+        SUBMISSION_RECORD_UNAVAILABLE, SUBMISSION_PRECONDITION_FAILED,
+        SUBMISSION_ATTEMPT_ALREADY_STARTED, SUBMISSION_TRANSPORT_UNAVAILABLE,
+        SUBMISSION_RESPONSE_UNAVAILABLE, SUBMISSION_HASH_MISMATCH,
+        SUBMISSION_OUTCOME_UNKNOWN, SUBMISSION_RECOVERY_REQUIRED,
+        SUBMISSION_TRANSACTION_NOT_FOUND, SUBMISSION_TRANSACTION_FIELD_MISMATCH,
+        AUTOMATIC_SUBMISSION_RETRY_DISABLED, TRANSACTION_REPLACEMENT_DISABLED,
+        RECEIPT_LOOKUP_UNAVAILABLE,
+        SUBMISSION_DETERMINISTIC_REJECTION,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -254,6 +279,7 @@ class DreamDexExecutionBlockers:
         INCOMPLETE_ACCOUNT_STATE, AUTHORITATIVE_ACCOUNT_ADDRESS_UNRESOLVED,
         DIRECT_SIGNER_KEY_UNAVAILABLE, DIRECT_SIGNER_BINDING_NON_AUTHORITATIVE,
         TRANSACTION_SIGNER_UNAVAILABLE, DIRECT_TRANSACTION_TRANSPORT_UNIMPLEMENTED,
+        RAW_TRANSACTION_SUBMISSION_UNAVAILABLE,
         DIRECT_ORDER_RECONCILIATION_UNAVAILABLE, ORDER_ID_LIFECYCLE_UNCONFIRMED,
         RECONCILIATION_GRAPH_UNAVAILABLE, RECONCILIATION_GRAPH_NON_AUTHORITATIVE,
         ORDER_METADATA_UNAVAILABLE, AUTHENTICATED_ORDER_STATE_UNAVAILABLE,
@@ -438,6 +464,10 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "bound_transaction_signer_protocol": "signed_transaction", "verify_signed_transaction_fields": "signed_transaction",
         "verify_signed_transaction_calldata": "signed_transaction", "calculate_signed_transaction_hash": "signed_transaction",
         "journal_signing_started_transition": "journal", "journal_signed_transition": "journal",
+        "raw_transaction_submission_model": "submission", "raw_transaction_submitter_protocol": "submission",
+        "validate_submission_preconditions": "submission", "persist_submission_started": "submission",
+        "enforce_single_submission_attempt": "submission", "verify_rpc_transaction_hash": "submission",
+        "classify_submission_outcome": "submission",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -447,6 +477,8 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
         "signer_address_discovery": "signing",
         "production_bound_signer": "signed_transaction", "persist_raw_signed_transaction": "signed_transaction",
+        "production_raw_transaction_submitter": "submission", "automatic_submission_retry": "submission",
+        "transaction_replacement": "submission", "receipt_lookup": "receipt", "receipt_polling": "receipt",
         "revalidate_nonce_live": "journal", "externally_lock_nonce": "journal",
     }
     partial = {
@@ -456,6 +488,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "recover_execution_state": "journal",
         "revalidate_pending_nonce_live": "signing_lease", "acquire_signing_lease": "signing_lease",
         "decode_signed_transaction": "signed_transaction", "recover_signed_transaction_sender": "signed_transaction",
+        "recover_submission_by_hash": "submission",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())

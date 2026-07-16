@@ -86,6 +86,7 @@ from bot.execution.dreamdex_signing_lease import (
     serialize_signing_lease_diagnostics,
 )
 from bot.execution.dreamdex_signed_transaction import build_signed_transaction_preview
+from bot.execution.dreamdex_transaction_submission import build_transaction_submission_preview
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
@@ -99,6 +100,7 @@ JOURNAL_DIAGNOSTICS_ENV = "DREAMDEX_EXECUTION_JOURNAL_DIAGNOSTICS"
 LIVE_NONCE_REVALIDATION_ENV = "DREAMDEX_ENABLE_LIVE_NONCE_REVALIDATION"
 SIGNING_LEASE_ENABLE_ENV = "DREAMDEX_ENABLE_LIVE_SIGNING_LEASE"
 LIVE_NONCE_MAX_AGE_ENV = "DREAMDEX_LIVE_NONCE_MAX_AGE_MS"
+RAW_SUBMISSION_ENABLE_ENV = "DREAMDEX_ENABLE_RAW_TRANSACTION_SUBMISSION"
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -109,6 +111,14 @@ def _decimal_env(name: str, default: Decimal) -> Decimal:
         return Decimal(raw)
     except (InvalidOperation, ValueError):
         raise ValueError(f"{name} must be a decimal")
+
+
+def raw_transaction_submission_flag(environ: Mapping[str, str]) -> str:
+    """Return a strict opt-in flag; no payload is accepted from environment."""
+    value = _parse_enable_flag(environ.get(RAW_SUBMISSION_ENABLE_ENV))
+    if value == "invalid":
+        raise ValueError(f"{RAW_SUBMISSION_ENABLE_ENV} must be a strict boolean")
+    return value
 
 
 def _safe_error(exc: Exception, owner: str | None = None) -> str:
@@ -951,6 +961,38 @@ def _print_signed_transaction_verification(*, session_result=None, execution_per
     print(f"  verification blockers: {', '.join(preview.blockers) or 'none'}")
 
 
+def _print_transaction_submission_boundary(*, result=None, execution_performed: bool = False, recovery=None) -> None:
+    capabilities = build_execution_capability_matrix()
+    preview = build_transaction_submission_preview(result, production_submitter_status=capabilities.by_name("production_raw_transaction_submitter").status, recovery_lookup_available=capabilities.by_name("recover_submission_by_hash").status != "unavailable", recovery=recovery)
+    print("RAW TRANSACTION SUBMISSION BOUNDARY:")
+    print(f"  submission boundary model: {capabilities.by_name('raw_transaction_submission_model').status}")
+    print(f"  typed submitter protocol: {capabilities.by_name('raw_transaction_submitter_protocol').status}")
+    print(f"  production submitter: {preview.production_submitter_status}")
+    print(f"  submission execution performed: {'YES' if execution_performed else 'NO'}")
+    print(f"  raw payload available in memory: {'YES' if preview.raw_payload_available_in_memory else 'NO'}")
+    print(f"  raw payload persisted: {'YES' if preview.raw_payload_persisted else 'NO'}")
+    print(f"  raw payload reference released: {'YES' if preview.raw_payload_reference_released else 'NO'}")
+    print("  secure memory zeroization guaranteed: NO")
+    print(f"  local transaction hash available: {'YES' if preview.local_transaction_hash_available else 'NO'}")
+    print(f"  durable submission record: {'YES' if preview.submission_record_persisted else 'NO'}")
+    print(f"  send attempt started: {'YES' if preview.send_attempt_started else 'NO'}")
+    print(f"  send attempt count: {preview.send_attempt_count}")
+    print(f"  RPC response received: {'YES' if preview.rpc_response_received else 'NO'}")
+    print(f"  RPC hash match: {'confirmed' if preview.rpc_hash_match is True else 'mismatch' if preview.rpc_hash_match is False else 'unresolved'}")
+    print(f"  journal submission state: {preview.journal_state}")
+    print(f"  submitted: {'YES' if preview.submitted else 'NO'}")
+    print(f"  submission unknown: {'YES' if preview.submission_unknown else 'NO'}")
+    print("  automatic retry allowed: NO")
+    print("  replacement allowed: NO")
+    print("  recovery lookup protocol: available_offline")
+    print(f"  recovery lookup performed: {'YES' if preview.recovery_lookup_performed else 'NO'}")
+    print(f"  transaction found by hash: {'YES' if preview.transaction_found_by_hash else 'NO' if preview.transaction_found_by_hash is False else 'unresolved'}")
+    print("  ready for receipt lookup: NO")
+    print("  ready for resubmission: NO")
+    print("  raw transaction output allowed: NO")
+    print(f"  submission blockers: {', '.join(preview.blockers) or 'none'}")
+
+
 def build_live_transaction_preflight_policy(environ: Mapping[str, str]) -> DreamDexTransactionPreflightPolicy:
     """Read CLI-only settings; the production preflight module reads no env."""
     values = {
@@ -1059,6 +1101,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_durable_execution_journal(journal_snapshot, enabled=journal_enabled, execution_performed=journal_execution_performed, path_configured=journal_path_configured)
     _print_live_nonce_signing_lease(lease_result, enabled=lease_enabled, execution_performed=lease_execution_performed, rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), policy=lease_policy)
     _print_signed_transaction_verification(session_result=signing_session_result, execution_performed=signing_session_execution_performed)
+    _print_transaction_submission_boundary(result=None, execution_performed=False)
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
@@ -1157,6 +1200,15 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
 
 
 def main() -> int:
+    try:
+        raw_transaction_submission_flag(os.environ)
+    except ValueError as exc:
+        print("READ-ONLY ACCOUNT CHECK")
+        print(f"Configuration rejected: {exc}")
+        print("No network request or order operation was attempted.")
+        _print_transaction_submission_boundary(result=None, execution_performed=False)
+        print("Real submission enabled: NO")
+        return 2
     fixture_path = os.environ.get("DREAMDEX_READ_ONLY_FIXTURE")
     required = ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
     if not fixture_path:
@@ -1170,6 +1222,7 @@ def main() -> int:
         _print_durable_execution_journal(None, enabled=False, execution_performed=False, path_configured=False)
         _print_live_nonce_signing_lease(None, enabled=False, execution_performed=False, rpc_configured=False)
         _print_signed_transaction_verification(session_result=None, execution_performed=False)
+        _print_transaction_submission_boundary(result=None, execution_performed=False)
         print("Real submission enabled: NO")
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
