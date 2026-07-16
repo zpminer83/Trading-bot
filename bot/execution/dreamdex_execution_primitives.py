@@ -157,6 +157,20 @@ class DreamDexExecutionBlockers:
     EXTERNAL_NONCE_EXCLUSIVITY_UNAVAILABLE = "external_nonce_exclusivity_unavailable"
     UNKNOWN_EXECUTION_STATE_BLOCKS_PROGRESS = "unknown_execution_state_blocks_progress"
     EXECUTION_JOURNAL_LIMITS_UNRESOLVED = "execution_journal_limits_unresolved"
+    LIVE_NONCE_REVALIDATION_UNAVAILABLE = "live_nonce_revalidation_unavailable"
+    LIVE_NONCE_CHAIN_MISMATCH = "live_nonce_chain_mismatch"
+    LIVE_NONCE_MISMATCH = "live_nonce_mismatch"
+    LIVE_NONCE_OBSERVATION_STALE = "live_nonce_observation_stale"
+    LIVE_NONCE_SOURCE_UNAVAILABLE = "live_nonce_source_unavailable"
+    SIGNING_LEASE_UNAVAILABLE = "signing_lease_unavailable"
+    SIGNING_LEASE_CONFLICT = "signing_lease_conflict"
+    SIGNING_LEASE_POLICY_UNRESOLVED = "signing_lease_policy_unresolved"
+    SIGNING_LEASE_INPUT_TYPE_INVALID = "signing_lease_input_type_invalid"
+    SIGNING_LEASE_INTENT_INVALID = "signing_lease_intent_invalid"
+    SIGNING_LEASE_RESERVATION_INVALID = "signing_lease_reservation_invalid"
+    SIGNING_LEASE_ENVELOPE_MISMATCH = "signing_lease_envelope_mismatch"
+    SIGNING_LEASE_REQUEST_MISMATCH = "signing_lease_request_mismatch"
+    SIGNING_LEASE_REQUEST_NOT_READY = "signing_lease_request_not_ready"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -192,6 +206,13 @@ class DreamDexExecutionBlockers:
         EXTERNAL_NONCE_EXCLUSIVITY_UNAVAILABLE,
         UNKNOWN_EXECUTION_STATE_BLOCKS_PROGRESS,
         EXECUTION_JOURNAL_LIMITS_UNRESOLVED,
+        LIVE_NONCE_REVALIDATION_UNAVAILABLE, LIVE_NONCE_CHAIN_MISMATCH,
+        LIVE_NONCE_MISMATCH, LIVE_NONCE_OBSERVATION_STALE,
+        LIVE_NONCE_SOURCE_UNAVAILABLE, SIGNING_LEASE_UNAVAILABLE,
+        SIGNING_LEASE_CONFLICT, SIGNING_LEASE_POLICY_UNRESOLVED,
+        SIGNING_LEASE_INPUT_TYPE_INVALID, SIGNING_LEASE_INTENT_INVALID,
+        SIGNING_LEASE_RESERVATION_INVALID, SIGNING_LEASE_ENVELOPE_MISMATCH,
+        SIGNING_LEASE_REQUEST_MISMATCH, SIGNING_LEASE_REQUEST_NOT_READY,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -388,6 +409,8 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "create_execution_intent": "journal", "idempotent_intent_lookup": "journal",
         "reserve_nonce_locally": "journal", "enforce_nonce_uniqueness": "journal",
         "validate_state_transition": "journal",
+        "signing_lease_model": "signing_lease", "validate_live_nonce_evidence": "signing_lease",
+        "validate_signing_lease": "signing_lease",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -403,6 +426,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "detect_fee_model": "preflight", "resolve_transaction_fees": "preflight",
         "check_native_fee_balance": "preflight",
         "recover_execution_state": "journal",
+        "revalidate_pending_nonce_live": "signing_lease", "acquire_signing_lease": "signing_lease",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())

@@ -64,6 +64,10 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "journal path output allowed: NO" in output
     assert "signing allowed: NO" in output
     assert "submission allowed: NO" in output
+    assert "LIVE NONCE REVALIDATION & SIGNING LEASE:" in output
+    assert "live nonce revalidation enabled: NO" in output
+    assert "signing lease enabled: NO" in output
+    assert "signer invocation allowed: NO" in output
     assert "SIWE HTTP transport configured: NO" in output
     assert "SIWE HTTP transport status: disabled" in output
     assert "auth network attempt performed: NO" in output

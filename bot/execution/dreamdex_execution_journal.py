@@ -37,6 +37,7 @@ class JournalState(str, Enum):
     PREFLIGHT_VALIDATED = "preflight_validated"
     NONCE_RESERVED = "nonce_reserved"
     SIGNING_REVIEW_READY = "signing_review_ready"
+    SIGNING_LEASE_ACQUIRED = "signing_lease_acquired"
     SIGNING_STARTED = "signing_started"
     SIGNED = "signed"
     SUBMISSION_STARTED = "submission_started"
@@ -57,6 +58,7 @@ PRODUCTION_WRITABLE_STATES = frozenset({
     JournalState.PREFLIGHT_VALIDATED.value,
     JournalState.NONCE_RESERVED.value,
     JournalState.SIGNING_REVIEW_READY.value,
+    JournalState.SIGNING_LEASE_ACQUIRED.value,
     JournalState.CANCELLED_BEFORE_SIGNING.value,
     JournalState.FAILED_PRE_SUBMISSION.value,
     JournalState.RECOVERY_REQUIRED.value,
@@ -66,7 +68,8 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     JournalState.CREATED.value: frozenset({"preflight_validated", "cancelled_before_signing", "failed_pre_submission", "recovery_required"}),
     JournalState.PREFLIGHT_VALIDATED.value: frozenset({"nonce_reserved", "cancelled_before_signing", "failed_pre_submission", "recovery_required"}),
     JournalState.NONCE_RESERVED.value: frozenset({"signing_review_ready", "cancelled_before_signing", "recovery_required"}),
-    JournalState.SIGNING_REVIEW_READY.value: frozenset({"cancelled_before_signing", "signing_started", "recovery_required"}),
+    JournalState.SIGNING_REVIEW_READY.value: frozenset({"cancelled_before_signing", "signing_lease_acquired", "recovery_required"}),
+    JournalState.SIGNING_LEASE_ACQUIRED.value: frozenset({"cancelled_before_signing", "recovery_required"}),
     JournalState.SIGNING_STARTED.value: frozenset({"signed", "failed_pre_submission", "recovery_required"}),
     JournalState.SIGNED.value: frozenset({"submission_started", "recovery_required"}),
     JournalState.SUBMISSION_STARTED.value: frozenset({"submitted", "submission_unknown", "failed_pre_submission", "recovery_required"}),
@@ -718,6 +721,46 @@ class DreamDexExecutionJournal:
         except Exception:
             conn.rollback(); raise
 
+    def acquire_signing_lease(self, *, intent_id: str, reservation_id: str, signer_address: str, chain_id: int, finalized_envelope_fingerprint: str, signing_request_fingerprint: str, maximum_active_leases_per_signer: int = 1) -> DreamDexExecutionJournalEvent | None:
+        """Atomically transition a reviewed intent and persist the lease event.
+
+        The event id is the lease id.  No separate lease table is needed: the
+        intent state and event are committed under the same writer lock.
+        """
+        allowed, reasons = self._writes_allowed()
+        if not allowed:
+            return None
+        if isinstance(maximum_active_leases_per_signer, bool) or not isinstance(maximum_active_leases_per_signer, int) or maximum_active_leases_per_signer < 1:
+            return None
+        try:
+            chain = validate_uint(chain_id, field="chain_id")
+            signer = _norm_address(signer_address, "signer_address")
+        except ValueError:
+            return None
+        try:
+            conn = self._begin()
+        except sqlite3.OperationalError:
+            return None
+        try:
+            intent = conn.execute("SELECT * FROM execution_intents WHERE intent_id=?", (intent_id,)).fetchone()
+            reservation = conn.execute("SELECT * FROM nonce_reservations WHERE reservation_id=?", (reservation_id,)).fetchone()
+            if intent is None or reservation is None or intent["state"] != JournalState.SIGNING_REVIEW_READY.value:
+                conn.rollback(); return None
+            if int(intent["chain_id"]) != int(chain) or intent["signer_address_normalized"] != signer or reservation["intent_id"] != intent_id or reservation["status"] != "reserved":
+                conn.rollback(); return None
+            if intent["finalized_envelope_fingerprint"] != finalized_envelope_fingerprint:
+                conn.rollback(); return None
+            active = conn.execute("SELECT COUNT(*) FROM execution_intents WHERE signer_address_normalized=? AND state=?", (signer, JournalState.SIGNING_LEASE_ACQUIRED.value)).fetchone()[0]
+            if int(active) >= maximum_active_leases_per_signer:
+                conn.rollback(); return None
+            now = _now_ms()
+            event = self._insert_event(conn, intent_id=intent_id, reservation_id=reservation_id, event_type="signing_lease_acquired", previous_state=JournalState.SIGNING_REVIEW_READY.value, new_state=JournalState.SIGNING_LEASE_ACQUIRED.value, source_type="local_journal", authoritative=False, details_status="fingerprints_only", blockers=("pending_nonce_snapshot_requires_revalidation",))
+            conn.execute("UPDATE execution_intents SET state=?, updated_at=? WHERE intent_id=?", (JournalState.SIGNING_LEASE_ACQUIRED.value, now, intent_id))
+            conn.commit()
+            return event
+        except Exception:
+            conn.rollback(); raise
+
     def get_nonce_reservation(self, reservation_id: str | None = None, *, intent_id: str | None = None) -> DreamDexNonceReservation | None:
         if reservation_id is None and intent_id is None:
             raise ValueError("reservation_identifier_required")
@@ -742,7 +785,7 @@ class DreamDexExecutionJournal:
             reservation = conn.execute("SELECT * FROM nonce_reservations WHERE intent_id=?", (intent_id,)).fetchone()
             if intent is None or reservation is None:
                 conn.rollback(); return DreamDexNonceReservationResult("rejected", intent_id, None, None, False, False, False, True, True, None, ("nonce_reservation_not_found",), ("nonce_reservation_not_found",))
-            if intent["state"] not in {JournalState.PREFLIGHT_VALIDATED.value, JournalState.NONCE_RESERVED.value, JournalState.SIGNING_REVIEW_READY.value} or reservation["status"] != "reserved":
+            if intent["state"] not in {JournalState.PREFLIGHT_VALIDATED.value, JournalState.NONCE_RESERVED.value, JournalState.SIGNING_REVIEW_READY.value, JournalState.SIGNING_LEASE_ACQUIRED.value} or reservation["status"] != "reserved":
                 conn.rollback(); return DreamDexNonceReservationResult("rejected", intent_id, reservation["reservation_id"], reservation["nonce"], False, False, False, True, True, reservation["reservation_fingerprint"], ("nonce_release_after_signing_forbidden",), ("release_state_invalid",))
             now = _now_ms()
             conn.execute("UPDATE nonce_reservations SET status='released_before_signing', updated_at=?, released_at=?, release_reason=? WHERE reservation_id=?", (now, now, reason, reservation["reservation_id"]))
@@ -759,7 +802,7 @@ class DreamDexExecutionJournal:
             return DreamDexExecutionJournalSnapshot(None, "incompatible", self._schema_status, self._integrity_status, 0, 0, 0, 0, 0, 0, True, False, False, deterministic_fingerprint({"status": "incompatible", "path": str(self.path.name)}, domain="journal_snapshot"), blockers, blockers)
         conn = self._require_conn()
         intent_count = int(conn.execute("SELECT COUNT(*) FROM execution_intents").fetchone()[0])
-        active_states = ("created", "preflight_validated", "nonce_reserved", "signing_review_ready", "signing_started", "signed", "submission_started", "submitted", "pending", "submission_unknown", "recovery_required")
+        active_states = ("created", "preflight_validated", "nonce_reserved", "signing_review_ready", "signing_lease_acquired", "signing_started", "signed", "submission_started", "submitted", "pending", "submission_unknown", "recovery_required")
         active_count = int(conn.execute("SELECT COUNT(*) FROM execution_intents WHERE state IN (%s)" % ",".join("?" * len(active_states)), active_states).fetchone()[0])
         reservation_count = int(conn.execute("SELECT COUNT(*) FROM nonce_reservations").fetchone()[0])
         active_reservation_count = int(conn.execute("SELECT COUNT(*) FROM nonce_reservations WHERE status='reserved'").fetchone()[0])

@@ -79,6 +79,12 @@ from bot.execution.dreamdex_execution_journal import (
     DreamDexExecutionJournalPolicy,
     open_journal,
 )
+from bot.execution.dreamdex_signing_lease import (
+    DreamDexLiveNonceRevalidationPolicy,
+    build_signing_lease_preview,
+    acquire_signing_lease,
+    serialize_signing_lease_diagnostics,
+)
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
@@ -89,6 +95,9 @@ PREFLIGHT_ENABLE_ENV = LIVE_PREFLIGHT_ENV
 JOURNAL_ENABLE_ENV = "DREAMDEX_ENABLE_EXECUTION_JOURNAL"
 JOURNAL_PATH_ENV = "DREAMDEX_EXECUTION_JOURNAL_PATH"
 JOURNAL_DIAGNOSTICS_ENV = "DREAMDEX_EXECUTION_JOURNAL_DIAGNOSTICS"
+LIVE_NONCE_REVALIDATION_ENV = "DREAMDEX_ENABLE_LIVE_NONCE_REVALIDATION"
+SIGNING_LEASE_ENABLE_ENV = "DREAMDEX_ENABLE_LIVE_SIGNING_LEASE"
+LIVE_NONCE_MAX_AGE_ENV = "DREAMDEX_LIVE_NONCE_MAX_AGE_MS"
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -857,6 +866,64 @@ def _print_durable_execution_journal(snapshot=None, *, enabled: bool = False, ex
     print(f"  journal blockers: {blockers}")
 
 
+def build_live_nonce_revalidation_policy_from_env(environ: Mapping[str, str]) -> DreamDexLiveNonceRevalidationPolicy:
+    max_age = _strict_int_setting(environ, LIVE_NONCE_MAX_AGE_ENV, minimum=0)
+    configured_chain = _strict_int_setting(environ, "DREAMDEX_READ_ONLY_REQUIRED_CHAIN_ID", minimum=0)
+    unresolved = ("signing_lease_policy_unresolved",) if max_age is None or not environ.get("DREAMDEX_READ_ONLY_OWNER_ADDRESS") else ()
+    return DreamDexLiveNonceRevalidationPolicy(
+        required_chain_id=5031 if configured_chain is None else configured_chain,
+        required_signer_address=environ.get("DREAMDEX_READ_ONLY_OWNER_ADDRESS"),
+        maximum_observation_age_ms=max_age,
+        unresolved_reasons=unresolved,
+    )
+
+
+def execute_live_signing_lease(*, journal, intent, reservation, finalized_envelope, signing_request, signing_policy, environ: Mapping[str, str], rpc_transport=None):
+    """Explicit opt-in orchestration; no typed inputs means no RPC call."""
+    flags = (_parse_enable_flag(environ.get(LIVE_NONCE_REVALIDATION_ENV)), _parse_enable_flag(environ.get(SIGNING_LEASE_ENABLE_ENV)))
+    if "invalid" in flags:
+        raise ValueError("live nonce/signing lease flags must be strict booleans")
+    if flags != ("enabled", "enabled"):
+        return None
+    if any(value is None for value in (journal, intent, reservation, finalized_envelope, signing_request, signing_policy)):
+        return None
+    policy = build_live_nonce_revalidation_policy_from_env(environ)
+    if rpc_transport is None:
+        rpc_url = environ.get(PREFLIGHT_RPC_ENV) or environ.get("DREAMDEX_RPC_URL")
+        if not rpc_url:
+            return None
+        rpc_transport = DreamDexReadOnlyRpcTransport(rpc_url)
+    return acquire_signing_lease(journal=journal, intent=intent, reservation=reservation, finalized_envelope=finalized_envelope, signing_request=signing_request, signing_policy=signing_policy, policy=policy, rpc=rpc_transport)
+
+
+def _print_live_nonce_signing_lease(result=None, *, enabled: bool = False, execution_performed: bool = False, rpc_configured: bool = False, policy: DreamDexLiveNonceRevalidationPolicy | None = None) -> None:
+    preview = build_signing_lease_preview(result, evidence=result.evidence if result else None)
+    print("LIVE NONCE REVALIDATION & SIGNING LEASE:")
+    print(f"  live nonce revalidation enabled: {'YES' if enabled else 'NO'}")
+    print(f"  signing lease enabled: {'YES' if enabled else 'NO'}")
+    print(f"  lease execution performed: {'YES' if execution_performed else 'NO'}")
+    print(f"  network calls allowed: {'YES' if enabled and rpc_configured else 'NO'}")
+    print(f"  pending tag required: YES")
+    print(f"  maximum observation age: {policy.maximum_observation_age_ms if policy and policy.maximum_observation_age_ms is not None else 'unavailable'}")
+    print(f"  lease status: {preview.lease_status}")
+    print(f"  chain match: {'confirmed' if preview.chain_match is True else 'mismatch' if preview.chain_match is False else 'unresolved'}")
+    print(f"  pending nonce status: {preview.pending_nonce_status}")
+    print("  pending nonce snapshot only: YES")
+    print(f"  local nonce reserved: {'YES' if preview.local_nonce_reserved else 'NO'}")
+    print(f"  nonce match: {'YES' if preview.nonce_match else 'NO'}")
+    print(f"  nonce observation fresh: {'YES' if preview.nonce_observation_fresh else 'NO' if preview.nonce_observation_fresh is False else 'unresolved'}")
+    print(f"  journal integrity status: {preview.journal_integrity_status}")
+    print(f"  recovery required: {'YES' if preview.recovery_required else 'NO'}")
+    print(f"  active signing lease count: {preview.active_signing_lease_count}")
+    print(f"  signing lease acquired: {'YES' if preview.signing_lease_acquired else 'NO'}")
+    print("  signer invocation performed: NO")
+    print("  signer invocation allowed: NO")
+    print(f"  transaction signing capability: {preview.transaction_signing_capability}")
+    print("  transaction submission allowed: NO")
+    print(f"  lease fingerprint: {mask_hex_hash(preview.lease_fingerprint)}")
+    print(f"  lease blockers: {', '.join(preview.blockers) or 'none'}")
+
+
 def build_live_transaction_preflight_policy(environ: Mapping[str, str]) -> DreamDexTransactionPreflightPolicy:
     """Read CLI-only settings; the production preflight module reads no env."""
     values = {
@@ -940,7 +1007,7 @@ def _print_live_transaction_preflight(result=None, *, enabled: bool = False, exe
     print(f"  preflight blockers: {', '.join(preview.blockers) or 'none'}")
 
 
-def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None, journal_snapshot=None, journal_enabled: bool = False, journal_execution_performed: bool = False, journal_path_configured: bool = False) -> None:
+def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None, journal_snapshot=None, journal_enabled: bool = False, journal_execution_performed: bool = False, journal_path_configured: bool = False, lease_result=None, lease_enabled: bool = False, lease_execution_performed: bool = False, lease_policy: DreamDexLiveNonceRevalidationPolicy | None = None) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
@@ -963,6 +1030,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_transaction_signer_boundary()
     _print_live_transaction_preflight(preflight_result, enabled=preflight_enabled, execution_performed=preflight_execution_performed, rpc_configured=preflight_rpc_configured, policy=preflight_policy)
     _print_durable_execution_journal(journal_snapshot, enabled=journal_enabled, execution_performed=journal_execution_performed, path_configured=journal_path_configured)
+    _print_live_nonce_signing_lease(lease_result, enabled=lease_enabled, execution_performed=lease_execution_performed, rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), policy=lease_policy)
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
@@ -1072,6 +1140,7 @@ def main() -> int:
         print("No network request or order operation was attempted.")
         _print_live_transaction_preflight(None, enabled=False, execution_performed=False, rpc_configured=False)
         _print_durable_execution_journal(None, enabled=False, execution_performed=False, path_configured=False)
+        _print_live_nonce_signing_lease(None, enabled=False, execution_performed=False, rpc_configured=False)
         print("Real submission enabled: NO")
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
@@ -1099,6 +1168,14 @@ def main() -> int:
                 journal_execution_performed = True
             finally:
                 journal_handle.close()
+        nonce_flag = _parse_enable_flag(os.environ.get(LIVE_NONCE_REVALIDATION_ENV))
+        lease_flag = _parse_enable_flag(os.environ.get(SIGNING_LEASE_ENABLE_ENV))
+        if "invalid" in (nonce_flag, lease_flag):
+            raise ValueError("live nonce/signing lease flags must be strict booleans")
+        lease_enabled = nonce_flag == "enabled" and lease_flag == "enabled"
+        lease_policy = build_live_nonce_revalidation_policy_from_env(os.environ)
+        lease_result = None
+        lease_execution_performed = False
         symbol = os.environ.get("DREAMDEX_READ_ONLY_MARKET", "SOMI:USDso")
         if fixture_path:
             fixture = load_fixture(fixture_path)
@@ -1136,7 +1213,7 @@ def main() -> int:
         # Consequently enabling the flag without an explicit typed envelope is
         # a safe, observable no-op and performs zero preflight RPC calls.
         preflight_result = execute_live_transaction_preflight(None, os.environ)
-        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy, journal_snapshot=journal_snapshot, journal_enabled=journal_enabled, journal_execution_performed=journal_execution_performed, journal_path_configured=journal_path_configured)
+        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy, journal_snapshot=journal_snapshot, journal_enabled=journal_enabled, journal_execution_performed=journal_execution_performed, journal_path_configured=journal_path_configured, lease_result=lease_result, lease_enabled=lease_enabled, lease_execution_performed=lease_execution_performed, lease_policy=lease_policy)
         return 0
     except Exception as exc:
         print("READ-ONLY ACCOUNT CHECK")
