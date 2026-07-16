@@ -94,6 +94,14 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "unsigned request ready for signing: NO" in output
     assert "unsigned request ready for submission: NO" in output
     assert "direct_transaction_transport_unimplemented" in output
+    assert "transaction envelope model: available_offline" in output
+    assert "envelope builder: available_offline" in output
+    assert "envelope validation: available_offline" in output
+    assert "request fingerprint: unavailable" in output
+    assert "envelope fingerprint: unavailable" in output
+    assert "envelope ready for signing: NO" in output
+    assert "envelope ready for submission: NO" in output
+    assert "envelope raw calldata output allowed: NO" in output
     assert "operator_permission_unavailable" not in output.split("Hypothetical trading blocked reason:", 1)[1].split("\n", 1)[0]
 
 

@@ -37,6 +37,11 @@ from bot.execution.dreamdex_unsigned_transaction import (
     UnavailableDreamDexTransactionTransport,
     build_unsigned_transaction_requirements,
 )
+from bot.execution.dreamdex_transaction_envelope import (
+    VENDOR_GAS_POLICY_SUMMARY,
+    build_transaction_type_policy_evidence,
+    describe_transaction_envelope_capabilities,
+)
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -299,6 +304,32 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
     print("  unsigned request ready for signing: NO")
     print("  unsigned request ready for submission: NO")
     print("  unsigned transaction blockers: direct_transaction_transport_unimplemented; direct_signer_key_unavailable; direct_signer_binding_non_authoritative")
+    envelope_capabilities = describe_transaction_envelope_capabilities()
+    print("  transaction envelope model: available_offline")
+    print(f"  envelope builder: {envelope_capabilities['build_unsigned_envelope']}")
+    print(f"  envelope validation: {envelope_capabilities['validate_unsigned_envelope']}")
+    print("  request fingerprint: unavailable")
+    print("  envelope fingerprint: unavailable")
+    fee_fingerprints = dict(audit.vendor_file_fingerprints)
+    fee_policy = build_transaction_type_policy_evidence(fee_fingerprints)
+    print(f"  transaction type policy: {fee_policy.transaction_type_status}")
+    print(f"  transaction type source status: {fee_policy.source_status}")
+    print(f"  transaction type source: {', '.join(fee_policy.source_paths)}")
+    fingerprints_text = ", ".join(f"{path}={digest}" for path, digest in fee_policy.source_fingerprints) or "unavailable"
+    print(f"  transaction type source fingerprints: {fingerprints_text}")
+    print(f"  transaction type audit: {fee_policy.fee_semantics}")
+    print(f"  transaction type conflicts: {', '.join(fee_policy.conflicts) or 'none'}")
+    print(f"  vendor gas policy (informational): {VENDOR_GAS_POLICY_SUMMARY}")
+    print(f"  nonce resolution capability: {envelope_capabilities['resolve_nonce']}")
+    print(f"  gas estimation capability: {envelope_capabilities['estimate_gas']}")
+    print(f"  fee resolution capability: {envelope_capabilities['resolve_fees']}")
+    print("  externally supplied envelope accepted: NO")
+    print("  envelope structurally complete: NO")
+    print("  envelope evidence authoritative: NO")
+    print("  envelope ready for signing: NO")
+    print("  envelope ready for submission: NO")
+    print("  envelope raw calldata output allowed: NO")
+    print("  envelope blockers: transaction_envelope_unavailable; transaction_type_policy_unresolved; transaction_nonce_unresolved; transaction_gas_unresolved; transaction_fees_unresolved; transaction_envelope_non_authoritative")
     print(f"  transaction sender: {_masked(audit.identity.transaction_sender_address)}")
     print(f"  contract order owner subject: {audit.identity.contract_order_owner_subject}")
     print(f"  vault owner subject: {audit.identity.vault_owner_subject}")
