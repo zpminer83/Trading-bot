@@ -120,6 +120,16 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "submission capability: unavailable" in output
     assert "raw signed transaction output allowed: NO" in output
     assert "signer boundary authoritative: NO" in output
+    assert "LIVE TRANSACTION PREFLIGHT:" in output
+    assert "preflight enabled: NO" in output
+    assert "preflight execution performed: NO" in output
+    assert "network calls allowed: NO" in output
+    assert "rpc configuration: unavailable" in output
+    assert "rpc URL output allowed: NO" in output
+    assert "pending nonce snapshot only: YES" in output
+    assert "nonce reserved: NO" in output
+    assert "transaction submission allowed: NO" in output
+    assert "raw RPC payload output allowed: NO" in output
     assert "ORDER RECONCILIATION GRAPH:" in output
     assert "READ-ONLY RECONCILIATION EVIDENCE BRIDGE:" in output
     assert "bridge enabled: NO" in output
@@ -170,6 +180,47 @@ def test_cli_bridge_invalid_flag_fails_closed_without_network(monkeypatch, capsy
     assert code != 0
     assert "strict boolean" in output
     assert "Real submission enabled: NO" in output
+
+
+def test_live_preflight_defaults_disabled_and_invalid_flag_fails_closed(monkeypatch, capsys):
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "0x1234567890abcdef1234567890abcdef12345678")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_FIXTURE", str(FIXTURE))
+    monkeypatch.setenv("DREAMDEX_ENABLE_LIVE_TRANSACTION_PREFLIGHT", "maybe")
+    code = check_live_read_only_state.main()
+    output = capsys.readouterr().out
+    assert code != 0
+    assert "DREAMDEX_ENABLE_LIVE_TRANSACTION_PREFLIGHT" in output
+    assert "Real submission enabled: NO" in output
+
+
+def test_live_preflight_opt_in_without_typed_envelope_performs_no_network(monkeypatch, capsys):
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "0x1234567890abcdef1234567890abcdef12345678")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_FIXTURE", str(FIXTURE))
+    monkeypatch.setenv("DREAMDEX_ENABLE_LIVE_TRANSACTION_PREFLIGHT", "true")
+    code = check_live_read_only_state.main()
+    output = capsys.readouterr().out
+    assert code == 0
+    section = output.split("LIVE TRANSACTION PREFLIGHT:", 1)[1]
+    assert "preflight enabled: YES" in section
+    assert "preflight execution performed: NO" in section
+    assert "network calls allowed: NO" in section
+    assert "envelope available: NO" in section
+    assert "gas estimate evidence: unavailable" in section
+    assert "signer invocation allowed: NO" in section
+    assert "transaction submission allowed: NO" in section
+
+
+def test_live_preflight_policy_limits_have_no_unresolved_reason_when_explicit():
+    policy = check_live_read_only_state.build_live_transaction_preflight_policy({
+        "DREAMDEX_READ_ONLY_OWNER_ADDRESS": "0x1234567890abcdef1234567890abcdef12345678",
+        "DREAMDEX_TX_MAX_GAS_LIMIT": "100000",
+        "DREAMDEX_TX_MAX_TOTAL_FEE_WEI": "1000000",
+        "DREAMDEX_TX_GAS_HEADROOM_BPS": "12000",
+        "DREAMDEX_TX_LEGACY_GAS_MULTIPLIER_BPS": "11000",
+        "DREAMDEX_TX_BASE_FEE_MULTIPLIER_BPS": "12000",
+        "DREAMDEX_TX_MAX_PRIORITY_FEE_PER_GAS_WEI": "100",
+    })
+    assert policy.unresolved_reasons == ()
 
 
 def test_cli_prints_platform_roles_and_identity_binding_without_authorizing(monkeypatch, capsys):

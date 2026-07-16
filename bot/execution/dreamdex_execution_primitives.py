@@ -124,6 +124,25 @@ class DreamDexExecutionBlockers:
     TRANSACTION_SIGNING_POLICY_REJECTED = "transaction_signing_policy_rejected"
     TRANSACTION_FEE_LIMIT_UNRESOLVED = "transaction_fee_limit_unresolved"
     TRANSACTION_VALUE_LIMIT_UNRESOLVED = "transaction_value_limit_unresolved"
+    LIVE_TRANSACTION_PREFLIGHT_UNAVAILABLE = "live_transaction_preflight_unavailable"
+    RPC_CONFIGURATION_UNAVAILABLE = "rpc_configuration_unavailable"
+    RPC_CHAIN_MISMATCH = "rpc_chain_mismatch"
+    TARGET_CONTRACT_CODE_UNAVAILABLE = "target_contract_code_unavailable"
+    TARGET_CONTRACT_CODE_MISSING = "target_contract_code_missing"
+    TARGET_CONTRACT_CODE_MALFORMED = "target_contract_code_malformed"
+    PENDING_NONCE_UNAVAILABLE = "pending_nonce_unavailable"
+    PENDING_NONCE_SNAPSHOT_NOT_RESERVED = "pending_nonce_snapshot_not_reserved"
+    GAS_ESTIMATE_UNAVAILABLE = "gas_estimate_unavailable"
+    GAS_ESTIMATE_REVERTED = "gas_estimate_reverted"
+    GAS_LIMIT_POLICY_UNRESOLVED = "gas_limit_policy_unresolved"
+    GAS_LIMIT_POLICY_EXCEEDED = "gas_limit_policy_exceeded"
+    FEE_MODEL_UNRESOLVED = "fee_model_unresolved"
+    FEE_EVIDENCE_UNAVAILABLE = "fee_evidence_unavailable"
+    TRANSACTION_FEE_LIMIT_EXCEEDED = "transaction_fee_limit_exceeded"
+    NATIVE_FEE_BALANCE_UNAVAILABLE = "native_fee_balance_unavailable"
+    NATIVE_FEE_BALANCE_INSUFFICIENT = "native_fee_balance_insufficient"
+    FINALIZED_ENVELOPE_UNAVAILABLE = "finalized_envelope_unavailable"
+    PREFLIGHT_REQUIRES_NONCE_REVALIDATION = "preflight_requires_nonce_revalidation"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -142,7 +161,14 @@ class DreamDexExecutionBlockers:
         TRANSACTION_SUBMISSION_UNAVAILABLE, TRANSACTION_SIGNING_POLICY_UNAVAILABLE,
         TRANSACTION_SIGNER_IMPLEMENTATION_UNAVAILABLE, TRANSACTION_SIGNING_REQUEST_UNAVAILABLE,
         TRANSACTION_SIGNING_POLICY_REJECTED, TRANSACTION_FEE_LIMIT_UNRESOLVED,
-        TRANSACTION_VALUE_LIMIT_UNRESOLVED,
+        TRANSACTION_VALUE_LIMIT_UNRESOLVED, LIVE_TRANSACTION_PREFLIGHT_UNAVAILABLE,
+        RPC_CONFIGURATION_UNAVAILABLE, RPC_CHAIN_MISMATCH, TARGET_CONTRACT_CODE_UNAVAILABLE,
+        TARGET_CONTRACT_CODE_MISSING, TARGET_CONTRACT_CODE_MALFORMED, PENDING_NONCE_UNAVAILABLE, PENDING_NONCE_SNAPSHOT_NOT_RESERVED,
+        GAS_ESTIMATE_UNAVAILABLE, GAS_ESTIMATE_REVERTED, GAS_LIMIT_POLICY_UNRESOLVED,
+        GAS_LIMIT_POLICY_EXCEEDED, FEE_MODEL_UNRESOLVED, FEE_EVIDENCE_UNAVAILABLE,
+        TRANSACTION_FEE_LIMIT_EXCEEDED, NATIVE_FEE_BALANCE_UNAVAILABLE,
+        NATIVE_FEE_BALANCE_INSUFFICIENT, FINALIZED_ENVELOPE_UNAVAILABLE,
+        PREFLIGHT_REQUIRES_NONCE_REVALIDATION,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -331,6 +357,9 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "validate_signing_policy": "signing", "build_signing_request": "signing",
         "validate_signing_request": "signing", "build_signing_preview": "signing",
         "transaction_signer_protocol": "signing",
+        "readonly_rpc_protocol": "rpc", "validate_rpc_response": "rpc",
+        "finalize_transaction_envelope": "preflight", "build_transaction_preflight_preview": "preflight",
+        "serialize_transaction_preflight_diagnostics": "preflight",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -340,7 +369,13 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
         "signer_address_discovery": "signing",
     }
+    partial = {
+        "resolve_pending_nonce": "preflight", "estimate_transaction_gas": "preflight",
+        "detect_fee_model": "preflight", "resolve_transaction_fees": "preflight",
+        "check_native_fee_balance": "preflight",
+    }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
+    values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.UNAVAILABLE.value, layer, source_status="unavailable", blocking=True, unresolved_reasons=("capability_unavailable",)) for name, layer in unavailable.items())
     return DreamDexExecutionCapabilityMatrix(tuple(values), tuple(blockers))
 

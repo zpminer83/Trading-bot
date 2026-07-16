@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import os
 import re
+from typing import Mapping
 
 from bot.execution.dry_run_order_validator import DryRunOrderValidator, DryRunValidationLimits
 from bot.execution.order import OrderIntent
@@ -54,6 +55,7 @@ from bot.execution.dreamdex_order_reconciliation import (
 from bot.execution.dreamdex_execution_primitives import (
     DreamDexExecutionBlockers,
     build_execution_capability_matrix,
+    mask_hex_hash,
 )
 from bot.execution.dreamdex_reconciliation_bridge import (
     build_reconciliation_bridge_from_evidence,
@@ -66,10 +68,20 @@ from bot.execution.dreamdex_transaction_signer import (
     build_transaction_signing_preview,
 )
 from bot.execution.dreamdex_execution_primitives import mask_evm_address
+from bot.execution.dreamdex_readonly_rpc import DreamDexReadOnlyRpcTransport
+from bot.execution.dreamdex_transaction_preflight import (
+    DreamDexTransactionPreflightPolicy,
+    build_transaction_preflight_preview,
+    run_transaction_preflight,
+    unavailable_preflight_result,
+)
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
 RECONCILIATION_BRIDGE_ENV = "DREAMDEX_ENABLE_RECONCILIATION_EVIDENCE_BRIDGE"
+LIVE_PREFLIGHT_ENV = "DREAMDEX_ENABLE_LIVE_TRANSACTION_PREFLIGHT"
+PREFLIGHT_RPC_ENV = "DREAMDEX_READ_ONLY_RPC_URL"
+PREFLIGHT_ENABLE_ENV = LIVE_PREFLIGHT_ENV
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -752,7 +764,105 @@ def _print_transaction_signer_boundary() -> None:
     print("  signer boundary blockers: transaction_signer_implementation_unavailable, transaction_signing_request_unavailable, transaction_signer_address_unresolved, transaction_fee_limit_unresolved, transaction_value_limit_unresolved")
 
 
-def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False) -> None:
+def _strict_int_setting(environ: Mapping[str, str], name: str, *, minimum: int = 0, required: bool = False) -> int | None:
+    raw = environ.get(name)
+    if raw is None or str(raw).strip() == "":
+        if required:
+            raise ValueError(f"{name} is required")
+        return None
+    text = str(raw).strip()
+    if not re.fullmatch(r"[0-9]+", text):
+        raise ValueError(f"{name} must be a strict integer")
+    value = int(text)
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    return value
+
+
+def build_live_transaction_preflight_policy(environ: Mapping[str, str]) -> DreamDexTransactionPreflightPolicy:
+    """Read CLI-only settings; the production preflight module reads no env."""
+    values = {
+        "maximum_gas_limit": _strict_int_setting(environ, "DREAMDEX_TX_MAX_GAS_LIMIT", minimum=1),
+        "maximum_total_fee_wei": _strict_int_setting(environ, "DREAMDEX_TX_MAX_TOTAL_FEE_WEI", minimum=1),
+        "gas_headroom_bps": _strict_int_setting(environ, "DREAMDEX_TX_GAS_HEADROOM_BPS", minimum=10000),
+        "legacy_gas_multiplier_bps": _strict_int_setting(environ, "DREAMDEX_TX_LEGACY_GAS_MULTIPLIER_BPS", minimum=1),
+        "base_fee_multiplier_bps": _strict_int_setting(environ, "DREAMDEX_TX_BASE_FEE_MULTIPLIER_BPS", minimum=1),
+        "maximum_priority_fee_per_gas_wei": _strict_int_setting(environ, "DREAMDEX_TX_MAX_PRIORITY_FEE_PER_GAS_WEI", minimum=1),
+    }
+    unresolved = ("policy_limits_unresolved",) if any(value is None for value in values.values()) else ()
+    return DreamDexTransactionPreflightPolicy(
+        required_sender_address=environ.get("DREAMDEX_READ_ONLY_OWNER_ADDRESS"),
+        required_target_address=environ.get("DREAMDEX_READ_ONLY_POOL_ADDRESS") or "0x035de7403eac6872787779cca7ccf1b4cdb61379",
+        unresolved_reasons=unresolved,
+        **values,
+    )
+
+
+build_preflight_policy_from_env = build_live_transaction_preflight_policy
+
+
+def execute_live_transaction_preflight(envelope, environ: Mapping[str, str], *, rpc_transport=None):
+    """Opt-in orchestration; no request is made unless a typed envelope exists."""
+    flag = _parse_enable_flag(environ.get(LIVE_PREFLIGHT_ENV))
+    if flag == "invalid":
+        raise ValueError(f"{LIVE_PREFLIGHT_ENV} must be a strict boolean")
+    policy = build_live_transaction_preflight_policy(environ)
+    if flag != "enabled":
+        return unavailable_preflight_result(policy=policy, reason="live_transaction_preflight_unavailable")
+    if envelope is None:
+        return unavailable_preflight_result(policy=policy, reason="transaction_preflight_envelope_unavailable")
+    rpc_url = environ.get(PREFLIGHT_RPC_ENV) or environ.get("DREAMDEX_RPC_URL")
+    if not rpc_url:
+        return unavailable_preflight_result(envelope, policy, reason="rpc_configuration_unavailable")
+    transport = rpc_transport or DreamDexReadOnlyRpcTransport(rpc_url)
+    return run_transaction_preflight(envelope, transport, policy)
+
+
+def _print_live_transaction_preflight(result=None, *, enabled: bool = False, execution_performed: bool = False, rpc_configured: bool = False, policy: DreamDexTransactionPreflightPolicy | None = None) -> None:
+    policy = policy or DreamDexTransactionPreflightPolicy()
+    preview = build_transaction_preflight_preview(result)
+    evidence = result.evidence if result is not None else None
+    params = result.resolved_parameters if result is not None else None
+    print("LIVE TRANSACTION PREFLIGHT:")
+    print(f"  preflight enabled: {'YES' if enabled else 'NO'}")
+    print(f"  preflight execution performed: {'YES' if execution_performed else 'NO'}")
+    print(f"  network calls allowed: {'YES' if enabled and rpc_configured else 'NO'}")
+    print(f"  rpc configuration: {'configured' if rpc_configured else 'unavailable'}")
+    print("  rpc URL output allowed: NO")
+    print(f"  chain evidence: {'available' if evidence and evidence.chain_id is not None else 'unavailable'}")
+    print(f"  chain ID: {preview.chain_id if preview.chain_id is not None else 'unavailable'}")
+    print(f"  chain match: {'confirmed' if preview.chain_match is True else 'mismatch' if preview.chain_match is False else 'unresolved'}")
+    print(f"  target contract code: {preview.target_code_status}")
+    print(f"  target code byte length: {evidence.target_code_byte_length if evidence and evidence.target_code_byte_length is not None else 0}")
+    print(f"  envelope available: {'YES' if result and result.original_envelope_fingerprint else 'NO'}")
+    print(f"  envelope structurally valid: {'YES' if result and result.evidence.source_status != 'unavailable' and not result.validation_errors else 'NO'}")
+    print(f"  pending nonce evidence: {'available' if evidence and evidence.pending_nonce is not None else 'unavailable'}")
+    print("  pending nonce snapshot only: YES")
+    print("  nonce reserved: NO")
+    print(f"  gas estimate evidence: {preview.gas_estimate_status}")
+    print(f"  gas estimate: {params.gas_estimate if params and params.gas_estimate is not None else 'unavailable'}")
+    print(f"  gas headroom: {policy.gas_headroom_bps if policy.gas_headroom_bps is not None else 'unavailable'}")
+    print(f"  resolved gas limit: {preview.gas_limit if preview.gas_limit is not None else 'unavailable'}")
+    print(f"  fee model: {preview.fee_mode}")
+    print(f"  fee evidence: {'available' if evidence and evidence.fee_evidence.source_status != 'unavailable' else 'unavailable'}")
+    print(f"  maximum possible fee: {preview.maximum_possible_fee_wei if preview.maximum_possible_fee_wei is not None else 'unavailable'}")
+    print(f"  total fee policy limit: {policy.maximum_total_fee_wei if policy.maximum_total_fee_wei is not None else 'unavailable'}")
+    print(f"  native balance evidence: {preview.native_balance_status}")
+    print(f"  native balance sufficient: {'YES' if preview.native_balance_sufficient is True else 'NO' if preview.native_balance_sufficient is False else 'unresolved'}")
+    print(f"  finalized envelope available: {'YES' if result and result.finalized_envelope is not None else 'NO'}")
+    print(f"  finalized envelope fingerprint: {mask_hex_hash(preview.finalized_envelope_fingerprint)}")
+    print(f"  preflight authoritative: {'YES' if result and result.authoritative else 'NO'}")
+    print(f"  preflight policy compliant: {'YES' if preview.policy_compliant else 'NO'}")
+    print(f"  ready for signing policy review: {'YES' if preview.ready_for_signing_policy_review else 'NO'}")
+    print("  signer invocation allowed: NO")
+    print("  transaction signing capability: unavailable")
+    print("  transaction submission allowed: NO")
+    print("  raw calldata output allowed: NO")
+    print("  raw RPC payload output allowed: NO")
+    print(f"  preflight blockers: {', '.join(preview.blockers) or 'none'}")
+
+
+def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
@@ -773,6 +883,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     graph_blockers = _print_order_reconciliation_graph()
     _print_execution_pipeline_summary()
     _print_transaction_signer_boundary()
+    _print_live_transaction_preflight(preflight_result, enabled=preflight_enabled, execution_performed=preflight_execution_performed, rpc_configured=preflight_rpc_configured, policy=preflight_policy)
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
@@ -880,6 +991,7 @@ def main() -> int:
         print("READ-ONLY ACCOUNT CHECK")
         print("Missing configuration: " + ", ".join(missing))
         print("No network request or order operation was attempted.")
+        _print_live_transaction_preflight(None, enabled=False, execution_performed=False, rpc_configured=False)
         print("Real submission enabled: NO")
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
@@ -888,6 +1000,11 @@ def main() -> int:
         if bridge_flag == "invalid":
             raise ValueError(f"{RECONCILIATION_BRIDGE_ENV} must be a strict boolean")
         reconciliation_bridge_enabled = bridge_flag == "enabled"
+        preflight_flag = _parse_enable_flag(os.environ.get(LIVE_PREFLIGHT_ENV))
+        if preflight_flag == "invalid":
+            raise ValueError(f"{LIVE_PREFLIGHT_ENV} must be a strict boolean")
+        preflight_enabled = preflight_flag == "enabled"
+        preflight_policy = build_live_transaction_preflight_policy(os.environ)
         symbol = os.environ.get("DREAMDEX_READ_ONLY_MARKET", "SOMI:USDso")
         if fixture_path:
             fixture = load_fixture(fixture_path)
@@ -921,7 +1038,11 @@ def main() -> int:
         report = adapter.reconcile(snapshot, local_cash=None if local_cash is None else Decimal(local_cash), local_inventory=None if local_inventory is None else Decimal(local_inventory))
         intent = OrderIntent(symbol, os.environ.get("DREAMDEX_READ_ONLY_DRY_RUN_SIDE", "buy"), "limit", _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_PRICE", Decimal("0")), _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_QUANTITY", Decimal("0")))
         validation = DryRunOrderValidator(DryRunValidationLimits(_decimal_env("DREAMDEX_READ_ONLY_MAX_NOTIONAL", Decimal("100000")), _decimal_env("DREAMDEX_READ_ONLY_MAX_INVENTORY", Decimal("100000")))).validate(intent, market=snapshot.market, account=snapshot.account, reconciliation=report, market_fresh=snapshot.market.is_fresh(now=datetime.now(timezone.utc), max_age_seconds=_decimal_env("DREAMDEX_READ_ONLY_MAX_MARKET_AGE_SECONDS", Decimal("30"))))
-        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled)
+        # No production request/envelope is constructed by this read-only CLI.
+        # Consequently enabling the flag without an explicit typed envelope is
+        # a safe, observable no-op and performs zero preflight RPC calls.
+        preflight_result = execute_live_transaction_preflight(None, os.environ)
+        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy)
         return 0
     except Exception as exc:
         print("READ-ONLY ACCOUNT CHECK")

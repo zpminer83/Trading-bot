@@ -32,6 +32,11 @@ def test_status_vocabulary_and_matrix_are_deterministic():
     assert first.fingerprint == second.fingerprint
     assert first.by_name("sign_transaction").status == "unavailable"
     assert first.by_name("build_unsigned_place").status == "available_offline"
+    assert first.by_name("readonly_rpc_protocol").status == "available_offline"
+    assert first.by_name("finalize_transaction_envelope").status == "available_offline"
+    assert first.by_name("resolve_pending_nonce").status == "partial"
+    assert first.by_name("estimate_transaction_gas").status == "partial"
+    assert first.by_name("submit_transaction").status == "unavailable"
     assert first.blockers == ("incomplete_account_state", "transaction_signer_unavailable")
 
 
