@@ -17,7 +17,8 @@ from bot.execution.dreamdex_unsigned_transaction import MAX_UINT256
 ALLOWED_RPC_METHODS = frozenset({
     "eth_chainId", "eth_getCode", "eth_getTransactionCount", "eth_estimateGas",
     "eth_getBlockByNumber", "eth_gasPrice", "eth_maxPriorityFeePerGas",
-    "eth_feeHistory", "eth_getBalance",
+    "eth_feeHistory", "eth_getBalance", "eth_getTransactionReceipt",
+    "eth_blockNumber", "eth_getBlockByHash",
 })
 RPC_METHOD_ALLOWLIST = ALLOWED_RPC_METHODS
 MAX_RESPONSE_BODY_BYTES = 1_000_000
@@ -117,6 +118,10 @@ class DreamDexReadOnlyRpc(Protocol):
     def get_max_priority_fee_per_gas(self) -> int: ...
     def get_fee_history(self, block_count: int = 1, newest_block: str = "latest", reward_percentiles: Sequence[int] = ()) -> Mapping[str, Any]: ...
     def get_native_balance(self, address: str) -> int: ...
+    def get_transaction_receipt(self, transaction_hash: str) -> Mapping[str, Any] | None: ...
+    def get_block_number(self) -> int: ...
+    def get_block_by_number(self, block_number: int) -> Mapping[str, Any] | None: ...
+    def get_block_by_hash(self, block_hash: str) -> Mapping[str, Any] | None: ...
 
 
 class DreamDexReadOnlyRpcTransport:
@@ -223,6 +228,32 @@ class DreamDexReadOnlyRpcTransport:
     def get_native_balance(self, address: str) -> int:
         return parse_rpc_quantity(self._call("eth_getBalance", [_validate_address(address), "latest"]), field="native_balance")
 
+    def get_transaction_receipt(self, transaction_hash: str) -> Mapping[str, Any] | None:
+        tx = _hex_data(transaction_hash, "transaction_hash")
+        if len(tx) != 66:
+            raise ValueError("transaction_hash: invalid_hash")
+        value = self._call("eth_getTransactionReceipt", [tx])
+        if value is not None and not isinstance(value, Mapping):
+            raise DreamDexRpcError("malformed_receipt")
+        return value
+
+    def get_block_number(self) -> int:
+        return parse_rpc_quantity(self._call("eth_blockNumber", []), field="block_number")
+
+    def get_block_by_number(self, block_number: int) -> Mapping[str, Any] | None:
+        if isinstance(block_number, bool) or not isinstance(block_number, int) or block_number < 0:
+            raise ValueError("block_number_invalid")
+        value = self._call("eth_getBlockByNumber", [hex(block_number), False])
+        if value is not None and not isinstance(value, Mapping):
+            raise DreamDexRpcError("malformed_block")
+        return value
+
+    def get_block_by_hash(self, block_hash: str) -> Mapping[str, Any] | None:
+        value = self._call("eth_getBlockByHash", [_hex_data(block_hash, "block_hash"), False])
+        if value is not None and not isinstance(value, Mapping):
+            raise DreamDexRpcError("malformed_block")
+        return value
+
 
 class FixtureDreamDexReadOnlyRpcTransport:
     """Deterministic typed fixture transport for offline tests."""
@@ -235,6 +266,10 @@ class FixtureDreamDexReadOnlyRpcTransport:
         if method not in self.responses:
             raise DreamDexRpcError("rpc_unavailable")
         value = self.responses[method]
+        if isinstance(value, list):
+            if not value:
+                raise DreamDexRpcError("rpc_unavailable")
+            value = value.pop(0)
         if isinstance(value, Exception):
             raise value
         return value
@@ -290,6 +325,35 @@ class FixtureDreamDexReadOnlyRpcTransport:
         _validate_address(address)
         self.calls.append(("eth_getBalance", (address, "latest")))
         return parse_rpc_quantity(self._value("eth_getBalance"), field="native_balance")
+
+    def get_transaction_receipt(self, transaction_hash: str) -> Mapping[str, Any] | None:
+        if not isinstance(transaction_hash, str) or len(transaction_hash) != 66:
+            raise ValueError("transaction_hash: invalid_hash")
+        self.calls.append(("eth_getTransactionReceipt", (transaction_hash.lower(),)))
+        value = self._value("eth_getTransactionReceipt")
+        if value is not None and not isinstance(value, Mapping):
+            raise DreamDexRpcError("malformed_receipt")
+        return value
+
+    def get_block_number(self) -> int:
+        self.calls.append(("eth_blockNumber", ()))
+        return parse_rpc_quantity(self._value("eth_blockNumber"), field="block_number")
+
+    def get_block_by_number(self, block_number: int) -> Mapping[str, Any] | None:
+        if isinstance(block_number, bool) or not isinstance(block_number, int) or block_number < 0:
+            raise ValueError("block_number_invalid")
+        self.calls.append(("eth_getBlockByNumber", (hex(block_number), False)))
+        value = self._value("eth_getBlockByNumber")
+        if value is not None and not isinstance(value, Mapping):
+            raise DreamDexRpcError("malformed_block")
+        return value
+
+    def get_block_by_hash(self, block_hash: str) -> Mapping[str, Any] | None:
+        self.calls.append(("eth_getBlockByHash", (block_hash.lower(), False)))
+        value = self._value("eth_getBlockByHash")
+        if value is not None and not isinstance(value, Mapping):
+            raise DreamDexRpcError("malformed_block")
+        return value
 
 
 # Naming aliases keep the public surface discoverable without introducing a

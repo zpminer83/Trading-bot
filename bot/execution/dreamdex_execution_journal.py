@@ -27,7 +27,8 @@ from bot.execution.dreamdex_execution_primitives import (
 )
 
 LEGACY_SCHEMA_VERSION = 1
-SCHEMA_VERSION = 2
+SUBMISSION_SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 APPLICATION_ID = "dreamdex-paper-trading"
 DEFAULT_BUSY_TIMEOUT_MS = 2500
 MAX_INTENT_LIMIT = 10000
@@ -51,6 +52,8 @@ class JournalState(str, Enum):
     FAILED_PRE_SUBMISSION = "failed_pre_submission"
     SUBMISSION_UNKNOWN = "submission_unknown"
     RECOVERY_REQUIRED = "recovery_required"
+    CONFIRMED_MISSING_EVENT = "confirmed_missing_event"
+    REORG_DETECTED = "reorg_detected"
     ABANDONED_MANUAL = "abandoned_manual"
 
 
@@ -75,12 +78,14 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     JournalState.SIGNING_STARTED.value: frozenset({"signed", "failed_pre_submission", "recovery_required"}),
     JournalState.SIGNED.value: frozenset({"submission_started", "recovery_required"}),
     JournalState.SUBMISSION_STARTED.value: frozenset({"submitted", "submission_unknown", "failed_pre_submission", "recovery_required"}),
-    JournalState.SUBMITTED.value: frozenset({"pending", "confirmed_success", "confirmed_reverted", "submission_unknown", "recovery_required"}),
-    JournalState.PENDING.value: frozenset({"confirmed_success", "confirmed_reverted", "submission_unknown", "recovery_required"}),
+    JournalState.SUBMITTED.value: frozenset({"pending", "confirmed_success", "confirmed_reverted", "confirmed_missing_event", "reorg_detected", "submission_unknown", "recovery_required"}),
+    JournalState.PENDING.value: frozenset({"confirmed_success", "confirmed_reverted", "confirmed_missing_event", "reorg_detected", "submission_unknown", "recovery_required"}),
     JournalState.SUBMISSION_UNKNOWN.value: frozenset({"recovery_required", "abandoned_manual"}),
-    JournalState.RECOVERY_REQUIRED.value: frozenset({"abandoned_manual"}),
-    JournalState.CONFIRMED_SUCCESS.value: frozenset(),
+    JournalState.RECOVERY_REQUIRED.value: frozenset({"pending", "confirmed_success", "confirmed_reverted", "confirmed_missing_event", "reorg_detected", "abandoned_manual"}),
+    JournalState.CONFIRMED_SUCCESS.value: frozenset({"reorg_detected", "recovery_required"}),
     JournalState.CONFIRMED_REVERTED.value: frozenset(),
+    JournalState.CONFIRMED_MISSING_EVENT.value: frozenset({"recovery_required", "reorg_detected"}),
+    JournalState.REORG_DETECTED.value: frozenset({"recovery_required"}),
     JournalState.CANCELLED_BEFORE_SIGNING.value: frozenset(),
     JournalState.FAILED_PRE_SUBMISSION.value: frozenset(),
     JournalState.ABANDONED_MANUAL.value: frozenset(),
@@ -137,7 +142,7 @@ class DreamDexExecutionJournalPolicy:
     unresolved_reasons: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if self.schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+        if self.schema_version not in {LEGACY_SCHEMA_VERSION, SUBMISSION_SCHEMA_VERSION, SCHEMA_VERSION}:
             raise ValueError("unsupported_journal_schema_version")
         if not isinstance(self.busy_timeout_ms, int) or isinstance(self.busy_timeout_ms, bool) or self.busy_timeout_ms <= 0 or self.busy_timeout_ms > 60000:
             raise ValueError("busy_timeout_ms_invalid")
@@ -359,9 +364,12 @@ SCHEMA_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_events_intent ON journal_events(intent_id, event_sequence)",
     "CREATE TABLE IF NOT EXISTS transaction_submissions (submission_id TEXT PRIMARY KEY, intent_id TEXT NOT NULL UNIQUE, reservation_id TEXT NOT NULL, lease_id TEXT NOT NULL, verified_artifact_fingerprint TEXT NOT NULL, signed_transaction_hash TEXT NOT NULL UNIQUE, signed_payload_length INTEGER NOT NULL CHECK(signed_payload_length > 0), submission_status TEXT NOT NULL, send_attempt_count INTEGER NOT NULL CHECK(send_attempt_count = 1), local_hash_match_status TEXT NOT NULL, rpc_returned_hash TEXT, created_at_unix_ms INTEGER NOT NULL, send_started_at_unix_ms INTEGER, send_completed_at_unix_ms INTEGER, recovery_checked_at_unix_ms INTEGER, record_fingerprint TEXT NOT NULL UNIQUE, FOREIGN KEY(intent_id) REFERENCES execution_intents(intent_id))",
     "CREATE INDEX IF NOT EXISTS idx_submission_status ON transaction_submissions(submission_status)",
+    "CREATE TABLE IF NOT EXISTS transaction_confirmations (confirmation_id TEXT PRIMARY KEY, submission_id TEXT NOT NULL UNIQUE, intent_id TEXT NOT NULL UNIQUE, transaction_hash TEXT NOT NULL UNIQUE, confirmation_status TEXT NOT NULL, receipt_status TEXT, receipt_block_number INTEGER, receipt_block_hash TEXT, canonical_block_hash TEXT, confirmation_count INTEGER NOT NULL, required_confirmation_count INTEGER NOT NULL, expected_event_type TEXT, expected_event_fingerprint TEXT, confirmed_order_id INTEGER, observation_count INTEGER NOT NULL, receipt_stable INTEGER NOT NULL, reorg_detected INTEGER NOT NULL, confirmation_fingerprint TEXT NOT NULL UNIQUE, created_at_unix_ms INTEGER NOT NULL, updated_at_unix_ms INTEGER NOT NULL, FOREIGN KEY(submission_id) REFERENCES transaction_submissions(submission_id), FOREIGN KEY(intent_id) REFERENCES execution_intents(intent_id))",
+    "CREATE INDEX IF NOT EXISTS idx_confirmation_status ON transaction_confirmations(confirmation_status)",
 )
 
-SCHEMA_SQL_V1 = SCHEMA_SQL[:-2]
+SCHEMA_SQL_V2 = SCHEMA_SQL[:-2]
+SCHEMA_SQL_V1 = SCHEMA_SQL_V2[:-2]
 
 REQUIRED_COLUMNS = {
     "journal_schema": {"schema_version", "created_at", "application_id"},
@@ -369,12 +377,14 @@ REQUIRED_COLUMNS = {
     "nonce_reservations": {"reservation_id", "intent_id", "chain_id", "signer_address_normalized", "nonce", "status", "reservation_fingerprint", "created_at", "updated_at"},
     "journal_events": {"event_id", "intent_id", "event_sequence", "event_type", "previous_state", "new_state", "event_fingerprint", "created_at"},
     "transaction_submissions": {"submission_id", "intent_id", "reservation_id", "lease_id", "verified_artifact_fingerprint", "signed_transaction_hash", "signed_payload_length", "submission_status", "send_attempt_count", "local_hash_match_status", "created_at_unix_ms", "record_fingerprint"},
+    "transaction_confirmations": {"confirmation_id", "submission_id", "intent_id", "transaction_hash", "confirmation_status", "confirmation_count", "required_confirmation_count", "observation_count", "receipt_stable", "reorg_detected", "confirmation_fingerprint", "created_at_unix_ms", "updated_at_unix_ms"},
 }
 REQUIRED_INDEXES = {
     "uq_nonce_reservation_chain_signer_nonce",
     "idx_intents_state",
     "idx_events_intent",
     "idx_submission_status",
+    "idx_confirmation_status",
 }
 
 
@@ -454,7 +464,7 @@ class DreamDexExecutionJournal:
         if not tables and create:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                schema_sql = SCHEMA_SQL if self.policy.schema_version == SCHEMA_VERSION else SCHEMA_SQL_V1
+                schema_sql = SCHEMA_SQL if self.policy.schema_version == SCHEMA_VERSION else (SCHEMA_SQL_V2 if self.policy.schema_version == SUBMISSION_SCHEMA_VERSION else SCHEMA_SQL_V1)
                 for sql in schema_sql:
                     conn.execute(sql)
                 conn.execute("INSERT INTO journal_schema(schema_version, created_at, application_id) VALUES (?, ?, ?)", (self.policy.schema_version, _now_ms(), self.policy.application_id))
@@ -463,7 +473,7 @@ class DreamDexExecutionJournal:
                 conn.rollback()
                 raise
             tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        base_tables = set(REQUIRED_COLUMNS) - {"transaction_submissions"}
+        base_tables = set(REQUIRED_COLUMNS) - {"transaction_submissions", "transaction_confirmations"}
         if not base_tables <= tables:
             self._schema_status = "incompatible"
             return
@@ -474,6 +484,18 @@ class DreamDexExecutionJournal:
         version = int(version_rows[0][0])
         if version == LEGACY_SCHEMA_VERSION:
             self._schema_status = "legacy_read_only"
+            return
+        if version == SUBMISSION_SCHEMA_VERSION:
+            # v2 is intentionally readable but cannot receive confirmation writes
+            # until the explicit additive v2 -> v3 migration is run.
+            for table, required in REQUIRED_COLUMNS.items():
+                if table == "transaction_confirmations":
+                    continue
+                cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+                if not required <= cols:
+                    self._schema_status = "incompatible"
+                    return
+            self._schema_status = "submission_legacy_read_only"
             return
         if version != SCHEMA_VERSION:
             self._schema_status = "incompatible"
@@ -506,6 +528,7 @@ class DreamDexExecutionJournal:
             indexes |= {str(row[1]) for row in conn.execute("PRAGMA index_list(execution_intents)")}
             indexes |= {str(row[1]) for row in conn.execute("PRAGMA index_list(journal_events)")}
             indexes |= {str(row[1]) for row in conn.execute("PRAGMA index_list(transaction_submissions)")}
+            indexes |= {str(row[1]) for row in conn.execute("PRAGMA index_list(transaction_confirmations)")}
             if not REQUIRED_INDEXES <= indexes:
                 reasons.append("execution_journal_integrity_failed")
             intent_states = {str(row[0]) for row in conn.execute("SELECT state FROM execution_intents")}
@@ -533,7 +556,7 @@ class DreamDexExecutionJournal:
     def _writes_allowed(self) -> tuple[bool, tuple[str, ...]]:
         if self.mode != "rw":
             return False, ("journal_read_only",)
-        if self._schema_status == "legacy_read_only":
+        if self._schema_status in {"legacy_read_only", "submission_legacy_read_only"}:
             return False, ("legacy_journal_requires_explicit_migration",)
         if self._schema_status != "compatible":
             return False, ("execution_journal_schema_incompatible",)
@@ -919,6 +942,64 @@ class DreamDexExecutionJournal:
             row = self._require_conn().execute("SELECT * FROM transaction_submissions WHERE intent_id=?", (intent_id,)).fetchone()
         return self._submission_dict(row)
 
+    def get_transaction_confirmation(self, *, intent_id: str | None = None, submission_id: str | None = None) -> dict[str, Any] | None:
+        if intent_id is None and submission_id is None:
+            raise ValueError("confirmation_identifier_required")
+        if self._schema_status != "compatible":
+            return None
+        column, value = ("submission_id", submission_id) if submission_id is not None else ("intent_id", intent_id)
+        row = self._require_conn().execute(f"SELECT * FROM transaction_confirmations WHERE {column}=?", (value,)).fetchone()
+        return self._submission_dict(row)
+
+    def persist_transaction_confirmation(self, *, confirmation_id: str, submission_id: str, intent_id: str,
+                                          transaction_hash: str, confirmation_status: str,
+                                          receipt_status: str | None, receipt_block_number: int | None,
+                                          receipt_block_hash: str | None, canonical_block_hash: str | None,
+                                          confirmation_count: int, required_confirmation_count: int,
+                                          expected_event_type: str | None, expected_event_fingerprint: str | None,
+                                          confirmed_order_id: int | None, observation_count: int,
+                                          receipt_stable: bool, reorg_detected: bool,
+                                          confirmation_fingerprint: str, new_state: str | None = None,
+                                          blockers: Sequence[str] = ()) -> tuple[str, dict[str, Any] | None, tuple[str, ...]]:
+        """Atomically record sanitized confirmation metadata and journal state."""
+        allowed, reasons = self._recovery_writes_allowed()
+        if not allowed:
+            return "blocked", None, reasons
+        if self._schema_status != "compatible":
+            return "blocked", None, ("confirmation_persistence_unavailable",)
+        if any(not isinstance(v, str) or not v for v in (confirmation_id, submission_id, intent_id, transaction_hash, confirmation_status, confirmation_fingerprint)):
+            return "rejected", None, ("confirmation_metadata_invalid",)
+        if any(isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in (confirmation_count, required_confirmation_count, observation_count)):
+            return "rejected", None, ("confirmation_count_invalid",)
+        try:
+            tx_hash = validate_tx_hash(transaction_hash, field="transaction_hash")
+        except ValueError as exc:
+            return "rejected", None, (str(exc),)
+        conn = self._begin()
+        try:
+            submission = conn.execute("SELECT * FROM transaction_submissions WHERE submission_id=? AND intent_id=?", (submission_id, intent_id)).fetchone()
+            intent = conn.execute("SELECT * FROM execution_intents WHERE intent_id=?", (intent_id,)).fetchone()
+            if submission is None or intent is None:
+                conn.rollback(); return "rejected", None, ("confirmation_persistence_precondition_failed",)
+            existing = conn.execute("SELECT * FROM transaction_confirmations WHERE submission_id=?", (submission_id,)).fetchone()
+            now = _now_ms()
+            if existing is None:
+                conn.execute("INSERT INTO transaction_confirmations(confirmation_id,submission_id,intent_id,transaction_hash,confirmation_status,receipt_status,receipt_block_number,receipt_block_hash,canonical_block_hash,confirmation_count,required_confirmation_count,expected_event_type,expected_event_fingerprint,confirmed_order_id,observation_count,receipt_stable,reorg_detected,confirmation_fingerprint,created_at_unix_ms,updated_at_unix_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (confirmation_id, submission_id, intent_id, tx_hash, confirmation_status, receipt_status, receipt_block_number, receipt_block_hash, canonical_block_hash, confirmation_count, required_confirmation_count, expected_event_type, expected_event_fingerprint, confirmed_order_id, observation_count, int(receipt_stable), int(reorg_detected), confirmation_fingerprint, now, now))
+            else:
+                conn.execute("UPDATE transaction_confirmations SET confirmation_status=?,receipt_status=?,receipt_block_number=?,receipt_block_hash=?,canonical_block_hash=?,confirmation_count=?,required_confirmation_count=?,expected_event_type=?,expected_event_fingerprint=?,confirmed_order_id=?,observation_count=?,receipt_stable=?,reorg_detected=?,confirmation_fingerprint=?,updated_at_unix_ms=? WHERE submission_id=?", (confirmation_status, receipt_status, receipt_block_number, receipt_block_hash, canonical_block_hash, confirmation_count, required_confirmation_count, expected_event_type, expected_event_fingerprint, confirmed_order_id, observation_count, int(receipt_stable), int(reorg_detected), confirmation_fingerprint, now, submission_id))
+            target_state = new_state
+            if target_state and target_state != intent["state"]:
+                if target_state not in TRANSITIONS.get(intent["state"], frozenset()):
+                    conn.rollback(); return "rejected", None, ("confirmation_state_transition_invalid",)
+                self._insert_event(conn, intent_id=intent_id, reservation_id=submission["reservation_id"], event_type="transaction_confirmation_observed", previous_state=intent["state"], new_state=target_state, source_type="typed_receipt_observer", authoritative=False, details_status="sanitized_confirmation_metadata", blockers=tuple(blockers))
+                conn.execute("UPDATE execution_intents SET state=?, updated_at=? WHERE intent_id=?", (target_state, now, intent_id))
+            conn.commit()
+            return "updated", self.get_transaction_confirmation(intent_id=intent_id), ()
+        except sqlite3.IntegrityError:
+            conn.rollback(); return "rejected", None, ("confirmation_record_conflict",)
+        except Exception:
+            conn.rollback(); raise
+
     def persist_submission_started(self, *, submission_id: str, intent_id: str, reservation_id: str, lease_id: str,
                                    verified_artifact_fingerprint: str, signed_transaction_hash: str,
                                    signed_payload_length: int, local_hash_match_status: str = "confirmed",
@@ -1118,7 +1199,7 @@ def migrate_journal_v1_to_v2(path: str | Path, policy: DreamDexExecutionJournalP
     if any(part.lower() == "vendor" for part in target.parts):
         raise ValueError("journal_path_vendor_forbidden")
     base_policy = policy or DreamDexExecutionJournalPolicy(schema_version=SCHEMA_VERSION)
-    if base_policy.schema_version not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+    if base_policy.schema_version not in {LEGACY_SCHEMA_VERSION, SUBMISSION_SCHEMA_VERSION, SCHEMA_VERSION}:
         raise ValueError("unsupported_journal_schema_version")
     conn = sqlite3.connect(str(target), timeout=base_policy.busy_timeout_ms / 1000, isolation_level=None)
     conn.row_factory = sqlite3.Row
@@ -1129,8 +1210,9 @@ def migrate_journal_v1_to_v2(path: str | Path, policy: DreamDexExecutionJournalP
         if int(row["schema_version"]) == SCHEMA_VERSION:
             conn.close()
             return open_journal(target, DreamDexExecutionJournalPolicy(**{**base_policy.__dict__, "schema_version": SCHEMA_VERSION}), mode="rw")
-        if int(row["schema_version"]) != LEGACY_SCHEMA_VERSION:
-            raise ValueError("journal_migration_requires_schema_v1")
+        version = int(row["schema_version"])
+        if version not in {LEGACY_SCHEMA_VERSION, SUBMISSION_SCHEMA_VERSION}:
+            raise ValueError("journal_migration_requires_known_legacy_schema")
         quick = conn.execute("PRAGMA quick_check").fetchone()
         if not quick or str(quick[0]).lower() != "ok":
             raise ValueError("execution_journal_integrity_failed")
@@ -1141,6 +1223,36 @@ def migrate_journal_v1_to_v2(path: str | Path, policy: DreamDexExecutionJournalP
                 raise ValueError("execution_journal_integrity_failed")
             if item["state"] in {"signing_started", "signed", "submission_started", "submission_unknown", "submitted", "pending", "recovery_required"}:
                 raise ValueError("execution_journal_recovery_required")
+        conn.execute("BEGIN IMMEDIATE")
+        statements = (SCHEMA_SQL_V2[-2:] + SCHEMA_SQL[-2:]) if version == LEGACY_SCHEMA_VERSION else SCHEMA_SQL[-2:]
+        for sql in statements:
+            conn.execute(sql)
+        conn.execute("UPDATE journal_schema SET schema_version=?", (SCHEMA_VERSION,))
+        conn.commit()
+    except Exception:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    finally:
+        conn.close()
+    return open_journal(target, DreamDexExecutionJournalPolicy(**{**base_policy.__dict__, "schema_version": SCHEMA_VERSION}), mode="rw")
+
+
+def migrate_journal_v2_to_v3(path: str | Path, policy: DreamDexExecutionJournalPolicy | None = None) -> DreamDexExecutionJournal:
+    """Explicit additive migration that enables durable confirmation evidence."""
+    target = Path(path)
+    if not target.is_absolute() or any(part.lower() == "vendor" for part in target.parts):
+        raise ValueError("journal_path_invalid")
+    base_policy = policy or DreamDexExecutionJournalPolicy(schema_version=SCHEMA_VERSION)
+    conn = sqlite3.connect(str(target), timeout=base_policy.busy_timeout_ms / 1000, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    try:
+        row = conn.execute("SELECT schema_version, application_id FROM journal_schema ORDER BY rowid LIMIT 1").fetchone()
+        if row is None or str(row["application_id"]) != base_policy.application_id or int(row["schema_version"]) != SUBMISSION_SCHEMA_VERSION:
+            raise ValueError("journal_migration_requires_schema_v2")
+        quick = conn.execute("PRAGMA quick_check").fetchone()
+        if not quick or str(quick[0]).lower() != "ok":
+            raise ValueError("execution_journal_integrity_failed")
         conn.execute("BEGIN IMMEDIATE")
         for sql in SCHEMA_SQL[-2:]:
             conn.execute(sql)
@@ -1187,5 +1299,5 @@ DreamDexExecutionJournalRepository = DreamDexExecutionJournal
 
 
 __all__ = [
-    "LEGACY_SCHEMA_VERSION", "SCHEMA_VERSION", "JournalState", "DreamDexExecutionJournalPolicy", "DreamDexExecutionIntent", "DreamDexNonceReservation", "DreamDexExecutionJournalEvent", "DreamDexExecutionJournalSnapshot", "DreamDexExecutionIntentResult", "DreamDexNonceReservationResult", "DreamDexExecutionJournal", "DreamDexExecutionJournalRepository", "initialize_journal", "open_journal", "migrate_journal_v1_to_v2", "create_or_get_execution_intent", "transition_execution_intent", "reserve_nonce", "release_nonce_before_signing", "build_execution_journal_snapshot", "verify_execution_journal_integrity", "serialize_execution_journal_diagnostics", "TRANSITIONS", "RELEASE_REASONS",
+    "LEGACY_SCHEMA_VERSION", "SUBMISSION_SCHEMA_VERSION", "SCHEMA_VERSION", "JournalState", "DreamDexExecutionJournalPolicy", "DreamDexExecutionIntent", "DreamDexNonceReservation", "DreamDexExecutionJournalEvent", "DreamDexExecutionJournalSnapshot", "DreamDexExecutionIntentResult", "DreamDexNonceReservationResult", "DreamDexExecutionJournal", "DreamDexExecutionJournalRepository", "initialize_journal", "open_journal", "migrate_journal_v1_to_v2", "migrate_journal_v2_to_v3", "create_or_get_execution_intent", "transition_execution_intent", "reserve_nonce", "release_nonce_before_signing", "build_execution_journal_snapshot", "verify_execution_journal_integrity", "serialize_execution_journal_diagnostics", "TRANSITIONS", "RELEASE_REASONS",
 ]

@@ -75,6 +75,7 @@ from bot.execution.dreamdex_transaction_preflight import (
     run_transaction_preflight,
     unavailable_preflight_result,
 )
+from bot.execution.dreamdex_transaction_confirmation import build_transaction_confirmation_preview
 from bot.execution.dreamdex_execution_journal import (
     DreamDexExecutionJournalPolicy,
     open_journal,
@@ -101,6 +102,7 @@ LIVE_NONCE_REVALIDATION_ENV = "DREAMDEX_ENABLE_LIVE_NONCE_REVALIDATION"
 SIGNING_LEASE_ENABLE_ENV = "DREAMDEX_ENABLE_LIVE_SIGNING_LEASE"
 LIVE_NONCE_MAX_AGE_ENV = "DREAMDEX_LIVE_NONCE_MAX_AGE_MS"
 RAW_SUBMISSION_ENABLE_ENV = "DREAMDEX_ENABLE_RAW_TRANSACTION_SUBMISSION"
+TRANSACTION_CONFIRMATION_ENABLE_ENV = "DREAMDEX_ENABLE_TRANSACTION_CONFIRMATION"
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -119,6 +121,13 @@ def raw_transaction_submission_flag(environ: Mapping[str, str]) -> str:
     if value == "invalid":
         raise ValueError(f"{RAW_SUBMISSION_ENABLE_ENV} must be a strict boolean")
     return value
+
+
+def transaction_confirmation_flag(environ: Mapping[str, str]) -> bool:
+    value = _parse_enable_flag(environ.get(TRANSACTION_CONFIRMATION_ENABLE_ENV))
+    if value == "invalid":
+        raise ValueError(f"{TRANSACTION_CONFIRMATION_ENABLE_ENV} must be a strict boolean")
+    return value == "enabled"
 
 
 def _safe_error(exc: Exception, owner: str | None = None) -> str:
@@ -993,6 +1002,43 @@ def _print_transaction_submission_boundary(*, result=None, execution_performed: 
     print(f"  submission blockers: {', '.join(preview.blockers) or 'none'}")
 
 
+def _print_transaction_confirmation(*, enabled: bool = False) -> None:
+    capabilities = build_execution_capability_matrix()
+    preview = build_transaction_confirmation_preview()
+    print("TRANSACTION RECEIPT AND FINALITY CONFIRMATION:")
+    print(f"  confirmation model: {capabilities.by_name('transaction_receipt_model').status}")
+    print(f"  receipt reader protocol: {capabilities.by_name('transaction_receipt_reader_protocol').status}")
+    print(f"  production receipt reader: {capabilities.by_name('receipt_polling').status}")
+    print(f"  confirmation execution performed: {'YES' if enabled and preview.observation_execution_performed else 'NO'}")
+    print("  monitor execution performed: NO")
+    print(f"  RPC calls performed: {'YES' if preview.rpc_calls_performed else 'NO'}")
+    print(f"  receipt found: {'YES' if preview.receipt_found else 'unresolved'}")
+    print(f"  receipt status: {preview.receipt_status}")
+    print("  canonical block evidence: unavailable")
+    print(f"  canonical block match: {'confirmed' if preview.canonical_block_match is True else 'mismatch' if preview.canonical_block_match is False else 'unresolved'}")
+    print("  receipt block number: unavailable")
+    print("  latest block number: unavailable")
+    print(f"  confirmation count: {preview.confirmation_count}")
+    print(f"  required confirmation count: {preview.required_confirmation_count if preview.required_confirmation_count is not None else 'unavailable'}")
+    print(f"  finality reached: {'YES' if preview.finality_reached else 'NO'}")
+    print(f"  expected event type: {preview.expected_event_type}")
+    print(f"  expected event found: {'YES' if preview.expected_event_found else 'NO'}")
+    print(f"  matching event count: {1 if preview.expected_event_found else 0}")
+    print(f"  order ID confirmed: {'YES' if preview.order_id_confirmed else 'NO'}")
+    print(f"  receipt stable: {'confirmed' if preview.receipt_stable is True else 'mismatch' if preview.receipt_stable is False else 'unresolved'}")
+    print(f"  reorg detected: {'YES' if preview.reorg_detected else 'NO'}")
+    print("  journal confirmation record: NO")
+    print(f"  journal confirmation state: {preview.journal_state}")
+    print(f"  confirmation complete: {'YES' if preview.confirmation_complete else 'NO'}")
+    print(f"  ready for order reconciliation: {'YES' if preview.ready_for_order_reconciliation else 'NO'}")
+    print("  ready for new execution action: NO")
+    print("  resend allowed: NO")
+    print("  replacement allowed: NO")
+    print("  raw receipt output allowed: NO")
+    print("  raw log output allowed: NO")
+    print("  confirmation blockers: receipt_lookup_unavailable; confirmation_policy_unavailable")
+
+
 def build_live_transaction_preflight_policy(environ: Mapping[str, str]) -> DreamDexTransactionPreflightPolicy:
     """Read CLI-only settings; the production preflight module reads no env."""
     values = {
@@ -1076,7 +1122,7 @@ def _print_live_transaction_preflight(result=None, *, enabled: bool = False, exe
     print(f"  preflight blockers: {', '.join(preview.blockers) or 'none'}")
 
 
-def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None, journal_snapshot=None, journal_enabled: bool = False, journal_execution_performed: bool = False, journal_path_configured: bool = False, lease_result=None, lease_enabled: bool = False, lease_execution_performed: bool = False, lease_policy: DreamDexLiveNonceRevalidationPolicy | None = None, signing_session_result=None, signing_session_execution_performed: bool = False) -> None:
+def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None, journal_snapshot=None, journal_enabled: bool = False, journal_execution_performed: bool = False, journal_path_configured: bool = False, lease_result=None, lease_enabled: bool = False, lease_execution_performed: bool = False, lease_policy: DreamDexLiveNonceRevalidationPolicy | None = None, signing_session_result=None, signing_session_execution_performed: bool = False, transaction_confirmation_enabled: bool = False) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
@@ -1102,6 +1148,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_live_nonce_signing_lease(lease_result, enabled=lease_enabled, execution_performed=lease_execution_performed, rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), policy=lease_policy)
     _print_signed_transaction_verification(session_result=signing_session_result, execution_performed=signing_session_execution_performed)
     _print_transaction_submission_boundary(result=None, execution_performed=False)
+    _print_transaction_confirmation(enabled=transaction_confirmation_enabled)
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
@@ -1202,11 +1249,15 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
 def main() -> int:
     try:
         raw_transaction_submission_flag(os.environ)
+        confirmation_flag = _parse_enable_flag(os.environ.get(TRANSACTION_CONFIRMATION_ENABLE_ENV))
+        if confirmation_flag == "invalid":
+            raise ValueError(f"{TRANSACTION_CONFIRMATION_ENABLE_ENV} must be a strict boolean")
     except ValueError as exc:
         print("READ-ONLY ACCOUNT CHECK")
         print(f"Configuration rejected: {exc}")
         print("No network request or order operation was attempted.")
         _print_transaction_submission_boundary(result=None, execution_performed=False)
+        _print_transaction_confirmation(enabled=False)
         print("Real submission enabled: NO")
         return 2
     fixture_path = os.environ.get("DREAMDEX_READ_ONLY_FIXTURE")
@@ -1223,6 +1274,7 @@ def main() -> int:
         _print_live_nonce_signing_lease(None, enabled=False, execution_performed=False, rpc_configured=False)
         _print_signed_transaction_verification(session_result=None, execution_performed=False)
         _print_transaction_submission_boundary(result=None, execution_performed=False)
+        _print_transaction_confirmation(enabled=False)
         print("Real submission enabled: NO")
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
@@ -1231,6 +1283,9 @@ def main() -> int:
         if bridge_flag == "invalid":
             raise ValueError(f"{RECONCILIATION_BRIDGE_ENV} must be a strict boolean")
         reconciliation_bridge_enabled = bridge_flag == "enabled"
+        confirmation_flag = _parse_enable_flag(os.environ.get(TRANSACTION_CONFIRMATION_ENABLE_ENV))
+        if confirmation_flag == "invalid":
+            raise ValueError(f"{TRANSACTION_CONFIRMATION_ENABLE_ENV} must be a strict boolean")
         preflight_flag = _parse_enable_flag(os.environ.get(LIVE_PREFLIGHT_ENV))
         if preflight_flag == "invalid":
             raise ValueError(f"{LIVE_PREFLIGHT_ENV} must be a strict boolean")
@@ -1295,7 +1350,7 @@ def main() -> int:
         # Consequently enabling the flag without an explicit typed envelope is
         # a safe, observable no-op and performs zero preflight RPC calls.
         preflight_result = execute_live_transaction_preflight(None, os.environ)
-        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy, journal_snapshot=journal_snapshot, journal_enabled=journal_enabled, journal_execution_performed=journal_execution_performed, journal_path_configured=journal_path_configured, lease_result=lease_result, lease_enabled=lease_enabled, lease_execution_performed=lease_execution_performed, lease_policy=lease_policy, signing_session_result=None, signing_session_execution_performed=False)
+        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy, journal_snapshot=journal_snapshot, journal_enabled=journal_enabled, journal_execution_performed=journal_execution_performed, journal_path_configured=journal_path_configured, lease_result=lease_result, lease_enabled=lease_enabled, lease_execution_performed=lease_execution_performed, lease_policy=lease_policy, signing_session_result=None, signing_session_execution_performed=False, transaction_confirmation_enabled=confirmation_flag == "enabled")
         return 0
     except Exception as exc:
         print("READ-ONLY ACCOUNT CHECK")

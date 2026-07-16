@@ -112,6 +112,25 @@ class DreamDexExecutionBlockers:
     ACCOUNT_IDENTITY_CONFLICT = "account_identity_conflict"
     MARKET_IDENTITY_CONFLICT = "market_identity_conflict"
     REDUCE_EVENT_SEMANTICS_UNAVAILABLE = "reduce_event_semantics_unavailable"
+    RECEIPT_LOOKUP_UNAVAILABLE = "receipt_lookup_unavailable"
+    TRANSACTION_RECEIPT_NOT_FOUND = "transaction_receipt_not_found"
+    TRANSACTION_RECEIPT_MALFORMED = "transaction_receipt_malformed"
+    TRANSACTION_RECEIPT_HASH_MISMATCH = "transaction_receipt_hash_mismatch"
+    TRANSACTION_RECEIPT_REVERTED = "transaction_receipt_reverted"
+    CANONICAL_BLOCK_UNAVAILABLE = "canonical_block_unavailable"
+    CANONICAL_BLOCK_HASH_MISMATCH = "canonical_block_hash_mismatch"
+    CONFIRMATION_DEPTH_INSUFFICIENT = "confirmation_depth_insufficient"
+    CONFIRMATION_POLICY_UNAVAILABLE = "confirmation_policy_unavailable"
+    EXPECTED_CONTRACT_EVENT_MISSING = "expected_contract_event_missing"
+    EXPECTED_CONTRACT_EVENT_CONFLICT = "expected_contract_event_conflict"
+    ORDER_PLACED_EVENT_UNCONFIRMED = "order_placed_event_unconfirmed"
+    ORDER_CANCELLED_EVENT_UNCONFIRMED = "order_cancelled_event_unconfirmed"
+    ORDER_ID_CONFIRMATION_UNAVAILABLE = "order_id_confirmation_unavailable"
+    ORDER_ID_MISMATCH = "order_id_mismatch"
+    TRANSACTION_REORG_DETECTED = "transaction_reorg_detected"
+    RECEIPT_OBSERVATION_UNSTABLE = "receipt_observation_unstable"
+    CONFIRMATION_MONITOR_TIMEOUT = "confirmation_monitor_timeout"
+    CONFIRMATION_PERSISTENCE_UNAVAILABLE = "confirmation_persistence_unavailable"
     TRANSACTION_ENVELOPE_UNAVAILABLE = "transaction_envelope_unavailable"
     TRANSACTION_TYPE_POLICY_UNRESOLVED = "transaction_type_policy_unresolved"
     TRANSACTION_NONCE_UNRESOLVED = "transaction_nonce_unresolved"
@@ -260,7 +279,16 @@ class DreamDexExecutionBlockers:
         SUBMISSION_OUTCOME_UNKNOWN, SUBMISSION_RECOVERY_REQUIRED,
         SUBMISSION_TRANSACTION_NOT_FOUND, SUBMISSION_TRANSACTION_FIELD_MISMATCH,
         AUTOMATIC_SUBMISSION_RETRY_DISABLED, TRANSACTION_REPLACEMENT_DISABLED,
-        RECEIPT_LOOKUP_UNAVAILABLE,
+        RECEIPT_LOOKUP_UNAVAILABLE, TRANSACTION_RECEIPT_NOT_FOUND,
+        TRANSACTION_RECEIPT_MALFORMED, TRANSACTION_RECEIPT_HASH_MISMATCH,
+        TRANSACTION_RECEIPT_REVERTED, CANONICAL_BLOCK_UNAVAILABLE,
+        CANONICAL_BLOCK_HASH_MISMATCH, CONFIRMATION_DEPTH_INSUFFICIENT,
+        CONFIRMATION_POLICY_UNAVAILABLE, EXPECTED_CONTRACT_EVENT_MISSING,
+        EXPECTED_CONTRACT_EVENT_CONFLICT, ORDER_PLACED_EVENT_UNCONFIRMED,
+        ORDER_CANCELLED_EVENT_UNCONFIRMED, ORDER_ID_CONFIRMATION_UNAVAILABLE,
+        ORDER_ID_MISMATCH, TRANSACTION_REORG_DETECTED,
+        RECEIPT_OBSERVATION_UNSTABLE, CONFIRMATION_MONITOR_TIMEOUT,
+        CONFIRMATION_PERSISTENCE_UNAVAILABLE,
         SUBMISSION_DETERMINISTIC_REJECTION,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
@@ -468,6 +496,10 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "validate_submission_preconditions": "submission", "persist_submission_started": "submission",
         "enforce_single_submission_attempt": "submission", "verify_rpc_transaction_hash": "submission",
         "classify_submission_outcome": "submission",
+        "transaction_receipt_model": "receipt", "transaction_receipt_reader_protocol": "receipt",
+        "normalize_transaction_receipt": "receipt", "validate_canonical_block": "receipt", "calculate_confirmation_depth": "receipt",
+        "validate_order_placed_event": "receipt", "validate_order_cancelled_event": "receipt", "detect_transaction_reorg": "receipt",
+        "persist_transaction_confirmation": "journal",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -478,7 +510,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "signer_address_discovery": "signing",
         "production_bound_signer": "signed_transaction", "persist_raw_signed_transaction": "signed_transaction",
         "production_raw_transaction_submitter": "submission", "automatic_submission_retry": "submission",
-        "transaction_replacement": "submission", "receipt_lookup": "receipt", "receipt_polling": "receipt",
+        "transaction_replacement": "submission", "receipt_lookup": "receipt", "validate_reduce_event": "receipt",
         "revalidate_nonce_live": "journal", "externally_lock_nonce": "journal",
     }
     partial = {
@@ -489,6 +521,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "revalidate_pending_nonce_live": "signing_lease", "acquire_signing_lease": "signing_lease",
         "decode_signed_transaction": "signed_transaction", "recover_signed_transaction_sender": "signed_transaction",
         "recover_submission_by_hash": "submission",
+        "observe_transaction_confirmation_once": "receipt", "monitor_transaction_confirmation": "receipt", "receipt_polling": "receipt",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())
