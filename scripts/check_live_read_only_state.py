@@ -42,6 +42,10 @@ from bot.execution.dreamdex_transaction_envelope import (
     build_transaction_type_policy_evidence,
     describe_transaction_envelope_capabilities,
 )
+from bot.execution.dreamdex_transaction_lifecycle import (
+    create_prepared_lifecycle,
+    describe_transaction_lifecycle_capabilities,
+)
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -330,6 +334,31 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
     print("  envelope ready for submission: NO")
     print("  envelope raw calldata output allowed: NO")
     print("  envelope blockers: transaction_envelope_unavailable; transaction_type_policy_unresolved; transaction_nonce_unresolved; transaction_gas_unresolved; transaction_fees_unresolved; transaction_envelope_non_authoritative")
+    lifecycle_capabilities = describe_transaction_lifecycle_capabilities()
+    lifecycle_default = create_prepared_lifecycle(None)
+    print("  transaction lifecycle model: available_offline")
+    print(f"  prepared lifecycle builder: {lifecycle_capabilities['create_prepared_lifecycle']}")
+    print(f"  external submission import: {lifecycle_capabilities['import_external_submission']}")
+    print(f"  receipt evidence validation: {lifecycle_capabilities['validate_receipt_evidence']}")
+    print(f"  event evidence validation: {lifecycle_capabilities['validate_event_evidence']}")
+    print(f"  lifecycle transition validation: {lifecycle_capabilities['validate_state_transition']}")
+    print(f"  receipt fetch capability: {lifecycle_capabilities['fetch_receipt']}")
+    print(f"  log fetch capability: {lifecycle_capabilities['fetch_logs']}")
+    print(f"  replacement detection capability: {lifecycle_capabilities['detect_replacement_live']}")
+    print(f"  confirmation wait capability: {lifecycle_capabilities['wait_for_confirmations']}")
+    print("  transaction hash: <missing>")
+    print(f"  lifecycle state: {lifecycle_default.current_state}")
+    print("  receipt confirmation: unavailable")
+    print("  required event confirmation: unavailable")
+    print("  order ID confirmation: unavailable")
+    print("  lifecycle authoritative: NO")
+    print("  lifecycle reconciliation: incomplete")
+    print("  raw receipt output allowed: NO")
+    print("  raw event output allowed: NO")
+    print("  lifecycle blockers: transaction_submission_evidence_unavailable; transaction_receipt_evidence_unavailable; transaction_event_evidence_unavailable; transaction_lifecycle_non_authoritative; order_id_lifecycle_unconfirmed")
+    print("  event audit source: packages/core/src/contract.ts")
+    event_fingerprints = dict(audit.vendor_file_fingerprints)
+    print(f"  event audit source fingerprint: {event_fingerprints.get('packages/core/src/contract.ts', 'unavailable')}")
     print(f"  transaction sender: {_masked(audit.identity.transaction_sender_address)}")
     print(f"  contract order owner subject: {audit.identity.contract_order_owner_subject}")
     print(f"  vault owner subject: {audit.identity.vault_owner_subject}")
@@ -360,7 +389,15 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
     print("  transaction signer capability: unavailable")
     print(f"  direct execution authoritative: {'YES' if audit.authoritative else 'NO'}")
     print(f"  unresolved reasons: {', '.join(audit.unresolved_reasons) or 'none'}")
-    return direct_owner_blocking_reasons(audit, binding=binding)
+    lifecycle_blockers = (
+        "transaction_submission_evidence_unavailable",
+        "transaction_receipt_evidence_unavailable",
+        "transaction_event_evidence_unavailable",
+        "transaction_lifecycle_non_authoritative",
+        "transaction_replacement_status_unavailable",
+        "order_id_lifecycle_unconfirmed",
+    )
+    return tuple(dict.fromkeys((*direct_owner_blocking_reasons(audit, binding=binding), *lifecycle_blockers)))
 
 
 def _print_market_trading_rules(market) -> None:

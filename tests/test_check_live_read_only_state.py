@@ -102,6 +102,19 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "envelope ready for signing: NO" in output
     assert "envelope ready for submission: NO" in output
     assert "envelope raw calldata output allowed: NO" in output
+    assert "transaction lifecycle model: available_offline" in output
+    assert "prepared lifecycle builder: available_offline" in output
+    assert "external submission import: available_offline" in output
+    assert "receipt evidence validation: available_offline" in output
+    assert "event evidence validation: available_offline" in output
+    assert "receipt fetch capability: unavailable" in output
+    assert "log fetch capability: unavailable" in output
+    assert "transaction hash: <missing>" in output
+    assert "lifecycle state: unavailable" in output
+    assert "lifecycle authoritative: NO" in output
+    assert "lifecycle reconciliation: incomplete" in output
+    assert "raw receipt output allowed: NO" in output
+    assert "raw event output allowed: NO" in output
     assert "operator_permission_unavailable" not in output.split("Hypothetical trading blocked reason:", 1)[1].split("\n", 1)[0]
 
 
