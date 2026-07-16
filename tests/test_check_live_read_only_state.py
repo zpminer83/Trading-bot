@@ -73,6 +73,13 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "Fill/order correlation status: unavailable" in output
     assert "Account-correlated fills authoritative: NO" in output
     assert "authenticated_account_state_unavailable" in output
+    assert "DIRECT OWNER EXECUTION MODEL:" in output
+    assert "selected execution mode: direct_owner" in output
+    assert "operator mode active: NO" in output
+    assert "transaction signer capability: unavailable" in output
+    assert "direct execution authoritative: NO" in output
+    assert "direct_order_transport_unconfirmed" in output
+    assert "operator_permission_unavailable" not in output.split("Hypothetical trading blocked reason:", 1)[1].split("\n", 1)[0]
 
 
 def test_cli_prints_platform_roles_and_identity_binding_without_authorizing(monkeypatch, capsys):

@@ -937,7 +937,9 @@ def build_authority_evidence(*, pool: str | None = None, owner: str | None = Non
     )
 
 
-def operator_blocking_reasons(*, configuration: OperatorConfiguration | None = None, matrix: DreamDexOperatorCapabilityMatrix | None = None, authority: DreamDexOperatorAuthorityEvidence | None = None, parity: PythonParityAudit | None = None) -> tuple[str, ...]:
+def operator_blocking_reasons(*, configuration: OperatorConfiguration | None = None, matrix: DreamDexOperatorCapabilityMatrix | None = None, authority: DreamDexOperatorAuthorityEvidence | None = None, parity: PythonParityAudit | None = None, selected_mode: str = "operator") -> tuple[str, ...]:
+    if selected_mode == "direct_owner":
+        return ()
     reasons: list[str] = []
     if configuration is None or not configuration.operator_configured or not configuration.fund_owner_configured:
         reasons.append("operator_identity_mapping_unresolved")

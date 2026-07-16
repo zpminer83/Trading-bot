@@ -25,6 +25,7 @@ from bot.integrations.dreamdex_operator_permissions import (
 )
 from bot.integrations.dreamdex_siwe_http_transport import build_siwe_http_transport_from_env
 from bot.integrations.dreamdex_siwe_signer import build_production_siwe_signer_from_env, resolve_auth_mode
+from bot.execution.dreamdex_direct_order_encoding import audit_direct_owner_vendor, build_direct_owner_identity, direct_owner_blocking_reasons
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -200,6 +201,57 @@ def _print_operator_session_model(account, market) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reasons))
 
 
+def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
+    """Print source-backed direct-owner semantics without enabling execution."""
+    audit = audit_direct_owner_vendor()
+    identity = build_direct_owner_identity(
+        contest_login_address=getattr(account, "owner_address", None),
+        configured_owner_address=getattr(account, "owner_address", None),
+        platform_trading_address=getattr(account, "trading_address", None),
+        authenticated_api_subject=getattr(getattr(account, "authenticated", None), "authenticated_subject", None),
+    )
+    print("DIRECT OWNER EXECUTION MODEL:")
+    print(f"  selected execution mode: {audit.selected_mode}")
+    print(f"  operator mode active: {'YES' if audit.operator_mode_active else 'NO'}")
+    print(f"  vendor snapshot status: {'source_confirmed' if audit.vendor_files else 'unavailable'}")
+    print(f"  vendor audited files: {len(audit.vendor_files)}")
+    print(f"  vendor audit fingerprint: {audit.vendor_fingerprint}")
+    print(f"  contest login wallet: {_masked(identity.contest_login_address)}")
+    print(f"  platform trading wallet: {_masked(identity.platform_trading_address)}")
+    print(f"  transaction signer role: {identity.transaction_signer_role}")
+    print(f"  transaction sender: {_masked(audit.identity.transaction_sender_address)}")
+    print(f"  contract order owner subject: {audit.identity.contract_order_owner_subject}")
+    print(f"  vault owner subject: {audit.identity.vault_owner_subject}")
+    print(f"  Smart Wallet semantics: {audit.smart_wallet_semantics}")
+    print(f"  owner/Smart Wallet mapping: {identity.mapping_status}")
+    print(f"  native value semantics: {audit.native_value_semantics}")
+    for operation in audit.operations:
+        label = operation.operation.replace("_", " ")
+        print(f"  {label} transport: {operation.transport}")
+        print(f"  {label} target: {getattr(market, 'pool_address', None) or operation.target}")
+        print(f"  {label} method: {operation.method or 'unavailable'}")
+        print(f"  {label} selector: {operation.selector or 'unavailable'}")
+        print(f"  {label} signer required: {operation.signer_requirement}")
+        print(f"  {label} native value: {operation.value_requirement}")
+        print(f"  {label} receipt confirmation: {operation.receipt_requirement}")
+        if operation.operation in {"place_order", "cancel_order", "reduce_order"}:
+            print(f"  {label} transaction from: {operation.from_semantics}")
+            print(f"  {label} chain ID semantics: {operation.chain_id_semantics}")
+            print(f"  {label} nonce semantics: {operation.nonce_semantics}")
+            print(f"  {label} gas policy: {operation.gas_policy}")
+            print(f"  {label} fee fields: {operation.fee_fields}")
+            print(f"  {label} revert handling: {operation.revert_handling}")
+            print(f"  {label} replacement behavior: {operation.replacement_behavior}")
+            print(f"  {label} timeout behavior: {operation.timeout_behavior}")
+    print(f"  order ID source: {audit.order_id_source}")
+    print("  receipt event semantics: OrderPlaced/OrderCancelled topics are source-confirmed")
+    print("  SIWE signer sufficient for orders: NO")
+    print("  transaction signer capability: unavailable")
+    print(f"  direct execution authoritative: {'YES' if audit.authoritative else 'NO'}")
+    print(f"  unresolved reasons: {', '.join(audit.unresolved_reasons) or 'none'}")
+    return direct_owner_blocking_reasons(audit)
+
+
 def _print_market_trading_rules(market) -> None:
     rules = getattr(market, "trading_rules", None)
     print("MARKET TRADING RULES:")
@@ -363,7 +415,8 @@ def _print_report(snapshot, report, validation) -> None:
     _print_address_diagnostics("OWNER/LOGIN", snapshot.owner_diagnostics, account.owner_address or account.account_identifier)
     _print_address_diagnostics("TRADING/SMART", snapshot.trading_diagnostics, account.trading_address)
     _print_identity_binding_evidence(account.identity_binding_evidence)
-    operator_reasons = _print_operator_session_model(account, market)
+    _print_operator_session_model(account, market)
+    direct_owner_reasons = _print_direct_owner_execution_model(account, market)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
     best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
@@ -451,7 +504,9 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")
     blocked_reason = report.reason if report.trading_blocked else ", ".join(validation.reasons) or "none"
     if report.trading_blocked:
-        blocked_reason = ";".join(dict.fromkeys([item for item in [blocked_reason, *operator_reasons] if item]))
+        blocked_reason = ";".join(dict.fromkeys([item for item in [blocked_reason, *direct_owner_reasons, "direct_order_transport_unconfirmed", "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable"] if item]))
+    else:
+        blocked_reason = ";".join(dict.fromkeys([blocked_reason, *direct_owner_reasons]))
     print(f"Hypothetical trading blocked reason: {blocked_reason}")
     print(f"Dry-run approved: {'YES' if validation.approved else 'NO'}")
     print(f"Dry-run reasons: {', '.join(validation.reasons) or 'none'}")
