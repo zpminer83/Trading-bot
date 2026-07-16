@@ -600,8 +600,8 @@ def build_direct_signer_binding_evidence(
     if status in {"unconfigured", "invalid"}:
         reasons.append("direct_signer_address_unconfigured" if status == "unconfigured" else "direct_signer_address_invalid")
     reasons.extend(("direct_signer_key_unavailable", "direct_signer_binding_non_authoritative", "direct_transaction_transport_unimplemented"))
-    if trace.python_parity_status != "confirmed":
-        reasons.append("python_direct_execution_unsupported")
+    # Partial source parity is diagnostic only.  It is not an active blocker
+    # because the selected architecture is not required to be Python-native.
     conflicts: list[str] = []
     compatibility = "unresolved"
     if status == "user_declared":
@@ -649,7 +649,7 @@ build_direct_signer_binding = build_direct_signer_binding_evidence
 def direct_owner_blocking_reasons(audit: DirectOwnerExecutionAudit | None = None, *, binding: DreamDexDirectSignerBindingEvidence | None = None) -> tuple[str, ...]:
     audit = audit or audit_direct_owner_vendor()
     binding = binding or build_direct_signer_binding_evidence()
-    return tuple(dict.fromkeys((*audit.unresolved_reasons, *binding.unresolved_reasons, "direct_owner_execution_mapping_unresolved", "direct_order_transport_unconfirmed", "transaction_signer_unavailable", "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable")))
+    return tuple(dict.fromkeys((*audit.unresolved_reasons, *binding.unresolved_reasons, "direct_owner_execution_mapping_unresolved", "transaction_signer_unavailable", "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable")))
 
 
 def build_direct_owner_identity(*, contest_login_address: str | None = None, configured_owner_address: str | None = None, platform_trading_address: str | None = None, authenticated_api_subject: str | None = None) -> DreamDexDirectOwnerExecutionIdentity:

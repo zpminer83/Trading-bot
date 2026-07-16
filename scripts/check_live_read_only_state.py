@@ -248,6 +248,8 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
     print(f"  Smart Wallet used in signing path: {'YES' if safe_binding['smart_wallet_used_in_signing_path'] is True else ('NO' if safe_binding['smart_wallet_used_in_signing_path'] is False else 'unresolved')}")
     print(f"  TypeScript direct support: source_confirmed")
     print(f"  Python direct support: {safe_binding['python_parity_status']}")
+    if safe_binding["python_parity_status"] == "partial":
+        print("  Python direct diagnostic: python_direct_execution_partial (informational)")
     print(f"  TypeScript/Python parity: {safe_binding['python_parity_status']}")
     print(f"  required signer capabilities: {', '.join(requirements.capabilities)}")
     print(f"  source trace status: {safe_binding['source_trace_status']}")
@@ -552,7 +554,7 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")
     blocked_reason = report.reason if report.trading_blocked else ", ".join(validation.reasons) or "none"
     if report.trading_blocked:
-        blocked_reason = ";".join(dict.fromkeys([item for item in [blocked_reason, *direct_owner_reasons, "direct_order_transport_unconfirmed", "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable"] if item]))
+        blocked_reason = ";".join(dict.fromkeys([item for item in [blocked_reason, *direct_owner_reasons, "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable"] if item]))
     else:
         blocked_reason = ";".join(dict.fromkeys([blocked_reason, *direct_owner_reasons]))
     print(f"Hypothetical trading blocked reason: {blocked_reason}")

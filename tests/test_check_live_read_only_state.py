@@ -78,7 +78,8 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "operator mode active: NO" in output
     assert "transaction signer capability: unavailable" in output
     assert "direct execution authoritative: NO" in output
-    assert "direct_order_transport_unconfirmed" in output
+    assert "direct_order_transport_unconfirmed" not in output.split("Hypothetical trading blocked reason:", 1)[1].split("\n", 1)[0]
+    assert "python_direct_execution_partial" in output
     assert "operator_permission_unavailable" not in output.split("Hypothetical trading blocked reason:", 1)[1].split("\n", 1)[0]
 
 

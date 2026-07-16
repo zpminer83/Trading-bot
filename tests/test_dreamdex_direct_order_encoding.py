@@ -12,6 +12,7 @@ from bot.execution.dreamdex_direct_order_encoding import (
     build_direct_owner_identity,
     build_direct_signer_binding_evidence,
     build_direct_transaction_signer_requirements,
+    direct_owner_blocking_reasons,
     build_place_order_call_preview,
     build_reduce_order_call_preview,
     compute_safe_calldata_fingerprint,
@@ -227,3 +228,14 @@ def test_direct_transaction_signer_requirements_are_separate_from_siwe():
     assert set(("direct_place_transaction", "direct_cancel_transaction", "direct_reduce_transaction")) == set(requirements.capabilities)
     assert requirements.receipt_access_required is True
     assert requirements.production_status == "unavailable"
+
+
+def test_partial_python_support_and_confirmed_transport_are_not_stale_blockers():
+    binding = build_direct_signer_binding_evidence(environ={})
+    reasons = direct_owner_blocking_reasons(binding=binding)
+    assert binding.python_parity_status == "partial"
+    assert "python_direct_execution_unsupported" not in reasons
+    assert "direct_order_transport_unconfirmed" not in reasons
+    assert "direct_transaction_transport_unimplemented" in reasons
+    assert "direct_signer_key_unavailable" in reasons
+    assert "direct_signer_binding_non_authoritative" in reasons
