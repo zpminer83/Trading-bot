@@ -46,6 +46,11 @@ from bot.execution.dreamdex_transaction_lifecycle import (
     create_prepared_lifecycle,
     describe_transaction_lifecycle_capabilities,
 )
+from bot.execution.dreamdex_order_reconciliation import (
+    build_order_reconciliation_graph,
+    build_order_reconciliation_preview,
+    describe_order_reconciliation_capabilities,
+)
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -431,6 +436,45 @@ def _print_market_trading_rules(market) -> None:
         print(f"    list lengths: {', '.join(f'{name}={length}' for name, length in fingerprint.list_lengths) or 'none'}")
 
 
+def _print_order_reconciliation_graph() -> tuple[str, ...]:
+    """Print the empty production-default graph without importing live evidence."""
+    capabilities = describe_order_reconciliation_capabilities()
+    graph = build_order_reconciliation_graph()
+    preview = build_order_reconciliation_preview(graph)
+    print("ORDER RECONCILIATION GRAPH:")
+    print("  reconciliation graph model: available_offline")
+    print(f"  graph builder: {capabilities['build_reconciliation_graph']}")
+    print(f"  graph validation: {capabilities['validate_reconciliation_graph']}")
+    print(f"  request/envelope correlation: {capabilities['correlate_request_envelope']}")
+    print(f"  lifecycle correlation: {capabilities['correlate_transaction_lifecycle']}")
+    print(f"  order metadata correlation: {capabilities['correlate_order_metadata']}")
+    print(f"  authenticated order correlation: {capabilities['correlate_authenticated_orders']}")
+    print(f"  on-chain fill correlation: {capabilities['correlate_onchain_fills']}")
+    print("  graph fingerprint: unavailable")
+    print(f"  root transaction hash: {preview.transaction_hash_masked}")
+    print(f"  root order ID: {preview.order_id_status}")
+    print(f"  graph node count: {preview.node_count}")
+    print(f"  graph edge count: {preview.edge_count}")
+    print(f"  confirmed edges: {preview.confirmed_edges}")
+    print(f"  partial edges: {preview.partial_edges}")
+    print(f"  mismatch edges: {preview.mismatched_edges}")
+    print(f"  unavailable edges: {preview.unavailable_edges}")
+    print(f"  account match: {preview.account_match_status}")
+    print(f"  market match: {preview.market_match_status}")
+    print(f"  lifecycle link: {preview.lifecycle_status}")
+    print(f"  metadata link: {preview.metadata_status}")
+    print(f"  authenticated current-state link: {preview.authenticated_order_status}")
+    print(f"  fill coverage: {preview.fills_status}")
+    print("  replacement status: unavailable")
+    print("  reorg status: unavailable")
+    print(f"  graph authoritative: {'YES' if preview.authoritative else 'NO'}")
+    print(f"  graph reconciliation status: {preview.reconciliation_status}")
+    print(f"  reconciliation complete: {'YES' if graph.reconciliation_complete else 'NO'}")
+    print("  raw evidence output allowed: NO")
+    print(f"  graph blockers: {'; '.join(graph.blockers) or 'none'}")
+    return graph.blockers
+
+
 def _print_authentication_state(account) -> None:
     snapshot = getattr(account, "auth_snapshot", None)
     print("AUTHENTICATION STATE:")
@@ -565,6 +609,7 @@ def _print_report(snapshot, report, validation) -> None:
     _print_identity_binding_evidence(account.identity_binding_evidence)
     _print_operator_session_model(account, market)
     direct_owner_reasons = _print_direct_owner_execution_model(account, market)
+    graph_blockers = _print_order_reconciliation_graph()
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
     best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
@@ -652,9 +697,9 @@ def _print_report(snapshot, report, validation) -> None:
     print(f"Hypothetical trading blocked: {'YES' if report.trading_blocked else 'NO'}")
     blocked_reason = report.reason if report.trading_blocked else ", ".join(validation.reasons) or "none"
     if report.trading_blocked:
-        blocked_reason = ";".join(dict.fromkeys([item for item in [blocked_reason, *direct_owner_reasons, "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable"] if item]))
+        blocked_reason = ";".join(dict.fromkeys([item for item in [blocked_reason, *direct_owner_reasons, *graph_blockers, "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable"] if item]))
     else:
-        blocked_reason = ";".join(dict.fromkeys([blocked_reason, *direct_owner_reasons]))
+        blocked_reason = ";".join(dict.fromkeys([blocked_reason, *direct_owner_reasons, *graph_blockers]))
     print(f"Hypothetical trading blocked reason: {blocked_reason}")
     print(f"Dry-run approved: {'YES' if validation.approved else 'NO'}")
     print(f"Dry-run reasons: {', '.join(validation.reasons) or 'none'}")

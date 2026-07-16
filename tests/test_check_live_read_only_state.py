@@ -103,6 +103,11 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "envelope ready for submission: NO" in output
     assert "envelope raw calldata output allowed: NO" in output
     assert "transaction lifecycle model: available_offline" in output
+    assert "ORDER RECONCILIATION GRAPH:" in output
+    assert "graph builder: available_offline" in output
+    assert "graph reconciliation status: unavailable" in output
+    assert "graph authoritative: NO" in output
+    assert "raw evidence output allowed: NO" in output
     assert "prepared lifecycle builder: available_offline" in output
     assert "external submission import: available_offline" in output
     assert "receipt evidence validation: available_offline" in output
