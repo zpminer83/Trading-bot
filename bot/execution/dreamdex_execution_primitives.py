@@ -118,6 +118,12 @@ class DreamDexExecutionBlockers:
     TRANSACTION_GAS_UNRESOLVED = "transaction_gas_unresolved"
     TRANSACTION_FEES_UNRESOLVED = "transaction_fees_unresolved"
     TRANSACTION_SUBMISSION_UNAVAILABLE = "transaction_submission_unavailable"
+    TRANSACTION_SIGNING_POLICY_UNAVAILABLE = "transaction_signing_policy_unavailable"
+    TRANSACTION_SIGNER_IMPLEMENTATION_UNAVAILABLE = "transaction_signer_implementation_unavailable"
+    TRANSACTION_SIGNING_REQUEST_UNAVAILABLE = "transaction_signing_request_unavailable"
+    TRANSACTION_SIGNING_POLICY_REJECTED = "transaction_signing_policy_rejected"
+    TRANSACTION_FEE_LIMIT_UNRESOLVED = "transaction_fee_limit_unresolved"
+    TRANSACTION_VALUE_LIMIT_UNRESOLVED = "transaction_value_limit_unresolved"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -133,7 +139,10 @@ class DreamDexExecutionBlockers:
         TRANSACTION_REPLACEMENT_STATUS_UNAVAILABLE, TRANSACTION_ENVELOPE_UNAVAILABLE,
         TRANSACTION_TYPE_POLICY_UNRESOLVED, TRANSACTION_NONCE_UNRESOLVED,
         TRANSACTION_GAS_UNRESOLVED, TRANSACTION_FEES_UNRESOLVED,
-        TRANSACTION_SUBMISSION_UNAVAILABLE,
+        TRANSACTION_SUBMISSION_UNAVAILABLE, TRANSACTION_SIGNING_POLICY_UNAVAILABLE,
+        TRANSACTION_SIGNER_IMPLEMENTATION_UNAVAILABLE, TRANSACTION_SIGNING_REQUEST_UNAVAILABLE,
+        TRANSACTION_SIGNING_POLICY_REJECTED, TRANSACTION_FEE_LIMIT_UNRESOLVED,
+        TRANSACTION_VALUE_LIMIT_UNRESOLVED,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -319,6 +328,9 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "adapt_onchain_fills": "reconciliation", "build_evidence_bundle": "reconciliation",
         "build_graphs_from_bundle": "reconciliation", "build_bridge_preview": "reconciliation",
         "serialize_bridge_diagnostics": "reconciliation",
+        "validate_signing_policy": "signing", "build_signing_request": "signing",
+        "validate_signing_request": "signing", "build_signing_preview": "signing",
+        "transaction_signer_protocol": "signing",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -326,6 +338,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "wait_for_confirmations": "receipt", "fetch_authenticated_orders": "authentication", "fetch_fills_live": "authentication",
         "fetch_order_metadata_live": "authentication", "fetch_onchain_fills_live": "authentication",
         "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
+        "signer_address_discovery": "signing",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.UNAVAILABLE.value, layer, source_status="unavailable", blocking=True, unresolved_reasons=("capability_unavailable",)) for name, layer in unavailable.items())

@@ -60,6 +60,12 @@ from bot.execution.dreamdex_reconciliation_bridge import (
     build_reconciliation_bridge_preview,
     describe_reconciliation_bridge_capabilities,
 )
+from bot.execution.dreamdex_transaction_signer import (
+    UnavailableDreamDexTransactionSigner,
+    DreamDexTransactionSigningPolicy,
+    build_transaction_signing_preview,
+)
+from bot.execution.dreamdex_execution_primitives import mask_evm_address
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
@@ -713,6 +719,39 @@ def _orderbook_timestamp(book) -> datetime | None:
         return None
 
 
+def _print_transaction_signer_boundary() -> None:
+    """Print the offline signer policy boundary without constructing a request."""
+    policy = DreamDexTransactionSigningPolicy()
+    signer = UnavailableDreamDexTransactionSigner()
+    preview = build_transaction_signing_preview(policy=policy, signer=signer)
+    print("TRANSACTION SIGNER BOUNDARY:")
+    print("  signer boundary model: available_offline")
+    print("  signing policy validation: available_offline")
+    print("  signing request builder: available_offline")
+    print("  signer protocol: available_offline")
+    print("  signer implementation: unavailable")
+    print("  signer address: <missing>")
+    print("  signer address match: unresolved")
+    print(f"  allowed chain ID: {policy.required_chain_id}")
+    print(f"  allowed target: {', '.join(mask_evm_address(v) for v in policy.allowed_target_addresses)}")
+    print(f"  allowed operations: {', '.join(policy.allowed_operations)}")
+    print(f"  allowed selectors: {', '.join(selector for _, selector in policy.allowed_selectors)}")
+    print(f"  native value upper bound: {policy.maximum_native_value_wei if policy.maximum_native_value_wei is not None else 'unavailable'}")
+    print(f"  gas limit upper bound: {policy.maximum_gas_limit if policy.maximum_gas_limit is not None else 'unavailable'}")
+    print(f"  total fee upper bound: {policy.maximum_total_fee_wei if policy.maximum_total_fee_wei is not None else 'unavailable'}")
+    print("  envelope available: NO")
+    print("  envelope structurally valid: NO")
+    print("  signing policy compliant: NO")
+    print("  signer invocation allowed: NO")
+    print("  transaction signing capability: unavailable")
+    print("  signed transaction serialization: unavailable")
+    print("  submission capability: unavailable")
+    print("  raw calldata output allowed: NO")
+    print("  raw signed transaction output allowed: NO")
+    print("  signer boundary authoritative: NO")
+    print("  signer boundary blockers: transaction_signer_implementation_unavailable, transaction_signing_request_unavailable, transaction_signer_address_unresolved, transaction_fee_limit_unresolved, transaction_value_limit_unresolved")
+
+
 def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
@@ -733,6 +772,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     direct_owner_reasons = _print_direct_owner_execution_model(account, market)
     graph_blockers = _print_order_reconciliation_graph()
     _print_execution_pipeline_summary()
+    _print_transaction_signer_boundary()
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])

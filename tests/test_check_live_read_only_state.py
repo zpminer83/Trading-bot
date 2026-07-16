@@ -104,6 +104,22 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "envelope ready for submission: NO" in output
     assert "envelope raw calldata output allowed: NO" in output
     assert "transaction lifecycle model: available_offline" in output
+    assert "TRANSACTION SIGNER BOUNDARY:" in output
+    assert "signer boundary model: available_offline" in output
+    assert "signing policy validation: available_offline" in output
+    assert "signing request builder: available_offline" in output
+    assert "signer protocol: available_offline" in output
+    assert "signer implementation: unavailable" in output
+    assert "signer address: <missing>" in output
+    assert "allowed chain ID: 5031" in output
+    assert "envelope available: NO" in output
+    assert "signing policy compliant: NO" in output
+    assert "signer invocation allowed: NO" in output
+    assert "transaction signing capability: unavailable" in output
+    assert "signed transaction serialization: unavailable" in output
+    assert "submission capability: unavailable" in output
+    assert "raw signed transaction output allowed: NO" in output
+    assert "signer boundary authoritative: NO" in output
     assert "ORDER RECONCILIATION GRAPH:" in output
     assert "READ-ONLY RECONCILIATION EVIDENCE BRIDGE:" in output
     assert "bridge enabled: NO" in output
