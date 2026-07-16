@@ -171,6 +171,22 @@ class DreamDexExecutionBlockers:
     SIGNING_LEASE_ENVELOPE_MISMATCH = "signing_lease_envelope_mismatch"
     SIGNING_LEASE_REQUEST_MISMATCH = "signing_lease_request_mismatch"
     SIGNING_LEASE_REQUEST_NOT_READY = "signing_lease_request_not_ready"
+    BOUND_TRANSACTION_SIGNER_UNAVAILABLE = "bound_transaction_signer_unavailable"
+    SIGNED_TRANSACTION_DECODER_UNAVAILABLE = "signed_transaction_decoder_unavailable"
+    SIGNED_TRANSACTION_MALFORMED = "signed_transaction_malformed"
+    SIGNED_TRANSACTION_SENDER_MISMATCH = "signed_transaction_sender_mismatch"
+    SIGNED_TRANSACTION_CHAIN_MISMATCH = "signed_transaction_chain_mismatch"
+    SIGNED_TRANSACTION_NONCE_MISMATCH = "signed_transaction_nonce_mismatch"
+    SIGNED_TRANSACTION_TARGET_MISMATCH = "signed_transaction_target_mismatch"
+    SIGNED_TRANSACTION_VALUE_MISMATCH = "signed_transaction_value_mismatch"
+    SIGNED_TRANSACTION_GAS_MISMATCH = "signed_transaction_gas_mismatch"
+    SIGNED_TRANSACTION_FEE_MISMATCH = "signed_transaction_fee_mismatch"
+    SIGNED_TRANSACTION_CALLDATA_MISMATCH = "signed_transaction_calldata_mismatch"
+    SIGNED_TRANSACTION_SELECTOR_MISMATCH = "signed_transaction_selector_mismatch"
+    SIGNED_TRANSACTION_FINGERPRINT_MISMATCH = "signed_transaction_fingerprint_mismatch"
+    SIGNED_TRANSACTION_VERIFICATION_FAILED = "signed_transaction_verification_failed"
+    SIGNED_PAYLOAD_NOT_DURABLY_AVAILABLE = "signed_payload_not_durably_available"
+    SIGNED_TRANSACTION_SUBMISSION_UNAVAILABLE = "signed_transaction_submission_unavailable"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -213,6 +229,14 @@ class DreamDexExecutionBlockers:
         SIGNING_LEASE_INPUT_TYPE_INVALID, SIGNING_LEASE_INTENT_INVALID,
         SIGNING_LEASE_RESERVATION_INVALID, SIGNING_LEASE_ENVELOPE_MISMATCH,
         SIGNING_LEASE_REQUEST_MISMATCH, SIGNING_LEASE_REQUEST_NOT_READY,
+        BOUND_TRANSACTION_SIGNER_UNAVAILABLE, SIGNED_TRANSACTION_DECODER_UNAVAILABLE,
+        SIGNED_TRANSACTION_MALFORMED, SIGNED_TRANSACTION_SENDER_MISMATCH,
+        SIGNED_TRANSACTION_CHAIN_MISMATCH, SIGNED_TRANSACTION_NONCE_MISMATCH,
+        SIGNED_TRANSACTION_TARGET_MISMATCH, SIGNED_TRANSACTION_VALUE_MISMATCH,
+        SIGNED_TRANSACTION_GAS_MISMATCH, SIGNED_TRANSACTION_FEE_MISMATCH,
+        SIGNED_TRANSACTION_CALLDATA_MISMATCH, SIGNED_TRANSACTION_SELECTOR_MISMATCH,
+        SIGNED_TRANSACTION_FINGERPRINT_MISMATCH, SIGNED_TRANSACTION_VERIFICATION_FAILED,
+        SIGNED_PAYLOAD_NOT_DURABLY_AVAILABLE, SIGNED_TRANSACTION_SUBMISSION_UNAVAILABLE,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -410,7 +434,10 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "reserve_nonce_locally": "journal", "enforce_nonce_uniqueness": "journal",
         "validate_state_transition": "journal",
         "signing_lease_model": "signing_lease", "validate_live_nonce_evidence": "signing_lease",
-        "validate_signing_lease": "signing_lease",
+        "validate_signing_lease": "signing_lease", "signing_material_model": "signed_transaction",
+        "bound_transaction_signer_protocol": "signed_transaction", "verify_signed_transaction_fields": "signed_transaction",
+        "verify_signed_transaction_calldata": "signed_transaction", "calculate_signed_transaction_hash": "signed_transaction",
+        "journal_signing_started_transition": "journal", "journal_signed_transition": "journal",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -419,6 +446,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "fetch_order_metadata_live": "authentication", "fetch_onchain_fills_live": "authentication",
         "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
         "signer_address_discovery": "signing",
+        "production_bound_signer": "signed_transaction", "persist_raw_signed_transaction": "signed_transaction",
         "revalidate_nonce_live": "journal", "externally_lock_nonce": "journal",
     }
     partial = {
@@ -427,6 +455,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "check_native_fee_balance": "preflight",
         "recover_execution_state": "journal",
         "revalidate_pending_nonce_live": "signing_lease", "acquire_signing_lease": "signing_lease",
+        "decode_signed_transaction": "signed_transaction", "recover_signed_transaction_sender": "signed_transaction",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())

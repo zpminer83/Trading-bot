@@ -68,6 +68,14 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "live nonce revalidation enabled: NO" in output
     assert "signing lease enabled: NO" in output
     assert "signer invocation allowed: NO" in output
+    assert "SIGNED TRANSACTION VERIFICATION:" in output
+    assert "signing material model: available_offline" in output
+    assert "bound signer protocol: available_offline" in output
+    assert "production signer: unavailable" in output
+    assert "signing session execution performed: NO" in output
+    assert "ephemeral signed payload received: NO" in output
+    assert "signed payload persisted: NO" in output
+    assert "ready for submission: NO" in output
     assert "SIWE HTTP transport configured: NO" in output
     assert "SIWE HTTP transport status: disabled" in output
     assert "auth network attempt performed: NO" in output

@@ -85,6 +85,7 @@ from bot.execution.dreamdex_signing_lease import (
     acquire_signing_lease,
     serialize_signing_lease_diagnostics,
 )
+from bot.execution.dreamdex_signed_transaction import build_signed_transaction_preview
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
@@ -924,6 +925,32 @@ def _print_live_nonce_signing_lease(result=None, *, enabled: bool = False, execu
     print(f"  lease blockers: {', '.join(preview.blockers) or 'none'}")
 
 
+def _print_signed_transaction_verification(*, session_result=None, execution_performed: bool = False) -> None:
+    capabilities = build_execution_capability_matrix()
+    capability = lambda name: capabilities.by_name(name).status
+    preview = build_signed_transaction_preview(session_result)
+    print("SIGNED TRANSACTION VERIFICATION:")
+    print(f"  signing material model: {capability('signing_material_model')}")
+    print(f"  bound signer protocol: {capability('bound_transaction_signer_protocol')}")
+    print(f"  production signer: {capability('production_bound_signer')}")
+    print(f"  signing session execution performed: {'YES' if execution_performed else 'NO'}")
+    print(f"  signer invocation performed: {'YES' if preview.signer_invocation_performed else 'NO'}")
+    print(f"  ephemeral signed payload received: {'YES' if preview.signed_payload_received else 'NO'}")
+    print(f"  signed payload persisted: {'YES' if preview.signed_payload_persisted else 'NO'}")
+    print(f"  signed transaction decoder: {capability('decode_signed_transaction')}")
+    print(f"  sender recovery: {capability('recover_signed_transaction_sender')}")
+    print(f"  independent field verification: {capability('verify_signed_transaction_fields')}")
+    print(f"  transaction hash calculation: {capability('calculate_signed_transaction_hash')}")
+    print(f"  journal signing-started transition: {capability('journal_signing_started_transition')}")
+    print(f"  journal signed transition: {capability('journal_signed_transition')}")
+    print(f"  signed artifact available: {'YES' if preview.signed_artifact_available else 'NO'}")
+    print("  raw signed transaction output allowed: NO")
+    print("  raw signature output allowed: NO")
+    print("  ready for submission: NO")
+    print(f"  submission capability: {capability('submit_transaction')}")
+    print(f"  verification blockers: {', '.join(preview.blockers) or 'none'}")
+
+
 def build_live_transaction_preflight_policy(environ: Mapping[str, str]) -> DreamDexTransactionPreflightPolicy:
     """Read CLI-only settings; the production preflight module reads no env."""
     values = {
@@ -1007,7 +1034,7 @@ def _print_live_transaction_preflight(result=None, *, enabled: bool = False, exe
     print(f"  preflight blockers: {', '.join(preview.blockers) or 'none'}")
 
 
-def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None, journal_snapshot=None, journal_enabled: bool = False, journal_execution_performed: bool = False, journal_path_configured: bool = False, lease_result=None, lease_enabled: bool = False, lease_execution_performed: bool = False, lease_policy: DreamDexLiveNonceRevalidationPolicy | None = None) -> None:
+def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None, journal_snapshot=None, journal_enabled: bool = False, journal_execution_performed: bool = False, journal_path_configured: bool = False, lease_result=None, lease_enabled: bool = False, lease_execution_performed: bool = False, lease_policy: DreamDexLiveNonceRevalidationPolicy | None = None, signing_session_result=None, signing_session_execution_performed: bool = False) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
@@ -1031,6 +1058,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_live_transaction_preflight(preflight_result, enabled=preflight_enabled, execution_performed=preflight_execution_performed, rpc_configured=preflight_rpc_configured, policy=preflight_policy)
     _print_durable_execution_journal(journal_snapshot, enabled=journal_enabled, execution_performed=journal_execution_performed, path_configured=journal_path_configured)
     _print_live_nonce_signing_lease(lease_result, enabled=lease_enabled, execution_performed=lease_execution_performed, rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), policy=lease_policy)
+    _print_signed_transaction_verification(session_result=signing_session_result, execution_performed=signing_session_execution_performed)
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
@@ -1141,6 +1169,7 @@ def main() -> int:
         _print_live_transaction_preflight(None, enabled=False, execution_performed=False, rpc_configured=False)
         _print_durable_execution_journal(None, enabled=False, execution_performed=False, path_configured=False)
         _print_live_nonce_signing_lease(None, enabled=False, execution_performed=False, rpc_configured=False)
+        _print_signed_transaction_verification(session_result=None, execution_performed=False)
         print("Real submission enabled: NO")
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
@@ -1213,7 +1242,7 @@ def main() -> int:
         # Consequently enabling the flag without an explicit typed envelope is
         # a safe, observable no-op and performs zero preflight RPC calls.
         preflight_result = execute_live_transaction_preflight(None, os.environ)
-        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy, journal_snapshot=journal_snapshot, journal_enabled=journal_enabled, journal_execution_performed=journal_execution_performed, journal_path_configured=journal_path_configured, lease_result=lease_result, lease_enabled=lease_enabled, lease_execution_performed=lease_execution_performed, lease_policy=lease_policy)
+        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy, journal_snapshot=journal_snapshot, journal_enabled=journal_enabled, journal_execution_performed=journal_execution_performed, journal_path_configured=journal_path_configured, lease_result=lease_result, lease_enabled=lease_enabled, lease_execution_performed=lease_execution_performed, lease_policy=lease_policy, signing_session_result=None, signing_session_execution_performed=False)
         return 0
     except Exception as exc:
         print("READ-ONLY ACCOUNT CHECK")

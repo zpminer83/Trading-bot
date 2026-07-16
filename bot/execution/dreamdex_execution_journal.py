@@ -69,7 +69,7 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     JournalState.PREFLIGHT_VALIDATED.value: frozenset({"nonce_reserved", "cancelled_before_signing", "failed_pre_submission", "recovery_required"}),
     JournalState.NONCE_RESERVED.value: frozenset({"signing_review_ready", "cancelled_before_signing", "recovery_required"}),
     JournalState.SIGNING_REVIEW_READY.value: frozenset({"cancelled_before_signing", "signing_lease_acquired", "recovery_required"}),
-    JournalState.SIGNING_LEASE_ACQUIRED.value: frozenset({"cancelled_before_signing", "recovery_required"}),
+    JournalState.SIGNING_LEASE_ACQUIRED.value: frozenset({"signing_started", "cancelled_before_signing", "recovery_required"}),
     JournalState.SIGNING_STARTED.value: frozenset({"signed", "failed_pre_submission", "recovery_required"}),
     JournalState.SIGNED.value: frozenset({"submission_started", "recovery_required"}),
     JournalState.SUBMISSION_STARTED.value: frozenset({"submitted", "submission_unknown", "failed_pre_submission", "recovery_required"}),
@@ -641,8 +641,8 @@ class DreamDexExecutionJournal:
     def transition_execution_intent(self, intent_id: str, new_state: str, *, event_type: str | None = None, source_type: str = "test_fixture", details_status: str = "not_stored", blockers: Sequence[str] = ()) -> DreamDexExecutionIntentResult:
         if new_state not in INTENT_STATES:
             return DreamDexExecutionIntentResult(None, False, False, ("invalid_state_transition",), ("unknown_state",))
-        # Post-signing states remain in the schema for future lifecycle
-        # integration, but this local journal has no signer/submission path.
+        # Signing transitions are local, in-memory handoff boundaries only;
+        # submission remains deliberately unavailable.
         if new_state not in PRODUCTION_WRITABLE_STATES:
             return DreamDexExecutionIntentResult(None, False, False, ("execution_journal_post_signing_unavailable",), ("post_signing_transition_unavailable",))
         allowed, reasons = self._writes_allowed()
@@ -758,6 +758,92 @@ class DreamDexExecutionJournal:
             conn.execute("UPDATE execution_intents SET state=?, updated_at=? WHERE intent_id=?", (JournalState.SIGNING_LEASE_ACQUIRED.value, now, intent_id))
             conn.commit()
             return event
+        except Exception:
+            conn.rollback(); raise
+
+    def begin_transaction_signing(self, *, intent_id: str, lease_id: str, chain_id: int, signer_address: str, finalized_envelope_fingerprint: str, signing_request_fingerprint: str) -> DreamDexExecutionIntentResult:
+        """Atomically consume a local lease and enter the signer boundary."""
+        allowed, reasons = self._writes_allowed()
+        if not allowed:
+            return DreamDexExecutionIntentResult(None, False, False, reasons, reasons)
+        try:
+            chain = validate_uint(chain_id, field="chain_id")
+            signer = _norm_address(signer_address, "signer_address")
+        except ValueError:
+            return DreamDexExecutionIntentResult(None, False, False, ("signing_started_validation_failed",), ("signing_started_input_invalid",))
+        try:
+            conn = self._begin()
+        except sqlite3.OperationalError:
+            return DreamDexExecutionIntentResult(None, False, False, ("execution_journal_unavailable",), ("journal_database_locked",))
+        try:
+            row = conn.execute("SELECT * FROM execution_intents WHERE intent_id=?", (intent_id,)).fetchone()
+            lease = conn.execute("SELECT * FROM journal_events WHERE event_id=? AND intent_id=? AND event_type='signing_lease_acquired' AND new_state='signing_lease_acquired'", (lease_id, intent_id)).fetchone()
+            reservation = conn.execute("SELECT * FROM nonce_reservations WHERE reservation_id=?", (lease["reservation_id"],)).fetchone() if lease is not None else None
+            if row is None or lease is None or reservation is None or reservation["status"] != "reserved" or reservation["intent_id"] != intent_id:
+                conn.rollback(); return DreamDexExecutionIntentResult(None, False, False, ("signing_lease_unavailable",), ("active_signing_lease_not_found",))
+            if row["state"] != JournalState.SIGNING_LEASE_ACQUIRED.value:
+                conn.rollback(); return DreamDexExecutionIntentResult(self._intent_from_row(row), False, False, ("signing_lease_conflict",), ("intent_state_invalid",))
+            if int(row["chain_id"]) != int(chain) or row["signer_address_normalized"] != signer or row["finalized_envelope_fingerprint"] != finalized_envelope_fingerprint or row["signing_request_fingerprint"] != signing_request_fingerprint:
+                conn.rollback(); return DreamDexExecutionIntentResult(self._intent_from_row(row), False, False, ("signing_lease_fingerprint_mismatch",), ("signing_fingerprint_mismatch",))
+            now = _now_ms()
+            self._insert_event(conn, intent_id=intent_id, reservation_id=lease["reservation_id"], event_type="signing_started", previous_state=row["state"], new_state=JournalState.SIGNING_STARTED.value, source_type="local_signing_session", authoritative=False, details_status="fingerprints_only", blockers=("signed_payload_not_durably_available",))
+            conn.execute("UPDATE execution_intents SET state=?, updated_at=? WHERE intent_id=?", (JournalState.SIGNING_STARTED.value, now, intent_id))
+            conn.commit()
+            return DreamDexExecutionIntentResult(self.get_execution_intent(intent_id), False, False)
+        except Exception:
+            conn.rollback(); raise
+
+    def finalize_signed_transaction(self, *, intent_id: str, lease_id: str, chain_id: int, signer_address: str, finalized_envelope_fingerprint: str, signing_request_fingerprint: str) -> DreamDexExecutionIntentResult:
+        """Persist only the verified transition; raw signed bytes never enter the journal."""
+        allowed, reasons = self._writes_allowed()
+        if not allowed:
+            return DreamDexExecutionIntentResult(None, False, False, reasons, reasons)
+        try:
+            chain = validate_uint(chain_id, field="chain_id")
+            signer = _norm_address(signer_address, "signer_address")
+        except ValueError:
+            return DreamDexExecutionIntentResult(None, False, False, ("signed_transition_validation_failed",), ("signed_transition_input_invalid",))
+        try:
+            conn = self._begin()
+        except sqlite3.OperationalError:
+            return DreamDexExecutionIntentResult(None, False, False, ("execution_journal_unavailable",), ("journal_database_locked",))
+        try:
+            row = conn.execute("SELECT * FROM execution_intents WHERE intent_id=?", (intent_id,)).fetchone()
+            lease = conn.execute("SELECT * FROM journal_events WHERE event_id=? AND intent_id=? AND event_type='signing_lease_acquired'", (lease_id, intent_id)).fetchone()
+            reservation = conn.execute("SELECT * FROM nonce_reservations WHERE reservation_id=?", (lease["reservation_id"],)).fetchone() if lease is not None else None
+            if row is None or lease is None or reservation is None or reservation["status"] != "reserved" or reservation["intent_id"] != intent_id or row["state"] != JournalState.SIGNING_STARTED.value:
+                conn.rollback(); return DreamDexExecutionIntentResult(None if row is None else self._intent_from_row(row), False, False, ("signed_transition_state_invalid",), ("signing_started_required",))
+            if int(row["chain_id"]) != int(chain) or row["signer_address_normalized"] != signer or row["finalized_envelope_fingerprint"] != finalized_envelope_fingerprint or row["signing_request_fingerprint"] != signing_request_fingerprint:
+                conn.rollback(); return DreamDexExecutionIntentResult(self._intent_from_row(row), False, False, ("signing_lease_fingerprint_mismatch",), ("signing_fingerprint_mismatch",))
+            now = _now_ms()
+            self._insert_event(conn, intent_id=intent_id, reservation_id=lease["reservation_id"], event_type="signed_transaction_verified", previous_state=row["state"], new_state=JournalState.SIGNED.value, source_type="local_signing_session", authoritative=False, details_status="verified_artifact_metadata_only", blockers=("signed_payload_not_durably_available",))
+            conn.execute("UPDATE execution_intents SET state=?, updated_at=? WHERE intent_id=?", (JournalState.SIGNED.value, now, intent_id))
+            conn.commit()
+            return DreamDexExecutionIntentResult(self.get_execution_intent(intent_id), False, False)
+        except Exception:
+            conn.rollback(); raise
+
+    def mark_signing_recovery_required(self, *, intent_id: str, reason: str = "signing_session_recovery_required") -> DreamDexExecutionIntentResult:
+        """Move an interrupted/failed signing attempt to recovery without retry."""
+        allowed, reasons = self._writes_allowed()
+        if not allowed:
+            return DreamDexExecutionIntentResult(None, False, False, reasons, reasons)
+        safe_reason = str(reason)[:80] or "signing_session_recovery_required"
+        try:
+            conn = self._begin()
+        except sqlite3.OperationalError:
+            return DreamDexExecutionIntentResult(None, False, False, ("execution_journal_unavailable",), ("journal_database_locked",))
+        try:
+            row = conn.execute("SELECT * FROM execution_intents WHERE intent_id=?", (intent_id,)).fetchone()
+            if row is None:
+                conn.rollback(); return DreamDexExecutionIntentResult(None, False, False, ("execution_intent_not_found",), ("execution_intent_not_found",))
+            if row["state"] not in {JournalState.SIGNING_STARTED.value, JournalState.SIGNED.value}:
+                conn.rollback(); return DreamDexExecutionIntentResult(self._intent_from_row(row), False, False, ("signing_recovery_state_invalid",), ("signing_recovery_state_invalid",))
+            now = _now_ms()
+            self._insert_event(conn, intent_id=intent_id, reservation_id=None, event_type="signing_recovery_required", previous_state=row["state"], new_state=JournalState.RECOVERY_REQUIRED.value, source_type="local_signing_session", authoritative=False, details_status="error_category_only", blockers=(safe_reason,))
+            conn.execute("UPDATE execution_intents SET state=?, updated_at=? WHERE intent_id=?", (JournalState.RECOVERY_REQUIRED.value, now, intent_id))
+            conn.commit()
+            return DreamDexExecutionIntentResult(self.get_execution_intent(intent_id), False, False)
         except Exception:
             conn.rollback(); raise
 
