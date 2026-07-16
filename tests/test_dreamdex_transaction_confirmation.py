@@ -89,4 +89,3 @@ def test_rpc_fixture_exposes_only_typed_receipt_and_block_calls():
     assert rpc.get_block_number() == 6
     assert [call[0] for call in rpc.calls] == ["eth_getTransactionReceipt", "eth_getBlockByNumber", "eth_blockNumber"]
     assert not hasattr(rpc, "call")
-

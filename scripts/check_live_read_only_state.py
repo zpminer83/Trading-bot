@@ -76,6 +76,8 @@ from bot.execution.dreamdex_transaction_preflight import (
     unavailable_preflight_result,
 )
 from bot.execution.dreamdex_transaction_confirmation import build_transaction_confirmation_preview
+from bot.execution.dreamdex_runtime_launch_gate import DreamDexRuntimeLaunchEvidence, DreamDexRuntimeLaunchPolicy, evaluate_runtime_launch_gate
+from bot.execution.dreamdex_dry_run_orchestrator import DreamDexDryRunState
 from bot.execution.dreamdex_execution_journal import (
     DreamDexExecutionJournalPolicy,
     open_journal,
@@ -1039,6 +1041,52 @@ def _print_transaction_confirmation(*, enabled: bool = False) -> None:
     print("  confirmation blockers: receipt_lookup_unavailable; confirmation_policy_unavailable")
 
 
+def _print_runtime_launch_gate() -> None:
+    policy = DreamDexRuntimeLaunchPolicy()
+    evidence = DreamDexRuntimeLaunchEvidence()
+    decision = evaluate_runtime_launch_gate(policy, evidence, synthetic_dependencies_supplied=False)
+    print("RUNTIME LAUNCH GATE:")
+    print("  launch gate model: available_offline")
+    print(f"  policy complete: {'YES' if policy.complete else 'NO'}")
+    print(f"  market gate: {'pass' if decision.market_gate_passed else 'blocked'}")
+    print(f"  account gate: {'pass' if decision.account_gate_passed else 'blocked'}")
+    print(f"  orderbook gate: {'pass' if decision.orderbook_gate_passed else 'blocked'}")
+    print(f"  risk gate: {'pass' if decision.risk_gate_passed else 'blocked'}")
+    print(f"  fair-play gate: {'pass' if decision.fair_play_gate_passed else 'blocked'}")
+    print(f"  journal gate: {'pass' if decision.journal_gate_passed else 'blocked'}")
+    print(f"  execution pipeline gate: {'pass' if decision.execution_pipeline_gate_passed else 'blocked'}")
+    print("  synthetic dry-run allowed: NO")
+    print("  production signer allowed: NO")
+    print("  real submission allowed: NO")
+    print(f"  launch blocker count: {len(decision.blockers)}")
+    print(f"  launch decision fingerprint: {mask_hex_hash(decision.decision_fingerprint)}")
+
+
+def _print_end_to_end_dry_run() -> None:
+    print("END-TO-END EXECUTION DRY-RUN:")
+    print("  dry-run orchestrator: available_offline")
+    print("  execution performed: NO")
+    print("  scenario: unavailable")
+    print(f"  final state: {DreamDexDryRunState.NOT_STARTED.value}")
+    print("  place flow complete: NO")
+    print("  place order ID confirmed: NO")
+    print("  cancel flow complete: NO")
+    print("  final open-order state confirmed: NO")
+    print("  journal integrity: unavailable")
+    print("  reconciliation status: incomplete")
+    print("  signer invocation count: 0")
+    print("  submission call count: 0")
+    print("  automatic retry count: 0")
+    print("  replacement count: 0")
+    print("  live network execution performed: NO")
+    print("  production secret used: NO")
+    print("  synthetic dry-run passed: NO")
+    print("  production dry-run approved: NO")
+    print("  ready for production signer integration: NO")
+    print("  ready for real submission: NO")
+    print("  dry-run blockers: synthetic_dry_run_unavailable")
+
+
 def build_live_transaction_preflight_policy(environ: Mapping[str, str]) -> DreamDexTransactionPreflightPolicy:
     """Read CLI-only settings; the production preflight module reads no env."""
     values = {
@@ -1149,6 +1197,8 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_signed_transaction_verification(session_result=signing_session_result, execution_performed=signing_session_execution_performed)
     _print_transaction_submission_boundary(result=None, execution_performed=False)
     _print_transaction_confirmation(enabled=transaction_confirmation_enabled)
+    _print_runtime_launch_gate()
+    _print_end_to_end_dry_run()
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
@@ -1258,6 +1308,8 @@ def main() -> int:
         print("No network request or order operation was attempted.")
         _print_transaction_submission_boundary(result=None, execution_performed=False)
         _print_transaction_confirmation(enabled=False)
+        _print_runtime_launch_gate()
+        _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2
     fixture_path = os.environ.get("DREAMDEX_READ_ONLY_FIXTURE")
@@ -1275,6 +1327,8 @@ def main() -> int:
         _print_signed_transaction_verification(session_result=None, execution_performed=False)
         _print_transaction_submission_boundary(result=None, execution_performed=False)
         _print_transaction_confirmation(enabled=False)
+        _print_runtime_launch_gate()
+        _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]

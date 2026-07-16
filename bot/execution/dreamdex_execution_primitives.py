@@ -500,6 +500,11 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "normalize_transaction_receipt": "receipt", "validate_canonical_block": "receipt", "calculate_confirmation_depth": "receipt",
         "validate_order_placed_event": "receipt", "validate_order_cancelled_event": "receipt", "detect_transaction_reorg": "receipt",
         "persist_transaction_confirmation": "journal",
+        "runtime_launch_gate": "launch_gate", "runtime_launch_checklist": "launch_gate",
+        "evaluate_market_launch_gate": "launch_gate", "evaluate_account_launch_gate": "launch_gate",
+        "evaluate_risk_launch_gate": "launch_gate", "evaluate_fair_play_launch_gate": "launch_gate",
+        "evaluate_journal_launch_gate": "launch_gate", "end_to_end_dry_run_orchestrator": "dry_run",
+        "synthetic_place_cancel_scenario": "dry_run",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -511,6 +516,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "production_bound_signer": "signed_transaction", "persist_raw_signed_transaction": "signed_transaction",
         "production_raw_transaction_submitter": "submission", "automatic_submission_retry": "submission",
         "transaction_replacement": "submission", "receipt_lookup": "receipt", "validate_reduce_event": "receipt",
+        "production_signer_integration": "signing", "production_execution_session": "execution", "real_transaction_submission": "submission",
         "revalidate_nonce_live": "journal", "externally_lock_nonce": "journal",
     }
     partial = {
