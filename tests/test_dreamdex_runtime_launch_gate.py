@@ -65,3 +65,21 @@ def test_checklist_keeps_production_capabilities_unavailable():
     assert checklist["signer"].status == "unavailable"
     assert checklist["submission"].status == "unavailable"
     assert checklist["operations"].status == "not_applicable"
+
+
+def test_production_signer_gate_requires_explicit_keystore_and_unlock_evidence():
+    evidence = _evidence(
+        encrypted_keystore_status="valid",
+        keystore_metadata_status="valid",
+        keystore_public_address_match="confirmed",
+        secure_secret_provider_status="available",
+        keystore_unlock_status="verified",
+        production_signer_implementation_status="available",
+        production_signer_configured=True,
+        production_signer_invocation_status="allowed",
+        active_signing_lease_count=1,
+    )
+    decision = evaluate_runtime_launch_gate(_policy(), evidence, synthetic_dependencies_supplied=False)
+    assert decision.production_signer_gate_passed is True
+    assert decision.allowed_to_invoke_production_signer is False
+    assert decision.allowed_to_submit_real_transaction is False

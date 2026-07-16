@@ -505,6 +505,8 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "evaluate_risk_launch_gate": "launch_gate", "evaluate_fair_play_launch_gate": "launch_gate",
         "evaluate_journal_launch_gate": "launch_gate", "end_to_end_dry_run_orchestrator": "dry_run",
         "synthetic_place_cancel_scenario": "dry_run",
+        "encrypted_keystore_signer_model": "signing", "validate_encrypted_keystore": "signing",
+        "inspect_keystore_public_address": "signing", "verify_derived_signer_address": "signing",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -513,16 +515,20 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "fetch_order_metadata_live": "authentication", "fetch_onchain_fills_live": "authentication",
         "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
         "signer_address_discovery": "signing",
-        "production_bound_signer": "signed_transaction", "persist_raw_signed_transaction": "signed_transaction",
+        "persist_raw_signed_transaction": "signed_transaction",
         "production_raw_transaction_submitter": "submission", "automatic_submission_retry": "submission",
         "transaction_replacement": "submission", "receipt_lookup": "receipt", "validate_reduce_event": "receipt",
         "production_signer_integration": "signing", "production_execution_session": "execution", "real_transaction_submission": "submission",
+        "export_private_key": "signing", "persist_decrypted_key": "signing",
         "revalidate_nonce_live": "journal", "externally_lock_nonce": "journal",
     }
     partial = {
         "resolve_pending_nonce": "preflight", "estimate_transaction_gas": "preflight",
         "detect_fee_model": "preflight", "resolve_transaction_fees": "preflight",
         "check_native_fee_balance": "preflight",
+        "production_bound_signer": "signing", "os_backed_keystore_secret_provider": "signing",
+        "interactive_keystore_secret_provider": "signing", "decrypt_encrypted_keystore": "signing", "sign_finalized_legacy_transaction": "signing",
+        "sign_finalized_eip1559_transaction": "signing",
         "recover_execution_state": "journal",
         "revalidate_pending_nonce_live": "signing_lease", "acquire_signing_lease": "signing_lease",
         "decode_signed_transaction": "signed_transaction", "recover_signed_transaction_sender": "signed_transaction",

@@ -153,6 +153,15 @@ class DreamDexRuntimeLaunchEvidence:
     signer_capability_status: str = "unavailable"
     submission_capability_status: str = "unavailable"
     confirmation_capability_status: str = "unavailable"
+    encrypted_keystore_status: str = "unavailable"
+    keystore_metadata_status: str = "unavailable"
+    keystore_public_address_match: str = "unresolved"
+    secure_secret_provider_status: str = "unavailable"
+    keystore_unlock_status: str = "unavailable"
+    production_signer_implementation_status: str = "unavailable"
+    production_signer_configured: bool = False
+    production_signer_invocation_status: str = "blocked"
+    real_submission_status: str = "blocked"
     reconciliation_status: str = "incomplete"
     source_authority_status: str = "unavailable"
     conflicts: tuple[str, ...] = ()
@@ -254,12 +263,13 @@ def evaluate_runtime_launch_gate(policy: DreamDexRuntimeLaunchPolicy, evidence: 
     if not journal: blockers.append("journal_launch_gate_failed")
     pipeline = policy_ok and (status_ok(evidence.preflight_capability_status, {"available_offline", "available", "confirmed", "test_confirmed"}) if policy.require_preflight else True) and (status_ok(evidence.signer_capability_status, {"available_offline", "test_only", "available", "confirmed", "test_confirmed"})) and (status_ok(evidence.submission_capability_status, {"available_offline", "test_only", "available", "confirmed", "test_confirmed"})) and (status_ok(evidence.confirmation_capability_status, {"available_offline", "available", "confirmed", "test_confirmed"}) if policy.require_confirmation else True)
     if not pipeline: blockers.append("execution_pipeline_launch_gate_failed")
+    production_signer = policy_ok and evidence.production_signer_configured and status_ok(evidence.encrypted_keystore_status, {"valid", "confirmed"}) and status_ok(evidence.keystore_metadata_status, {"valid", "confirmed"}) and evidence.keystore_public_address_match == "confirmed" and status_ok(evidence.secure_secret_provider_status, {"available", "confirmed"}) and status_ok(evidence.keystore_unlock_status, {"verified", "confirmed"}) and status_ok(evidence.production_signer_implementation_status, {"available", "confirmed"}) and evidence.production_signer_invocation_status in {"allowed", "approved"} and evidence.active_signing_lease_count == 1
     prior = policy_ok and market and orderbook and account and risk and fair and journal and pipeline
     dry = prior and synthetic_dependencies_supplied
     if not dry: blockers.append("synthetic_dry_run_unavailable" if not synthetic_dependencies_supplied else "synthetic_dry_run_failed")
     unique = _tuple(blockers)
-    payload = {"policy": policy.safe_dict(), "evidence": evidence.safe_dict(), "blockers": unique, "synthetic": dry}
-    return DreamDexRuntimeLaunchDecision(SCHEMA_VERSION, "allowed" if dry else "blocked", market, account, orderbook, risk, fair, journal, pipeline, dry, False, False, prior, dry, False, False, False, _fp(payload), False, unique, (), _tuple(unresolved))
+    payload = {"policy": policy.safe_dict(), "evidence": evidence.safe_dict(), "blockers": unique, "synthetic": dry, "production_signer": production_signer}
+    return DreamDexRuntimeLaunchDecision(SCHEMA_VERSION, "allowed" if dry else "blocked", market, account, orderbook, risk, fair, journal, pipeline, dry, production_signer, False, prior, dry, False, False, False, _fp(payload), False, unique, (), _tuple(unresolved))
 
 
 def build_runtime_launch_checklist(decision: DreamDexRuntimeLaunchDecision) -> tuple[DreamDexRuntimeChecklistItem, ...]:

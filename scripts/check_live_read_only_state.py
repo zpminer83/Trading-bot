@@ -78,6 +78,7 @@ from bot.execution.dreamdex_transaction_preflight import (
 from bot.execution.dreamdex_transaction_confirmation import build_transaction_confirmation_preview
 from bot.execution.dreamdex_runtime_launch_gate import DreamDexRuntimeLaunchEvidence, DreamDexRuntimeLaunchPolicy, evaluate_runtime_launch_gate
 from bot.execution.dreamdex_dry_run_orchestrator import DreamDexDryRunState
+from bot.execution.dreamdex_secret_provider import InteractiveDreamDexKeystoreSecretProvider, WindowsCredentialManagerDreamDexKeystoreSecretProvider
 from bot.execution.dreamdex_execution_journal import (
     DreamDexExecutionJournalPolicy,
     open_journal,
@@ -802,6 +803,40 @@ def _print_transaction_signer_boundary() -> None:
     print("  signer boundary blockers: transaction_signer_implementation_unavailable, transaction_signing_request_unavailable, transaction_signer_address_unresolved, transaction_fee_limit_unresolved, transaction_value_limit_unresolved")
 
 
+def _print_encrypted_keystore_signer() -> None:
+    """Diagnostic-only defaults; this function never inspects a keystore or prompts."""
+    interactive = InteractiveDreamDexKeystoreSecretProvider().describe_capabilities()
+    os_backed = WindowsCredentialManagerDreamDexKeystoreSecretProvider().describe_capabilities()
+    capabilities = build_execution_capability_matrix()
+    print("ENCRYPTED KEYSTORE TRANSACTION SIGNER:")
+    print("  signer implementation: unavailable")
+    print("  production signer: unavailable")
+    print("  keystore signer model: available_offline")
+    print("  keystore configured: NO")
+    print("  keystore path output allowed: NO")
+    print("  keystore metadata inspected: NO")
+    print("  keystore format: unavailable")
+    print("  public signer address: <missing>")
+    print("  public address match: unresolved")
+    print("  secure secret provider: unavailable")
+    print("  unattended secret provider: unavailable")
+    print(f"  unattended provider audit: {os_backed.status}")
+    print(f"  interactive unlock supported: {interactive.status}")
+    print("  unlock execution performed: NO")
+    print("  unlock attempt count: 0")
+    print("  derived address match: unresolved")
+    print("  key material persisted: NO")
+    print("  password persisted: NO")
+    print("  signer invocation performed: NO")
+    print(f"  legacy signing supported: {capabilities.by_name('sign_finalized_legacy_transaction').status}")
+    print(f"  EIP-1559 signing supported: {capabilities.by_name('sign_finalized_eip1559_transaction').status}")
+    print("  raw private key output allowed: NO")
+    print("  raw signed transaction output allowed: NO")
+    print("  production signer authoritative: NO")
+    print("  real submission allowed: NO")
+    print("  signer blockers: encrypted_keystore_unavailable, production_signer_not_configured, keystore_secret_provider_unavailable")
+
+
 def _strict_int_setting(environ: Mapping[str, str], name: str, *, minimum: int = 0, required: bool = False) -> int | None:
     raw = environ.get(name)
     if raw is None or str(raw).strip() == "":
@@ -1055,6 +1090,8 @@ def _print_runtime_launch_gate() -> None:
     print(f"  fair-play gate: {'pass' if decision.fair_play_gate_passed else 'blocked'}")
     print(f"  journal gate: {'pass' if decision.journal_gate_passed else 'blocked'}")
     print(f"  execution pipeline gate: {'pass' if decision.execution_pipeline_gate_passed else 'blocked'}")
+    print(f"  production signer gate: {'pass' if decision.production_signer_gate_passed else 'blocked'}")
+    print("  keystore unlock verified: NO")
     print("  synthetic dry-run allowed: NO")
     print("  production signer allowed: NO")
     print("  real submission allowed: NO")
@@ -1191,6 +1228,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     graph_blockers = _print_order_reconciliation_graph()
     _print_execution_pipeline_summary()
     _print_transaction_signer_boundary()
+    _print_encrypted_keystore_signer()
     _print_live_transaction_preflight(preflight_result, enabled=preflight_enabled, execution_performed=preflight_execution_performed, rpc_configured=preflight_rpc_configured, policy=preflight_policy)
     _print_durable_execution_journal(journal_snapshot, enabled=journal_enabled, execution_performed=journal_execution_performed, path_configured=journal_path_configured)
     _print_live_nonce_signing_lease(lease_result, enabled=lease_enabled, execution_performed=lease_execution_performed, rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), policy=lease_policy)
@@ -1308,6 +1346,7 @@ def main() -> int:
         print("No network request or order operation was attempted.")
         _print_transaction_submission_boundary(result=None, execution_performed=False)
         _print_transaction_confirmation(enabled=False)
+        _print_encrypted_keystore_signer()
         _print_runtime_launch_gate()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
@@ -1327,6 +1366,7 @@ def main() -> int:
         _print_signed_transaction_verification(session_result=None, execution_performed=False)
         _print_transaction_submission_boundary(result=None, execution_performed=False)
         _print_transaction_confirmation(enabled=False)
+        _print_encrypted_keystore_signer()
         _print_runtime_launch_gate()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
