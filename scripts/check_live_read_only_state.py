@@ -25,7 +25,14 @@ from bot.integrations.dreamdex_operator_permissions import (
 )
 from bot.integrations.dreamdex_siwe_http_transport import build_siwe_http_transport_from_env
 from bot.integrations.dreamdex_siwe_signer import build_production_siwe_signer_from_env, resolve_auth_mode
-from bot.execution.dreamdex_direct_order_encoding import audit_direct_owner_vendor, build_direct_owner_identity, direct_owner_blocking_reasons
+from bot.execution.dreamdex_direct_order_encoding import (
+    audit_direct_owner_vendor,
+    audit_direct_account_construction,
+    build_direct_owner_identity,
+    build_direct_signer_binding_evidence,
+    build_direct_transaction_signer_requirements,
+    direct_owner_blocking_reasons,
+)
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -210,6 +217,13 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
         platform_trading_address=getattr(account, "trading_address", None),
         authenticated_api_subject=getattr(getattr(account, "authenticated", None), "authenticated_subject", None),
     )
+    binding = build_direct_signer_binding_evidence(
+        contest_owner_address=getattr(account, "owner_address", None),
+        platform_trading_address=getattr(account, "trading_address", None),
+    )
+    requirements = build_direct_transaction_signer_requirements(binding.direct_signer_address)
+    trace = audit_direct_account_construction()
+    safe_binding = binding.safe_dict()
     print("DIRECT OWNER EXECUTION MODEL:")
     print(f"  selected execution mode: {audit.selected_mode}")
     print(f"  operator mode active: {'YES' if audit.operator_mode_active else 'NO'}")
@@ -219,6 +233,40 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
     print(f"  contest login wallet: {_masked(identity.contest_login_address)}")
     print(f"  platform trading wallet: {_masked(identity.platform_trading_address)}")
     print(f"  transaction signer role: {identity.transaction_signer_role}")
+    print(f"  account constructor status: {safe_binding['account_constructor_status']}")
+    print(f"  account constructor type: {safe_binding['account_constructor_type']}")
+    print(f"  wallet client account binding: {safe_binding['wallet_client_binding_status']}")
+    print(f"  execution context account binding: {safe_binding['execution_context_binding_status']}")
+    print(f"  transaction from semantics: {safe_binding['transaction_from_semantics']}")
+    print(f"  direct signer configured: {'YES' if safe_binding['direct_signer_configured'] in {'user_declared', 'source_compatible', 'source_conflicting'} else 'NO'}")
+    print(f"  direct signer address: {safe_binding['direct_signer_address']}")
+    print(f"  direct signer source compatibility: {safe_binding['source_compatibility_status']}")
+    print(f"  direct signer matches contest owner: {safe_binding['configured_owner_match_status']}")
+    print(f"  direct signer matches Smart Wallet: {safe_binding['configured_trading_match_status']}")
+    print(f"  direct signer role candidate: {safe_binding['signer_role']}")
+    print(f"  direct signer key availability: {safe_binding['key_availability']}")
+    print(f"  Smart Wallet used in signing path: {'YES' if safe_binding['smart_wallet_used_in_signing_path'] is True else ('NO' if safe_binding['smart_wallet_used_in_signing_path'] is False else 'unresolved')}")
+    print(f"  TypeScript direct support: source_confirmed")
+    print(f"  Python direct support: {safe_binding['python_parity_status']}")
+    print(f"  TypeScript/Python parity: {safe_binding['python_parity_status']}")
+    print(f"  required signer capabilities: {', '.join(requirements.capabilities)}")
+    print(f"  source trace status: {safe_binding['source_trace_status']}")
+    print(f"  source trace files: {', '.join(safe_binding['evidence_sources']) or 'unavailable'}")
+    print(f"  source trace roles: {', '.join(f'{source}={role}' for source, role in trace.source_roles) or 'unavailable'}")
+    print(f"  source trace fingerprints: {', '.join(f'{source}={digest}' for source, digest in trace.source_fingerprints) or 'unavailable'}")
+    print(f"  source trace steps: {'; '.join(trace.trace_steps) or 'unavailable'}")
+    print(f"  direct signer binding authoritative: {'YES' if safe_binding['authoritative'] else 'NO'}")
+    print("  signer candidate matrix:")
+    for candidate in binding.candidate_matrix:
+        item = candidate.safe_dict()
+        print(
+            f"    {item['candidate']}: address={item['address']}, "
+            f"ctx.account={item['compatible_with_context_account']}, "
+            f"tx_sender={item['used_as_transaction_sender']}, "
+            f"vault={item['used_as_vault_subject']}, "
+            f"rest={item['used_as_rest_subject']}, "
+            f"authoritative={'YES' if item['authoritative'] else 'NO'}"
+        )
     print(f"  transaction sender: {_masked(audit.identity.transaction_sender_address)}")
     print(f"  contract order owner subject: {audit.identity.contract_order_owner_subject}")
     print(f"  vault owner subject: {audit.identity.vault_owner_subject}")
@@ -249,7 +297,7 @@ def _print_direct_owner_execution_model(account, market) -> tuple[str, ...]:
     print("  transaction signer capability: unavailable")
     print(f"  direct execution authoritative: {'YES' if audit.authoritative else 'NO'}")
     print(f"  unresolved reasons: {', '.join(audit.unresolved_reasons) or 'none'}")
-    return direct_owner_blocking_reasons(audit)
+    return direct_owner_blocking_reasons(audit, binding=binding)
 
 
 def _print_market_trading_rules(market) -> None:

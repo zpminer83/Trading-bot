@@ -6,9 +6,12 @@ from bot.execution.dreamdex_direct_order_encoding import (
     REDUCE_SELECTOR,
     DreamDexDirectOrderSpecification,
     audit_direct_owner_vendor,
+    audit_direct_account_construction,
     audit_direct_selectors,
     build_cancel_order_call_preview,
     build_direct_owner_identity,
+    build_direct_signer_binding_evidence,
+    build_direct_transaction_signer_requirements,
     build_place_order_call_preview,
     build_reduce_order_call_preview,
     compute_safe_calldata_fingerprint,
@@ -158,3 +161,69 @@ def test_selector_conflict_blocks_direct_owner_execution_evidence():
     audit = audit_direct_owner_vendor(declared_selectors={"placeOrder": "0xdeadbeef"})
     assert audit.selector_consistency == "conflicting"
     assert "direct_order_selector_conflicting" in audit.unresolved_reasons
+
+
+def test_vendor_account_construction_trace_is_source_only_and_exact():
+    trace = audit_direct_account_construction()
+    assert trace.source_trace_status == "confirmed"
+    assert trace.account_constructor_status == "source_confirmed"
+    assert trace.account_constructor_type.startswith("viem privateKeyToAccount")
+    assert trace.wallet_client_binding_status == "source_confirmed"
+    assert trace.execution_context_binding_status == "source_confirmed"
+    assert trace.transaction_from_semantics == "supplied_account_address"
+    assert trace.smart_wallet_used_in_signing_path is False
+    assert trace.python_parity_status == "partial"
+    assert any(path.endswith("packages/core/src/client.ts") for path in trace.source_files)
+    assert any("privateKeyToAccount" in step for step in trace.trace_steps)
+
+
+def test_direct_signer_declaration_is_public_only_and_never_authoritative():
+    owner = "0x1111111111111111111111111111111111111111"
+    smart = "0x2222222222222222222222222222222222222222"
+    binding = build_direct_signer_binding_evidence(
+        contest_owner_address=owner,
+        platform_trading_address=smart,
+        environ={"DREAMDEX_READ_ONLY_DIRECT_SIGNER_ADDRESS": owner},
+    )
+    assert binding.direct_signer_configured == "user_declared"
+    assert binding.configured_owner_match_status == "confirmed"
+    assert binding.configured_trading_match_status == "mismatch"
+    assert binding.source_compatibility_status == "source_compatible"
+    assert binding.signer_role == "contest_owner"
+    assert binding.authoritative is False
+    assert binding.key_availability == "unavailable"
+    assert owner not in repr(binding)
+    assert owner not in repr(binding.candidate_matrix[0])
+
+
+def test_missing_and_invalid_direct_signer_are_fail_closed():
+    missing = build_direct_signer_binding_evidence(environ={})
+    assert missing.direct_signer_configured == "unconfigured"
+    assert missing.direct_signer_address is None
+    assert "direct_signer_address_unconfigured" in missing.unresolved_reasons
+    invalid = build_direct_signer_binding_evidence(environ={"DREAMDEX_READ_ONLY_DIRECT_SIGNER_ADDRESS": "not-an-address"})
+    assert invalid.direct_signer_configured == "invalid"
+    assert invalid.direct_signer_address is None
+    assert "direct_signer_address_invalid" in invalid.unresolved_reasons
+
+
+def test_candidate_matrix_does_not_auto_select_smart_wallet():
+    binding = build_direct_signer_binding_evidence(
+        contest_owner_address=OWNER,
+        platform_trading_address=POOL,
+        environ={"DREAMDEX_READ_ONLY_DIRECT_SIGNER_ADDRESS": POOL},
+    )
+    assert binding.smart_wallet_used_in_signing_path is False
+    assert binding.signer_role == "platform_trading_wallet"
+    assert binding.authoritative is False
+    smart = next(item for item in binding.candidate_matrix if item.candidate == "platform_trading_wallet")
+    assert smart.used_as_transaction_sender == "not_observed_in_direct_ctx"
+
+
+def test_direct_transaction_signer_requirements_are_separate_from_siwe():
+    requirements = build_direct_transaction_signer_requirements(OWNER)
+    assert requirements.required_chain_id == 5031
+    assert requirements.required_address == OWNER.lower()
+    assert set(("direct_place_transaction", "direct_cancel_transaction", "direct_reduce_transaction")) == set(requirements.capabilities)
+    assert requirements.receipt_access_required is True
+    assert requirements.production_status == "unavailable"

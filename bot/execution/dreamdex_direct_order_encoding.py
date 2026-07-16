@@ -11,6 +11,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
@@ -34,6 +35,19 @@ REDUCE_SELECTOR = "0x" + keccak(text=REDUCE_SIGNATURE)[:4].hex()
 ORDER_PLACED_TOPIC = "0xd90f62f61ee2f606b132cfdfd883ddd079228b6fd6bffd9d7cf848daf824639d"
 ORDER_CANCELLED_TOPIC = "0x06ff08ed6b6987bb7df963009d8b54dc03988f4e465c009924929bb010fe03e7"
 _ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+
+# Public, declaration-only input.  This is intentionally not a key variable
+# and is never used to construct an account or a transport.
+DIRECT_SIGNER_ADDRESS_ENV = "DREAMDEX_READ_ONLY_DIRECT_SIGNER_ADDRESS"
+DIRECT_SIGNER_STATUSES = frozenset({"unconfigured", "user_declared", "source_compatible", "source_conflicting", "invalid"})
+MATCH_STATUSES = frozenset({"confirmed", "mismatch", "unresolved"})
+SIGNER_CAPABILITIES = ("direct_place_transaction", "direct_cancel_transaction", "direct_reduce_transaction")
+
+
+def _safe_optional_address(value: Any, label: str) -> str | None:
+    if value in (None, ""):
+        return None
+    return _address(value, label)
 
 
 def _address(value: Any, label: str) -> str:
@@ -113,6 +127,191 @@ class DreamDexDirectOwnerExecutionIdentity:
 
     def __repr__(self) -> str:
         return f"DreamDexDirectOwnerExecutionIdentity(owner={_mask(self.configured_owner_address)!r}, signer_role={self.transaction_signer_role!r}, mapping_status={self.mapping_status!r}, authoritative=False)"
+
+
+@dataclass(frozen=True, repr=False)
+class DirectAccountConstructionTrace:
+    """Read-only source trace for the vendor's account/client construction."""
+
+    account_constructor_status: str
+    account_constructor_type: str
+    wallet_client_binding_status: str
+    execution_context_binding_status: str
+    transaction_from_semantics: str
+    source_trace_status: str
+    source_files: tuple[str, ...] = ()
+    source_fingerprints: tuple[tuple[str, str], ...] = ()
+    source_roles: tuple[tuple[str, str], ...] = ()
+    trace_steps: tuple[str, ...] = ()
+    smart_wallet_used_in_signing_path: bool | None = None
+    python_parity_status: str = "unavailable"
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "account_constructor_status": self.account_constructor_status,
+            "account_constructor_type": self.account_constructor_type,
+            "wallet_client_binding_status": self.wallet_client_binding_status,
+            "execution_context_binding_status": self.execution_context_binding_status,
+            "transaction_from_semantics": self.transaction_from_semantics,
+            "source_trace_status": self.source_trace_status,
+            "source_files": self.source_files,
+            "source_fingerprints": self.source_fingerprints,
+            "source_roles": self.source_roles,
+            "trace_steps": self.trace_steps,
+            "smart_wallet_used_in_signing_path": self.smart_wallet_used_in_signing_path,
+            "python_parity_status": self.python_parity_status,
+        }
+
+
+@dataclass(frozen=True, repr=False)
+class DirectSignerCandidateEvidence:
+    candidate: str
+    address: str | None
+    evidence: tuple[str, ...] = ()
+    compatible_with_context_account: str = "unresolved"
+    used_as_transaction_sender: str = "unresolved"
+    used_as_vault_subject: str = "unresolved"
+    used_as_rest_subject: str = "unresolved"
+    used_as_authenticated_subject: str = "unresolved"
+    authoritative: bool = False
+    unresolved_reasons: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.address is not None:
+            object.__setattr__(self, "address", _address(self.address, "candidate_address"))
+        if self.authoritative:
+            raise ValueError("candidate evidence cannot be authoritative from declarations alone")
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "candidate": self.candidate,
+            "address": _mask(self.address),
+            "evidence": self.evidence,
+            "compatible_with_context_account": self.compatible_with_context_account,
+            "used_as_transaction_sender": self.used_as_transaction_sender,
+            "used_as_vault_subject": self.used_as_vault_subject,
+            "used_as_rest_subject": self.used_as_rest_subject,
+            "used_as_authenticated_subject": self.used_as_authenticated_subject,
+            "authoritative": False,
+            "unresolved_reasons": self.unresolved_reasons,
+        }
+
+    def __repr__(self) -> str:
+        return f"DirectSignerCandidateEvidence(candidate={self.candidate!r}, address={_mask(self.address)!r}, authoritative=False)"
+
+
+@dataclass(frozen=True, repr=False)
+class DreamDexDirectSignerBindingEvidence:
+    execution_mode: str = "direct_owner"
+    account_constructor_status: str = "unavailable"
+    account_constructor_type: str = "unavailable"
+    wallet_client_binding_status: str = "unavailable"
+    execution_context_binding_status: str = "unavailable"
+    transaction_from_semantics: str = "unavailable"
+    contest_owner_candidate: str | None = None
+    platform_trading_wallet_candidate: str | None = None
+    configured_owner_match_status: str = "unresolved"
+    configured_trading_match_status: str = "unresolved"
+    smart_wallet_used_in_signing_path: bool | None = None
+    signer_address_source: str = "unavailable"
+    signer_role: str = "unresolved"
+    source_trace_status: str = "unavailable"
+    python_parity_status: str = "unavailable"
+    authoritative: bool = False
+    evidence_sources: tuple[str, ...] = ()
+    source_trace: tuple[dict[str, str], ...] = ()
+    conflicts: tuple[str, ...] = ()
+    unresolved_reasons: tuple[str, ...] = ()
+    direct_signer_configured: str = "unconfigured"
+    source_compatibility_status: str = "unresolved"
+    direct_signer_address: str | None = None
+    key_availability: str = "unavailable"
+    candidate_matrix: tuple[DirectSignerCandidateEvidence, ...] = ()
+    required_capabilities: tuple[str, ...] = SIGNER_CAPABILITIES
+
+    def __post_init__(self) -> None:
+        for name in ("contest_owner_candidate", "platform_trading_wallet_candidate", "direct_signer_address"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _address(value, name))
+        if self.direct_signer_configured not in DIRECT_SIGNER_STATUSES:
+            raise ValueError("invalid direct_signer_configured status")
+        if self.source_compatibility_status not in {"unresolved", "source_compatible", "source_conflicting"}:
+            raise ValueError("invalid source_compatibility_status")
+        if self.configured_owner_match_status not in MATCH_STATUSES or self.configured_trading_match_status not in MATCH_STATUSES:
+            raise ValueError("invalid signer match status")
+        if self.authoritative:
+            raise ValueError("direct signer binding is never authoritative without runtime signer evidence")
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "execution_mode": self.execution_mode,
+            "account_constructor_status": self.account_constructor_status,
+            "account_constructor_type": self.account_constructor_type,
+            "wallet_client_binding_status": self.wallet_client_binding_status,
+            "execution_context_binding_status": self.execution_context_binding_status,
+            "transaction_from_semantics": self.transaction_from_semantics,
+            "contest_owner_candidate": _mask(self.contest_owner_candidate),
+            "platform_trading_wallet_candidate": _mask(self.platform_trading_wallet_candidate),
+            "configured_owner_match_status": self.configured_owner_match_status,
+            "configured_trading_match_status": self.configured_trading_match_status,
+            "smart_wallet_used_in_signing_path": self.smart_wallet_used_in_signing_path,
+            "signer_address_source": self.signer_address_source,
+            "signer_role": self.signer_role,
+            "source_trace_status": self.source_trace_status,
+            "python_parity_status": self.python_parity_status,
+            "authoritative": False,
+            "evidence_sources": self.evidence_sources,
+            "source_trace": self.source_trace,
+            "conflicts": self.conflicts,
+            "unresolved_reasons": self.unresolved_reasons,
+            "direct_signer_configured": self.direct_signer_configured,
+            "source_compatibility_status": self.source_compatibility_status,
+            "direct_signer_address": _mask(self.direct_signer_address) if self.direct_signer_address else "<missing>",
+            "key_availability": self.key_availability,
+            "candidate_matrix": tuple(item.safe_dict() for item in self.candidate_matrix),
+            "required_capabilities": self.required_capabilities,
+        }
+
+    def __repr__(self) -> str:
+        return f"DreamDexDirectSignerBindingEvidence(configured={self.direct_signer_configured!r}, address={_mask(self.direct_signer_address)!r}, authoritative=False)"
+
+
+@dataclass(frozen=True, repr=False)
+class DreamDexDirectTransactionSignerRequirements:
+    required_chain_id: int | None = 5031
+    required_address: str | None = None
+    capabilities: tuple[str, ...] = SIGNER_CAPABILITIES
+    transaction_types: tuple[str, ...] = ("placeOrder", "cancelOrder", "reduceOrder")
+    native_value_support: str = "conditional_getAutoPullRequirement"
+    contract_call_support: str = "required"
+    receipt_access_required: bool = True
+    nonce_management_required: bool = True
+    gas_estimation_required: bool = True
+    production_status: str = "unavailable"
+    unresolved_reasons: tuple[str, ...] = ("direct_signer_key_unavailable", "direct_transaction_transport_unimplemented")
+
+    def __post_init__(self) -> None:
+        if self.required_address is not None:
+            object.__setattr__(self, "required_address", _address(self.required_address, "required_address"))
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "required_chain_id": self.required_chain_id,
+            "required_address": _mask(self.required_address),
+            "capabilities": self.capabilities,
+            "transaction_types": self.transaction_types,
+            "native_value_support": self.native_value_support,
+            "contract_call_support": self.contract_call_support,
+            "receipt_access_required": self.receipt_access_required,
+            "nonce_management_required": self.nonce_management_required,
+            "gas_estimation_required": self.gas_estimation_required,
+            "production_status": self.production_status,
+            "unresolved_reasons": self.unresolved_reasons,
+        }
+
+    def __repr__(self) -> str:
+        return f"DreamDexDirectTransactionSignerRequirements(chain_id={self.required_chain_id!r}, address={_mask(self.required_address)!r}, production_status={self.production_status!r})"
 
 
 @dataclass(frozen=True)
@@ -299,9 +498,158 @@ def audit_direct_owner_vendor(vendor_root: str | Path | None = None, *, declared
 build_direct_owner_execution_audit = audit_direct_owner_vendor
 
 
-def direct_owner_blocking_reasons(audit: DirectOwnerExecutionAudit | None = None) -> tuple[str, ...]:
+def audit_direct_account_construction(vendor_root: str | Path | None = None) -> DirectAccountConstructionTrace:
+    """Trace source semantics without importing or invoking vendor clients."""
+    root = Path(vendor_root) if vendor_root is not None else VENDOR_ROOT
+    client = root / "packages/core/src/client.ts"
+    execute = root / "packages/core/src/execute.ts"
+    pool = root / "packages/core/src/pool.ts"
+    py_client = root / "packages/core-py/dreamdex_core/client.py"
+    py_execute = root / "packages/core-py/dreamdex_core/execute.py"
+    files = [path for path in (client, execute, pool, py_client, py_execute) if path.is_file()]
+    if not files:
+        return DirectAccountConstructionTrace("unavailable", "unavailable", "unavailable", "unavailable", "unavailable", "unavailable")
+    texts = {path: path.read_text(encoding="utf-8", errors="ignore") for path in files}
+    c, e, p = texts.get(client, ""), texts.get(execute, ""), texts.get(pool, "")
+    pyc, pye = texts.get(py_client, ""), texts.get(py_execute, "")
+    confirmed = all(term in c for term in ("privateKeyToAccount", "createWalletClient", "createPublicClient", "return { net, account, publicClient, walletClient, owner }"))
+    ctx_confirmed = all(term in e for term in ("export interface ExecCtx", "account: Account", "ctx.account.address", "writeContract"))
+    source_files = tuple(_utc_path(root, path) for path in files)
+    fingerprints = tuple((_utc_path(root, path), sha256(path.read_bytes()).hexdigest()) for path in files)
+    roles = tuple((name, role) for name, role in (
+        ("packages/core/src/client.ts", "account_constructor_and_client_binding"),
+        ("packages/core/src/execute.ts", "execution_context_and_transaction_sender"),
+        ("packages/core/src/pool.ts", "pool_execution_context_and_owner_subject"),
+        ("packages/core-py/dreamdex_core/client.py", "python_account_constructor"),
+        ("packages/core-py/dreamdex_core/execute.py", "python_place_cancel_execution"),
+    ) if name in source_files)
+    steps = (
+        "createChainContext input privateKey -> privateKeyToAccount",
+        "account -> createWalletClient({account, chain, transport})",
+        "ChainContext -> ExecCtx {publicClient,walletClient,account}",
+        "ExecCtx account -> ctx.account.address",
+        "simulateContract/writeContract account -> transaction from supplied account address",
+    )
+    return DirectAccountConstructionTrace(
+        "source_confirmed" if confirmed else "unavailable",
+        "viem privateKeyToAccount -> Account",
+        "source_confirmed" if confirmed else "unavailable",
+        "source_confirmed" if ctx_confirmed else "unavailable",
+        "supplied_account_address" if ctx_confirmed else "unavailable",
+        "confirmed" if confirmed and ctx_confirmed else "unavailable",
+        source_files,
+        fingerprints,
+        roles,
+        steps,
+        False,
+        "partial" if pyc and pye else "unavailable",
+    )
+
+
+trace_direct_account_construction = audit_direct_account_construction
+
+
+def _match_declared(address: str | None, candidate: str | None) -> str:
+    if address is None or candidate is None:
+        return "unresolved"
+    return "confirmed" if address.lower() == candidate.lower() else "mismatch"
+
+
+def build_direct_signer_candidate_matrix(
+    *,
+    contest_owner_address: str | None = None,
+    platform_trading_address: str | None = None,
+    direct_signer_address: str | None = None,
+) -> tuple[DirectSignerCandidateEvidence, ...]:
+    owner = _safe_optional_address(contest_owner_address, "contest_owner_address")
+    trading = _safe_optional_address(platform_trading_address, "platform_trading_address")
+    signer = _safe_optional_address(direct_signer_address, "direct_signer_address")
+    common = ("public declaration only", "no runtime key or transaction evidence")
+    result = [
+        DirectSignerCandidateEvidence("contest_owner", owner, common + ("candidate from configured/login owner",), _match_declared(signer, owner), "source_semantics_only", "unresolved", "unresolved", "unresolved", False, ("key_control_unverified",)),
+        DirectSignerCandidateEvidence("platform_trading_wallet", trading, common + ("candidate from configured trading address",), _match_declared(signer, trading), "not_observed_in_direct_ctx", "unresolved", "unresolved", "unresolved", False, ("smart_wallet_signing_role_unresolved",)),
+        DirectSignerCandidateEvidence("external_declared", signer, common + ("DREAMDEX_READ_ONLY_DIRECT_SIGNER_ADDRESS",) if signer else common, "user_declared" if signer else "unresolved", "unresolved", "unresolved", "unresolved", "unresolved", False, ("key_control_unverified",)),
+        DirectSignerCandidateEvidence("unavailable", None, ("no public signer declaration",), "unresolved", "unresolved", "unresolved", "unresolved", "unresolved", False, ("direct_signer_address_unconfigured",)),
+    ]
+    return tuple(result)
+
+
+def _declared_direct_signer(environ: Mapping[str, str] | None = None) -> tuple[str, str | None]:
+    values = environ if environ is not None else {}
+    raw = values.get(DIRECT_SIGNER_ADDRESS_ENV) if environ is not None else os.environ.get(DIRECT_SIGNER_ADDRESS_ENV)
+    if raw in (None, ""):
+        return "unconfigured", None
+    try:
+        return "user_declared", _address(raw, DIRECT_SIGNER_ADDRESS_ENV)
+    except ValueError:
+        return "invalid", None
+
+
+def build_direct_signer_binding_evidence(
+    *,
+    contest_owner_address: str | None = None,
+    platform_trading_address: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    vendor_root: str | Path | None = None,
+) -> DreamDexDirectSignerBindingEvidence:
+    trace = audit_direct_account_construction(vendor_root)
+    status, signer = _declared_direct_signer(environ)
+    owner = _safe_optional_address(contest_owner_address, "contest_owner_address")
+    trading = _safe_optional_address(platform_trading_address, "platform_trading_address")
+    reasons: list[str] = []
+    if status in {"unconfigured", "invalid"}:
+        reasons.append("direct_signer_address_unconfigured" if status == "unconfigured" else "direct_signer_address_invalid")
+    reasons.extend(("direct_signer_key_unavailable", "direct_signer_binding_non_authoritative", "direct_transaction_transport_unimplemented"))
+    if trace.python_parity_status != "confirmed":
+        reasons.append("python_direct_execution_unsupported")
+    conflicts: list[str] = []
+    compatibility = "unresolved"
+    if status == "user_declared":
+        compatibility = "source_compatible" if signer in {owner, trading} and signer is not None else "source_conflicting"
+    if status == "user_declared" and compatibility == "source_conflicting":
+        conflicts.append("declared_signer_matches_neither_candidate")
+    role = "unresolved"
+    if signer is not None:
+        role = "contest_owner" if signer == owner else ("platform_trading_wallet" if signer == trading else "external_declared")
+    return DreamDexDirectSignerBindingEvidence(
+        account_constructor_status=trace.account_constructor_status,
+        account_constructor_type=trace.account_constructor_type,
+        wallet_client_binding_status=trace.wallet_client_binding_status,
+        execution_context_binding_status=trace.execution_context_binding_status,
+        transaction_from_semantics=trace.transaction_from_semantics,
+        contest_owner_candidate=owner,
+        platform_trading_wallet_candidate=trading,
+        configured_owner_match_status=_match_declared(signer, owner),
+        configured_trading_match_status=_match_declared(signer, trading),
+        smart_wallet_used_in_signing_path=trace.smart_wallet_used_in_signing_path,
+        signer_address_source=(DIRECT_SIGNER_ADDRESS_ENV if signer is not None else "unavailable"),
+        signer_role=role,
+        source_trace_status=trace.source_trace_status,
+        python_parity_status=trace.python_parity_status,
+        authoritative=False,
+        evidence_sources=trace.source_files,
+        source_trace=tuple({"source": source, "role": role} for source, role in trace.source_roles),
+        conflicts=tuple(conflicts),
+        unresolved_reasons=tuple(dict.fromkeys(reasons)),
+        direct_signer_configured=status,
+        source_compatibility_status=compatibility,
+        direct_signer_address=signer,
+        key_availability="unavailable",
+        candidate_matrix=build_direct_signer_candidate_matrix(contest_owner_address=owner, platform_trading_address=trading, direct_signer_address=signer),
+    )
+
+
+def build_direct_transaction_signer_requirements(address: str | None = None) -> DreamDexDirectTransactionSignerRequirements:
+    return DreamDexDirectTransactionSignerRequirements(required_address=_safe_optional_address(address, "direct_signer_address"))
+
+
+build_direct_signer_binding = build_direct_signer_binding_evidence
+
+
+def direct_owner_blocking_reasons(audit: DirectOwnerExecutionAudit | None = None, *, binding: DreamDexDirectSignerBindingEvidence | None = None) -> tuple[str, ...]:
     audit = audit or audit_direct_owner_vendor()
-    return tuple(dict.fromkeys((*audit.unresolved_reasons, "direct_owner_execution_mapping_unresolved", "direct_order_transport_unconfirmed", "transaction_signer_unavailable", "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable")))
+    binding = binding or build_direct_signer_binding_evidence()
+    return tuple(dict.fromkeys((*audit.unresolved_reasons, *binding.unresolved_reasons, "direct_owner_execution_mapping_unresolved", "direct_order_transport_unconfirmed", "transaction_signer_unavailable", "order_id_lifecycle_unconfirmed", "direct_order_reconciliation_unavailable")))
 
 
 def build_direct_owner_identity(*, contest_login_address: str | None = None, configured_owner_address: str | None = None, platform_trading_address: str | None = None, authenticated_api_subject: str | None = None) -> DreamDexDirectOwnerExecutionIdentity:
@@ -642,7 +990,7 @@ parse_order_cancelled_receipt = parse_order_cancelled_event
 
 
 __all__ = [
-    "DIRECT_EXECUTION_MODES", "DIRECT_TRANSPORTS", "PLACE_SIGNATURE", "CANCEL_SIGNATURE", "REDUCE_SIGNATURE", "PLACE_SELECTOR", "CANCEL_SELECTOR", "REDUCE_SELECTOR", "ORDER_PLACED_TOPIC", "ORDER_CANCELLED_TOPIC",
-    "DirectExecutionMode", "ExecutionMode", "DirectOwnerExecutionMode", "DreamDexDirectOwnerExecutionIdentity", "DreamDexDirectOrderSpecification", "DirectExecutionOperation", "DirectOwnerExecutionAudit", "DirectOrderValidationResult", "DirectOrderCallPreview", "OrderIdLifecycleEvidence",
-    "audit_direct_selectors", "audit_direct_owner_vendor", "build_direct_owner_execution_audit", "direct_owner_blocking_reasons", "build_direct_owner_identity", "validate_direct_order_specification", "build_place_order_call_preview", "build_cancel_order_call_preview", "build_reduce_order_call_preview", "build_place_order_preview", "build_cancel_order_preview", "build_reduce_order_preview", "compute_safe_calldata_fingerprint", "parse_order_placed_event", "parse_order_cancelled_event", "parse_order_placed_receipt", "parse_order_cancelled_receipt", "build_order_specification",
+    "DIRECT_EXECUTION_MODES", "DIRECT_TRANSPORTS", "DIRECT_SIGNER_ADDRESS_ENV", "DIRECT_SIGNER_STATUSES", "MATCH_STATUSES", "SIGNER_CAPABILITIES", "PLACE_SIGNATURE", "CANCEL_SIGNATURE", "REDUCE_SIGNATURE", "PLACE_SELECTOR", "CANCEL_SELECTOR", "REDUCE_SELECTOR", "ORDER_PLACED_TOPIC", "ORDER_CANCELLED_TOPIC",
+    "DirectExecutionMode", "ExecutionMode", "DirectOwnerExecutionMode", "DreamDexDirectOwnerExecutionIdentity", "DirectAccountConstructionTrace", "DirectSignerCandidateEvidence", "DreamDexDirectSignerBindingEvidence", "DreamDexDirectTransactionSignerRequirements", "DreamDexDirectOrderSpecification", "DirectExecutionOperation", "DirectOwnerExecutionAudit", "DirectOrderValidationResult", "DirectOrderCallPreview", "OrderIdLifecycleEvidence",
+    "audit_direct_selectors", "audit_direct_owner_vendor", "build_direct_owner_execution_audit", "audit_direct_account_construction", "trace_direct_account_construction", "build_direct_signer_candidate_matrix", "build_direct_signer_binding_evidence", "build_direct_signer_binding", "build_direct_transaction_signer_requirements", "direct_owner_blocking_reasons", "build_direct_owner_identity", "validate_direct_order_specification", "build_place_order_call_preview", "build_cancel_order_call_preview", "build_reduce_order_call_preview", "build_place_order_preview", "build_cancel_order_preview", "build_reduce_order_preview", "compute_safe_calldata_fingerprint", "parse_order_placed_event", "parse_order_cancelled_event", "parse_order_placed_receipt", "parse_order_cancelled_receipt", "build_order_specification",
 ]
