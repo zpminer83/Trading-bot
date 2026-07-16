@@ -75,6 +75,10 @@ from bot.execution.dreamdex_transaction_preflight import (
     run_transaction_preflight,
     unavailable_preflight_result,
 )
+from bot.execution.dreamdex_execution_journal import (
+    DreamDexExecutionJournalPolicy,
+    open_journal,
+)
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
@@ -82,6 +86,9 @@ RECONCILIATION_BRIDGE_ENV = "DREAMDEX_ENABLE_RECONCILIATION_EVIDENCE_BRIDGE"
 LIVE_PREFLIGHT_ENV = "DREAMDEX_ENABLE_LIVE_TRANSACTION_PREFLIGHT"
 PREFLIGHT_RPC_ENV = "DREAMDEX_READ_ONLY_RPC_URL"
 PREFLIGHT_ENABLE_ENV = LIVE_PREFLIGHT_ENV
+JOURNAL_ENABLE_ENV = "DREAMDEX_ENABLE_EXECUTION_JOURNAL"
+JOURNAL_PATH_ENV = "DREAMDEX_EXECUTION_JOURNAL_PATH"
+JOURNAL_DIAGNOSTICS_ENV = "DREAMDEX_EXECUTION_JOURNAL_DIAGNOSTICS"
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -779,6 +786,77 @@ def _strict_int_setting(environ: Mapping[str, str], name: str, *, minimum: int =
     return value
 
 
+def build_execution_journal_policy_from_env(environ: Mapping[str, str]) -> DreamDexExecutionJournalPolicy:
+    """Build journal policy from CLI settings without opening or creating a file."""
+    busy = _strict_int_setting(environ, "DREAMDEX_EXECUTION_JOURNAL_BUSY_TIMEOUT_MS", minimum=1) or 2500
+    max_intents = _strict_int_setting(environ, "DREAMDEX_EXECUTION_JOURNAL_MAX_ACTIVE_INTENTS", minimum=1)
+    max_reservations = _strict_int_setting(environ, "DREAMDEX_EXECUTION_JOURNAL_MAX_ACTIVE_RESERVATIONS", minimum=1)
+    # Explicit limits are required for an enabled production journal.  The
+    # offline default remains bounded so fixture callers can use the policy.
+    unresolved = ()
+    if _parse_enable_flag(environ.get(JOURNAL_ENABLE_ENV)) == "enabled" and (max_intents is None or max_reservations is None):
+        unresolved = ("execution_journal_limits_unresolved",)
+    return DreamDexExecutionJournalPolicy(
+        busy_timeout_ms=busy,
+        maximum_active_intents=max_intents or 10000,
+        maximum_active_reservations=max_reservations or 10000,
+        unresolved_reasons=unresolved,
+        authoritative=False,
+    )
+
+
+def inspect_execution_journal_from_env(environ: Mapping[str, str]):
+    """Read an existing journal only when an explicit diagnostic flag is set."""
+    flag = _parse_enable_flag(environ.get(JOURNAL_DIAGNOSTICS_ENV))
+    if flag == "invalid":
+        raise ValueError(f"{JOURNAL_DIAGNOSTICS_ENV} must be a strict boolean")
+    if flag != "enabled":
+        return None
+    raw_path = environ.get(JOURNAL_PATH_ENV)
+    if not raw_path:
+        return None
+    policy = build_execution_journal_policy_from_env(environ)
+    # Read-only diagnostic open never creates a database and never mutates it.
+    return open_journal(raw_path, policy, mode="ro")
+
+
+def _print_durable_execution_journal(snapshot=None, *, enabled: bool = False, execution_performed: bool = False, path_configured: bool = False) -> None:
+    print("DURABLE EXECUTION JOURNAL:")
+    print(f"  journal enabled: {'YES' if enabled else 'NO'}")
+    print(f"  journal execution performed: {'YES' if execution_performed else 'NO'}")
+    print(f"  journal path configured: {'YES' if path_configured else 'NO'}")
+    print("  journal path output allowed: NO")
+    print("  storage engine: sqlite3")
+    print(f"  schema version: {snapshot.schema_version if snapshot and snapshot.schema_version is not None else 'unavailable'}")
+    print(f"  schema compatible: {snapshot.schema_status if snapshot else 'unresolved'}")
+    print(f"  integrity status: {snapshot.integrity_status if snapshot else 'unavailable'}")
+    print(f"  WAL enabled: {'YES' if enabled and execution_performed else 'NO'}")
+    print("  synchronous mode: FULL" if enabled and execution_performed else "  synchronous mode: unavailable")
+    print("  writer locking: BEGIN IMMEDIATE" if enabled and execution_performed else "  writer locking: unavailable")
+    for label, value in (
+        ("intent count", snapshot.intent_count if snapshot else 0),
+        ("active intent count", snapshot.active_intent_count if snapshot else 0),
+        ("nonce reservation count", snapshot.reservation_count if snapshot else 0),
+        ("active nonce reservation count", snapshot.active_reservation_count if snapshot else 0),
+        ("unknown state count", snapshot.unknown_state_count if snapshot else 0),
+        ("conflicted intent count", snapshot.conflicted_intent_count if snapshot else 0),
+    ):
+        print(f"  {label}: {value}")
+    print(f"  recovery required: {'YES' if snapshot and snapshot.recovery_required else 'NO'}")
+    print(f"  safe to create intent: {'YES' if snapshot and snapshot.safe_to_create_intent else 'NO'}")
+    print(f"  safe to reserve nonce: {'YES' if snapshot and snapshot.safe_to_reserve_nonce else 'NO'}")
+    print("  local nonce reserved: NO")
+    print("  network nonce fresh: NO")
+    print("  nonce externally exclusive: NO")
+    print("  nonce revalidation required: YES")
+    print(f"  journal authoritative: {'YES' if snapshot and snapshot.schema_status == 'compatible' and False else 'NO'}")
+    print("  signing allowed: NO")
+    print("  submission allowed: NO")
+    print("  raw transaction output allowed: NO")
+    blockers = ", ".join(snapshot.blockers) if snapshot and snapshot.blockers else ("execution_journal_unavailable" if not execution_performed else "none")
+    print(f"  journal blockers: {blockers}")
+
+
 def build_live_transaction_preflight_policy(environ: Mapping[str, str]) -> DreamDexTransactionPreflightPolicy:
     """Read CLI-only settings; the production preflight module reads no env."""
     values = {
@@ -862,7 +940,7 @@ def _print_live_transaction_preflight(result=None, *, enabled: bool = False, exe
     print(f"  preflight blockers: {', '.join(preview.blockers) or 'none'}")
 
 
-def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None) -> None:
+def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False, preflight_result=None, preflight_enabled: bool = False, preflight_execution_performed: bool = False, preflight_rpc_configured: bool = False, preflight_policy: DreamDexTransactionPreflightPolicy | None = None, journal_snapshot=None, journal_enabled: bool = False, journal_execution_performed: bool = False, journal_path_configured: bool = False) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
@@ -884,6 +962,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_execution_pipeline_summary()
     _print_transaction_signer_boundary()
     _print_live_transaction_preflight(preflight_result, enabled=preflight_enabled, execution_performed=preflight_execution_performed, rpc_configured=preflight_rpc_configured, policy=preflight_policy)
+    _print_durable_execution_journal(journal_snapshot, enabled=journal_enabled, execution_performed=journal_execution_performed, path_configured=journal_path_configured)
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
@@ -992,6 +1071,7 @@ def main() -> int:
         print("Missing configuration: " + ", ".join(missing))
         print("No network request or order operation was attempted.")
         _print_live_transaction_preflight(None, enabled=False, execution_performed=False, rpc_configured=False)
+        _print_durable_execution_journal(None, enabled=False, execution_performed=False, path_configured=False)
         print("Real submission enabled: NO")
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
@@ -1005,6 +1085,20 @@ def main() -> int:
             raise ValueError(f"{LIVE_PREFLIGHT_ENV} must be a strict boolean")
         preflight_enabled = preflight_flag == "enabled"
         preflight_policy = build_live_transaction_preflight_policy(os.environ)
+        journal_flag = _parse_enable_flag(os.environ.get(JOURNAL_ENABLE_ENV))
+        if journal_flag == "invalid":
+            raise ValueError(f"{JOURNAL_ENABLE_ENV} must be a strict boolean")
+        journal_enabled = journal_flag == "enabled"
+        journal_path_configured = bool(os.environ.get(JOURNAL_PATH_ENV))
+        journal_snapshot = None
+        journal_execution_performed = False
+        journal_handle = inspect_execution_journal_from_env(os.environ)
+        if journal_handle is not None:
+            try:
+                journal_snapshot = journal_handle.build_execution_journal_snapshot()
+                journal_execution_performed = True
+            finally:
+                journal_handle.close()
         symbol = os.environ.get("DREAMDEX_READ_ONLY_MARKET", "SOMI:USDso")
         if fixture_path:
             fixture = load_fixture(fixture_path)
@@ -1042,7 +1136,7 @@ def main() -> int:
         # Consequently enabling the flag without an explicit typed envelope is
         # a safe, observable no-op and performs zero preflight RPC calls.
         preflight_result = execute_live_transaction_preflight(None, os.environ)
-        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy)
+        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled, preflight_result=preflight_result, preflight_enabled=preflight_enabled, preflight_execution_performed=False, preflight_rpc_configured=bool(os.environ.get(PREFLIGHT_RPC_ENV) or os.environ.get("DREAMDEX_RPC_URL")), preflight_policy=preflight_policy, journal_snapshot=journal_snapshot, journal_enabled=journal_enabled, journal_execution_performed=journal_execution_performed, journal_path_configured=journal_path_configured)
         return 0
     except Exception as exc:
         print("READ-ONLY ACCOUNT CHECK")

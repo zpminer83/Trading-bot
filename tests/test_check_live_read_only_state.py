@@ -58,6 +58,12 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "external signer environment isolated: unavailable" in output
     assert "external signer message integrity: unavailable" in output
     assert "external signer signature verification: unavailable" in output
+    assert "DURABLE EXECUTION JOURNAL:" in output
+    assert "journal enabled: NO" in output
+    assert "journal execution performed: NO" in output
+    assert "journal path output allowed: NO" in output
+    assert "signing allowed: NO" in output
+    assert "submission allowed: NO" in output
     assert "SIWE HTTP transport configured: NO" in output
     assert "SIWE HTTP transport status: disabled" in output
     assert "auth network attempt performed: NO" in output

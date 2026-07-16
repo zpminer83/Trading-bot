@@ -143,6 +143,20 @@ class DreamDexExecutionBlockers:
     NATIVE_FEE_BALANCE_INSUFFICIENT = "native_fee_balance_insufficient"
     FINALIZED_ENVELOPE_UNAVAILABLE = "finalized_envelope_unavailable"
     PREFLIGHT_REQUIRES_NONCE_REVALIDATION = "preflight_requires_nonce_revalidation"
+    EXECUTION_JOURNAL_UNAVAILABLE = "execution_journal_unavailable"
+    EXECUTION_JOURNAL_PATH_UNAVAILABLE = "execution_journal_path_unavailable"
+    EXECUTION_JOURNAL_SCHEMA_INCOMPATIBLE = "execution_journal_schema_incompatible"
+    EXECUTION_JOURNAL_INTEGRITY_FAILED = "execution_journal_integrity_failed"
+    EXECUTION_JOURNAL_RECOVERY_REQUIRED = "execution_journal_recovery_required"
+    EXECUTION_INTENT_CONFLICT = "execution_intent_conflict"
+    EXECUTION_INTENT_LIMIT_EXCEEDED = "execution_intent_limit_exceeded"
+    NONCE_RESERVATION_UNAVAILABLE = "nonce_reservation_unavailable"
+    NONCE_RESERVATION_CONFLICT = "nonce_reservation_conflict"
+    NONCE_RESERVATION_LIMIT_EXCEEDED = "nonce_reservation_limit_exceeded"
+    PENDING_NONCE_SNAPSHOT_REQUIRES_REVALIDATION = "pending_nonce_snapshot_requires_revalidation"
+    EXTERNAL_NONCE_EXCLUSIVITY_UNAVAILABLE = "external_nonce_exclusivity_unavailable"
+    UNKNOWN_EXECUTION_STATE_BLOCKS_PROGRESS = "unknown_execution_state_blocks_progress"
+    EXECUTION_JOURNAL_LIMITS_UNRESOLVED = "execution_journal_limits_unresolved"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -169,6 +183,15 @@ class DreamDexExecutionBlockers:
         TRANSACTION_FEE_LIMIT_EXCEEDED, NATIVE_FEE_BALANCE_UNAVAILABLE,
         NATIVE_FEE_BALANCE_INSUFFICIENT, FINALIZED_ENVELOPE_UNAVAILABLE,
         PREFLIGHT_REQUIRES_NONCE_REVALIDATION,
+        EXECUTION_JOURNAL_UNAVAILABLE, EXECUTION_JOURNAL_PATH_UNAVAILABLE,
+        EXECUTION_JOURNAL_SCHEMA_INCOMPATIBLE, EXECUTION_JOURNAL_INTEGRITY_FAILED,
+        EXECUTION_JOURNAL_RECOVERY_REQUIRED, EXECUTION_INTENT_CONFLICT,
+        EXECUTION_INTENT_LIMIT_EXCEEDED, NONCE_RESERVATION_UNAVAILABLE,
+        NONCE_RESERVATION_CONFLICT, NONCE_RESERVATION_LIMIT_EXCEEDED,
+        PENDING_NONCE_SNAPSHOT_REQUIRES_REVALIDATION,
+        EXTERNAL_NONCE_EXCLUSIVITY_UNAVAILABLE,
+        UNKNOWN_EXECUTION_STATE_BLOCKS_PROGRESS,
+        EXECUTION_JOURNAL_LIMITS_UNRESOLVED,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -360,6 +383,11 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "readonly_rpc_protocol": "rpc", "validate_rpc_response": "rpc",
         "finalize_transaction_envelope": "preflight", "build_transaction_preflight_preview": "preflight",
         "serialize_transaction_preflight_diagnostics": "preflight",
+        "execution_journal_model": "journal", "initialize_execution_journal": "journal",
+        "validate_execution_journal_schema": "journal", "verify_execution_journal_integrity": "journal",
+        "create_execution_intent": "journal", "idempotent_intent_lookup": "journal",
+        "reserve_nonce_locally": "journal", "enforce_nonce_uniqueness": "journal",
+        "validate_state_transition": "journal",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -368,11 +396,13 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "fetch_order_metadata_live": "authentication", "fetch_onchain_fills_live": "authentication",
         "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
         "signer_address_discovery": "signing",
+        "revalidate_nonce_live": "journal", "externally_lock_nonce": "journal",
     }
     partial = {
         "resolve_pending_nonce": "preflight", "estimate_transaction_gas": "preflight",
         "detect_fee_model": "preflight", "resolve_transaction_fees": "preflight",
         "check_native_fee_balance": "preflight",
+        "recover_execution_state": "journal",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())
