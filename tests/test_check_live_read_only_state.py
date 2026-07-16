@@ -23,6 +23,7 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     monkeypatch.setenv("DREAMDEX_READ_ONLY_FIXTURE", str(FIXTURE))
     monkeypatch.setenv("DREAMDEX_READ_ONLY_DRY_RUN_PRICE", "10.0000")
     monkeypatch.setenv("DREAMDEX_READ_ONLY_DRY_RUN_QUANTITY", "1")
+    monkeypatch.delenv("DREAMDEX_ENABLE_RECONCILIATION_EVIDENCE_BRIDGE", raising=False)
     code = check_live_read_only_state.main()
     output = capsys.readouterr().out
     assert code == 0
@@ -104,6 +105,11 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "envelope raw calldata output allowed: NO" in output
     assert "transaction lifecycle model: available_offline" in output
     assert "ORDER RECONCILIATION GRAPH:" in output
+    assert "READ-ONLY RECONCILIATION EVIDENCE BRIDGE:" in output
+    assert "bridge enabled: NO" in output
+    assert "bridge execution performed: NO" in output
+    assert "network attempt caused by bridge: NO" in output
+    assert "bridge reconciliation complete: NO" in output
     assert "graph builder: available_offline" in output
     assert "graph reconciliation status: unavailable" in output
     assert "graph authoritative: NO" in output
@@ -121,6 +127,33 @@ def test_cli_fixture_is_read_only_and_masks_account_id(monkeypatch, capsys):
     assert "raw receipt output allowed: NO" in output
     assert "raw event output allowed: NO" in output
     assert "operator_permission_unavailable" not in output.split("Hypothetical trading blocked reason:", 1)[1].split("\n", 1)[0]
+
+
+def test_cli_bridge_opt_in_only_uses_already_materialised_fixture_evidence(monkeypatch, capsys):
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "0x1234567890abcdef1234567890abcdef12345678")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_FIXTURE", str(FIXTURE))
+    monkeypatch.setenv("DREAMDEX_ENABLE_RECONCILIATION_EVIDENCE_BRIDGE", "yes")
+    code = check_live_read_only_state.main()
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "bridge enabled: YES" in output
+    assert "bridge execution performed: YES" in output
+    assert "network attempt caused by bridge: NO" in output
+    assert "graph count: 0" in output
+    assert "bridge reconciliation complete: NO" in output
+    assert "raw authenticated payload output allowed: NO" in output
+    assert "raw on-chain evidence output allowed: NO" in output
+
+
+def test_cli_bridge_invalid_flag_fails_closed_without_network(monkeypatch, capsys):
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "0x1234567890abcdef1234567890abcdef12345678")
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_FIXTURE", str(FIXTURE))
+    monkeypatch.setenv("DREAMDEX_ENABLE_RECONCILIATION_EVIDENCE_BRIDGE", "maybe")
+    code = check_live_read_only_state.main()
+    output = capsys.readouterr().out
+    assert code != 0
+    assert "strict boolean" in output
+    assert "Real submission enabled: NO" in output
 
 
 def test_cli_prints_platform_roles_and_identity_binding_without_authorizing(monkeypatch, capsys):

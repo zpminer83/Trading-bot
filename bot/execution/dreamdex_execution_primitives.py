@@ -235,13 +235,19 @@ _SENSITIVE_KEYS = (
 )
 
 
+def _is_raw_sensitive_key(name: str) -> bool:
+    if name.endswith(("_status", "_count", "_complete", "_present", "_fingerprint", "_masked", "_integrity")):
+        return False
+    return name in _SENSITIVE_KEYS or any(name.endswith("_" + token) for token in _SENSITIVE_KEYS)
+
+
 def ensure_no_raw_sensitive_fields(value: Any) -> Any:
     """Reject raw sensitive fields in a diagnostics payload and return it."""
     def walk(item: Any, path: str = "") -> None:
         if isinstance(item, Mapping):
             for key, child in item.items():
                 name = str(key).lower()
-                if any(token in name for token in _SENSITIVE_KEYS):
+                if _is_raw_sensitive_key(name):
                     raise ValueError("raw_sensitive_field:" + (path + "." if path else "") + str(key))
                 if name in {"address", "owner_address", "from_address", "to_address", "account_address", "market_address", "pool_address", "transaction_hash", "block_hash"} and isinstance(child, str):
                     if name.endswith("hash") and _HASH_RE.fullmatch(child):
@@ -308,12 +314,18 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "validate_unsigned_request": "unsigned_request", "build_unsigned_envelope": "envelope", "validate_unsigned_envelope": "envelope",
         "create_prepared_lifecycle": "lifecycle", "import_external_submission": "lifecycle", "validate_receipt_evidence": "receipt",
         "validate_event_evidence": "receipt", "build_reconciliation_graph": "reconciliation", "validate_reconciliation_graph": "reconciliation",
-        "serialize_safe_diagnostics": "reconciliation",
+        "serialize_safe_diagnostics": "reconciliation", "build_evidence_inventory": "reconciliation",
+        "adapt_authenticated_orders": "reconciliation", "adapt_order_metadata": "reconciliation",
+        "adapt_onchain_fills": "reconciliation", "build_evidence_bundle": "reconciliation",
+        "build_graphs_from_bundle": "reconciliation", "build_bridge_preview": "reconciliation",
+        "serialize_bridge_diagnostics": "reconciliation",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
         "serialize_signed_transaction": "signing", "submit_transaction": "submission", "fetch_receipt": "receipt", "fetch_logs": "receipt",
         "wait_for_confirmations": "receipt", "fetch_authenticated_orders": "authentication", "fetch_fills_live": "authentication",
+        "fetch_order_metadata_live": "authentication", "fetch_onchain_fills_live": "authentication",
+        "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.UNAVAILABLE.value, layer, source_status="unavailable", blocking=True, unresolved_reasons=("capability_unavailable",)) for name, layer in unavailable.items())

@@ -55,6 +55,15 @@ from bot.execution.dreamdex_execution_primitives import (
     DreamDexExecutionBlockers,
     build_execution_capability_matrix,
 )
+from bot.execution.dreamdex_reconciliation_bridge import (
+    build_reconciliation_bridge_from_evidence,
+    build_reconciliation_bridge_preview,
+    describe_reconciliation_bridge_capabilities,
+)
+from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
+
+
+RECONCILIATION_BRIDGE_ENV = "DREAMDEX_ENABLE_RECONCILIATION_EVIDENCE_BRIDGE"
 
 
 def _decimal_env(name: str, default: Decimal) -> Decimal:
@@ -503,6 +512,91 @@ def _print_execution_pipeline_summary() -> None:
     print(f"  capability fingerprint: {matrix.fingerprint}")
 
 
+def _print_reconciliation_evidence_bridge(snapshot, *, enabled: bool) -> None:
+    """Print bridge diagnostics from evidence already materialised by snapshot."""
+    print("READ-ONLY RECONCILIATION EVIDENCE BRIDGE:")
+    print(f"  bridge enabled: {'YES' if enabled else 'NO'}")
+    print(f"  bridge execution performed: {'YES' if enabled else 'NO'}")
+    print("  network attempt caused by bridge: NO")
+    if not enabled:
+        print("  authenticated account evidence: unavailable")
+        print("  authenticated order evidence: unavailable")
+        print("  authenticated open-order evidence: unavailable")
+        print("  authenticated pagination complete: NO")
+        print("  order metadata evidence: unavailable")
+        print("  order metadata record count: 0")
+        print("  order metadata conflict count: 0")
+        print("  on-chain fill evidence: unavailable")
+        print("  on-chain fill record count: 0")
+        print("  on-chain fill duplicate count: 0")
+        print("  on-chain fill pagination complete: NO")
+        print("  on-chain fill reorg status: unavailable")
+        print("  lifecycle evidence: unavailable")
+        print("  lifecycle record count: 0")
+        print("  eligible root count: 0")
+        print("  graph count: 0")
+        print("  authoritative graph count: 0")
+        print("  complete graph count: 0")
+        print("  conflicting graph count: 0")
+        print("  unrelated evidence count: 0")
+        print("  bundle fingerprint: unavailable")
+        print("  bridge fingerprint: unavailable")
+        print("  bridge authoritative: NO")
+        print("  bridge reconciliation complete: NO")
+        print("  raw authenticated payload output allowed: NO")
+        print("  raw on-chain evidence output allowed: NO")
+        print("  bridge blockers: none (flag disabled; no global blocker changed)")
+        return
+    account = snapshot.account
+    authenticated = account.authenticated
+    source = account.onchain_fills.source_status
+    result = build_reconciliation_bridge_from_evidence(
+        lifecycle_records=(),
+        authenticated_account=authenticated.balances_status,
+        authenticated_orders=authenticated.recent_orders,
+        authenticated_open_orders=authenticated.open_orders,
+        authenticated_order_source_status=authenticated.recent_orders_status,
+        authenticated_open_order_source_status=authenticated.open_orders_status,
+        order_metadata_records=(),
+        onchain_fills=account.onchain_fills,
+        authenticated_subject=None,
+        authenticated_address_semantics=account.account_address_semantics,
+        authenticated_pagination_complete=authenticated.pagination_complete,
+        fill_pagination_complete=account.onchain_fills.pagination_complete,
+        fill_reorg_status=source.reorg_status,
+        order_metadata_source_status=None,
+        onchain_fill_source_status=source,
+    )
+    preview = build_reconciliation_bridge_preview(result)
+    print(f"  authenticated account evidence: {result.evidence_bundle.inventory.authenticated_account_status}")
+    print(f"  authenticated order evidence: {preview.authenticated_order_evidence_status}")
+    print(f"  authenticated open-order evidence: {preview.authenticated_open_order_evidence_status}")
+    print(f"  authenticated pagination complete: {'YES' if preview.authenticated_pagination_complete else 'NO'}")
+    print(f"  order metadata evidence: {preview.metadata_evidence_status}")
+    print(f"  order metadata record count: {result.evidence_bundle.inventory.order_metadata_record_count}")
+    print(f"  order metadata conflict count: {result.evidence_bundle.inventory.order_metadata_conflict_count}")
+    print(f"  on-chain fill evidence: {preview.fill_evidence_status}")
+    print(f"  on-chain fill record count: {result.evidence_bundle.inventory.onchain_fill_record_count}")
+    print(f"  on-chain fill duplicate count: {result.evidence_bundle.inventory.onchain_fill_duplicate_count}")
+    print(f"  on-chain fill pagination complete: {'YES' if preview.fill_pagination_complete else 'NO'}")
+    print(f"  on-chain fill reorg status: {preview.fill_reorg_status}")
+    print(f"  lifecycle evidence: {preview.lifecycle_evidence_status}")
+    print(f"  lifecycle record count: {preview.root_lifecycle_count}")
+    print(f"  eligible root count: {preview.eligible_root_count}")
+    print(f"  graph count: {preview.graph_count}")
+    print(f"  authoritative graph count: {preview.authoritative_graph_count}")
+    print(f"  complete graph count: {preview.complete_graph_count}")
+    print(f"  conflicting graph count: {preview.conflicting_graph_count}")
+    print(f"  unrelated evidence count: {preview.unrelated_evidence_count}")
+    print(f"  bundle fingerprint: {preview.bundle_fingerprint or 'unavailable'}")
+    print(f"  bridge fingerprint: {preview.bridge_fingerprint or 'unavailable'}")
+    print(f"  bridge authoritative: {'YES' if preview.authoritative else 'NO'}")
+    print(f"  bridge reconciliation complete: {'YES' if preview.reconciliation_complete else 'NO'}")
+    print("  raw authenticated payload output allowed: NO")
+    print("  raw on-chain evidence output allowed: NO")
+    print(f"  bridge blockers: {'; '.join(preview.blockers) or 'none'}")
+
+
 def _print_authentication_state(account) -> None:
     snapshot = getattr(account, "auth_snapshot", None)
     print("AUTHENTICATION STATE:")
@@ -619,7 +713,7 @@ def _orderbook_timestamp(book) -> datetime | None:
         return None
 
 
-def _print_report(snapshot, report, validation) -> None:
+def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled: bool = False) -> None:
     market, account = snapshot.market, snapshot.account
     base, quote = market.base_asset or "SOMI", market.quote_asset or "USDso"
     print("READ-ONLY ACCOUNT CHECK")
@@ -639,6 +733,7 @@ def _print_report(snapshot, report, validation) -> None:
     direct_owner_reasons = _print_direct_owner_execution_model(account, market)
     graph_blockers = _print_order_reconciliation_graph()
     _print_execution_pipeline_summary()
+    _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
     bids, asks = book.get("bids", []), book.get("asks", [])
     best_bid = bids[0].get("price", bids[0]) if bids and isinstance(bids[0], dict) else (bids[0] if bids else "<unavailable>")
@@ -749,6 +844,10 @@ def main() -> int:
         return 2
     owner = os.environ["DREAMDEX_READ_ONLY_OWNER_ADDRESS"]
     try:
+        bridge_flag = _parse_enable_flag(os.environ.get(RECONCILIATION_BRIDGE_ENV))
+        if bridge_flag == "invalid":
+            raise ValueError(f"{RECONCILIATION_BRIDGE_ENV} must be a strict boolean")
+        reconciliation_bridge_enabled = bridge_flag == "enabled"
         symbol = os.environ.get("DREAMDEX_READ_ONLY_MARKET", "SOMI:USDso")
         if fixture_path:
             fixture = load_fixture(fixture_path)
@@ -782,7 +881,7 @@ def main() -> int:
         report = adapter.reconcile(snapshot, local_cash=None if local_cash is None else Decimal(local_cash), local_inventory=None if local_inventory is None else Decimal(local_inventory))
         intent = OrderIntent(symbol, os.environ.get("DREAMDEX_READ_ONLY_DRY_RUN_SIDE", "buy"), "limit", _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_PRICE", Decimal("0")), _decimal_env("DREAMDEX_READ_ONLY_DRY_RUN_QUANTITY", Decimal("0")))
         validation = DryRunOrderValidator(DryRunValidationLimits(_decimal_env("DREAMDEX_READ_ONLY_MAX_NOTIONAL", Decimal("100000")), _decimal_env("DREAMDEX_READ_ONLY_MAX_INVENTORY", Decimal("100000")))).validate(intent, market=snapshot.market, account=snapshot.account, reconciliation=report, market_fresh=snapshot.market.is_fresh(now=datetime.now(timezone.utc), max_age_seconds=_decimal_env("DREAMDEX_READ_ONLY_MAX_MARKET_AGE_SECONDS", Decimal("30"))))
-        _print_report(snapshot, report, validation)
+        _print_report(snapshot, report, validation, reconciliation_bridge_enabled=reconciliation_bridge_enabled)
         return 0
     except Exception as exc:
         print("READ-ONLY ACCOUNT CHECK")
