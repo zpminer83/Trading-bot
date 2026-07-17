@@ -62,6 +62,28 @@ class OrderManager:
     ) -> None:
         self.broker.cancel_all_except(keep)
 
+    def cancel_risk_increasing(self) -> None:
+        """Cancel only orders that could increase current exposure.
+
+        Reduce-only and explicit risk-exit orders remain under the existing
+        broker lifecycle.  The long-only paper portfolio treats buys as
+        exposure-increasing while inventory is non-negative and sells as
+        exposure-increasing only for a short position.
+        """
+        position = self.broker.portfolio.base_position
+
+        def keep(order: PaperOrder) -> bool:
+            purpose = order.intent.purpose.value
+            if purpose in {"risk_exit", "risk_reduction", "take_profit", "signal_exit", "stop_loss"}:
+                return True
+            if position > 0 and order.intent.side == "sell":
+                return True
+            if position < 0 and order.intent.side == "buy":
+                return True
+            return False
+
+        self.broker.cancel_all_except(keep)
+
     @property
     def open_order_count(self) -> int:
         return len(self.broker.open_orders)

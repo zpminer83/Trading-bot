@@ -76,6 +76,7 @@ class DreamDexRuntimeLaunchPolicy:
     authoritative: bool = False
     unresolved_reasons: tuple[str, ...] = ()
     preemptive_drawdown_fraction: Decimal | None = Decimal("0.08")
+    require_gap_risk_approval: bool = True
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -103,6 +104,8 @@ class DreamDexRuntimeLaunchPolicy:
         object.__setattr__(self, "allow_replacement", False)
         object.__setattr__(self, "allow_real_submission", False)
         object.__setattr__(self, "authoritative", False)
+        if not isinstance(self.require_gap_risk_approval, bool):
+            raise ValueError("require_gap_risk_approval_invalid")
         object.__setattr__(self, "unresolved_reasons", _tuple(self.unresolved_reasons))
 
     @property
@@ -176,6 +179,8 @@ class DreamDexRuntimeLaunchEvidence:
     kill_switch_latched: bool = False
     emergency_exit_requested: bool = False
     emergency_exit_completed: bool = False
+    gap_risk_status: str = "unavailable"
+    gap_risk_budget_approved: bool | None = None
 
     def __post_init__(self) -> None:
         for name in ("market_data_age_ms", "account_data_age_ms", "open_order_count", "active_intent_count", "active_nonce_reservation_count", "active_signing_lease_count"):
@@ -265,7 +270,11 @@ def evaluate_runtime_launch_gate(policy: DreamDexRuntimeLaunchPolicy, evidence: 
     if not orderbook: blockers.append("orderbook_launch_gate_failed")
     account = policy_ok and (status_ok(evidence.account_identity_status, {"confirmed", "available", "source_confirmed"}) if policy.require_account_identity else True) and status_ok(evidence.account_data_status, {"fresh", "available", "confirmed"}) and evidence.account_data_age_ms is not None and evidence.account_data_age_ms <= (policy.maximum_account_data_age_ms or -1) and (status_ok(evidence.balance_status) if policy.require_balance_evidence else True) and (status_ok(evidence.open_order_status) if policy.require_open_order_evidence else True)
     if not account: blockers.append("account_launch_gate_failed")
-    risk = policy_ok and status_ok(evidence.position_status, {"within_limits", "available", "confirmed"}) and (status_ok(evidence.risk_status, {"approved", "available", "confirmed"}) if policy.require_risk_approval else True) and evidence.position_notional is not None and evidence.position_notional <= (policy.maximum_position_notional or Decimal("-1")) and evidence.open_order_count is not None and evidence.open_order_count <= (policy.maximum_open_orders or -1) and status_ok(evidence.daily_pnl_status, {"within_limit", "available", "confirmed"}) and evidence.daily_pnl is not None and evidence.daily_pnl >= -(policy.maximum_daily_loss or Decimal("-1")) and status_ok(evidence.drawdown_status, {"within_limit", "available", "confirmed"}) and evidence.drawdown_fraction is not None and evidence.drawdown_fraction <= (policy.maximum_drawdown_fraction or Decimal("-1")) and (evidence.preemptive_drawdown_fraction is None or evidence.drawdown_fraction < evidence.preemptive_drawdown_fraction) and not evidence.entry_halt_latched and not evidence.kill_switch_latched and not evidence.emergency_exit_requested
+    gap_risk = (not policy.require_gap_risk_approval) or (
+        status_ok(evidence.gap_risk_status, {"available", "confirmed", "approved"})
+        and evidence.gap_risk_budget_approved is True
+    )
+    risk = policy_ok and status_ok(evidence.position_status, {"within_limits", "available", "confirmed"}) and (status_ok(evidence.risk_status, {"approved", "available", "confirmed"}) if policy.require_risk_approval else True) and evidence.position_notional is not None and evidence.position_notional <= (policy.maximum_position_notional or Decimal("-1")) and evidence.open_order_count is not None and evidence.open_order_count <= (policy.maximum_open_orders or -1) and status_ok(evidence.daily_pnl_status, {"within_limit", "available", "confirmed"}) and evidence.daily_pnl is not None and evidence.daily_pnl >= -(policy.maximum_daily_loss or Decimal("-1")) and status_ok(evidence.drawdown_status, {"within_limit", "available", "confirmed"}) and evidence.drawdown_fraction is not None and evidence.drawdown_fraction <= (policy.maximum_drawdown_fraction or Decimal("-1")) and (evidence.preemptive_drawdown_fraction is None or evidence.drawdown_fraction < evidence.preemptive_drawdown_fraction) and not evidence.entry_halt_latched and not evidence.kill_switch_latched and not evidence.emergency_exit_requested and gap_risk
     if not risk: blockers.append("risk_gate_failed")
     fair = policy_ok and (status_ok(evidence.fair_play_status, {"approved", "available", "confirmed"}) if policy.require_fair_play_approval else True)
     if not fair: blockers.append("fair_play_gate_failed")

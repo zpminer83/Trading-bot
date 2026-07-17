@@ -142,6 +142,9 @@ class DreamDexZeroMutationRehearsalEvidence:
     kill_switch_latched: bool = False
     emergency_exit_requested: bool = False
     emergency_exit_completed: bool = False
+    gap_risk_status: str = "unavailable"
+    gap_risk_budget_approved: bool | None = None
+    gap_risk_blockers: tuple[str, ...] = ()
 
     def safe_dict(self) -> dict[str, Any]:
         return {"market_status": self.market_status, "account_status": self.account_status, "rpc_status": self.rpc_status,
@@ -166,7 +169,10 @@ class DreamDexZeroMutationRehearsalEvidence:
                 "preemptive_drawdown": str(self.preemptive_drawdown) if self.preemptive_drawdown is not None else None,
                 "hard_drawdown_limit": str(self.hard_drawdown_limit) if self.hard_drawdown_limit is not None else None,
                 "kill_switch_latched": self.kill_switch_latched, "emergency_exit_requested": self.emergency_exit_requested,
-                "emergency_exit_completed": self.emergency_exit_completed}
+                "emergency_exit_completed": self.emergency_exit_completed,
+                "gap_risk_status": self.gap_risk_status,
+                "gap_risk_budget_approved": self.gap_risk_budget_approved,
+                "gap_risk_blockers": list(self.gap_risk_blockers)}
 
     def __repr__(self) -> str:
         return "DreamDexZeroMutationRehearsalEvidence(<safe>)"
@@ -241,6 +247,8 @@ class DreamDexZeroMutationRehearsalResult:
     errors: tuple[str, ...] = ()
     validation_errors: tuple[str, ...] = ()
     candidate_fingerprint: str | None = None
+    gap_risk_status: str = "unavailable"
+    gap_risk_budget_approved: bool | None = None
 
     @property
     def readiness_status(self) -> str:
@@ -295,6 +303,8 @@ class DreamDexZeroMutationRehearsalResult:
                 "network_read_call_count": self.network_read_call_count, "ready_for_human_review": self.ready_for_human_review,
                 "ready_for_signer_invocation": False, "ready_for_real_submission": False, "rehearsal_fingerprint": mask_hex_hash(self.rehearsal_fingerprint),
                 "authoritative": False, "blockers": list(self.blockers), "validation_errors": list(self.validation_errors),
+                "gap_risk_status": self.gap_risk_status,
+                "gap_risk_budget_approved": self.gap_risk_budget_approved,
                 "candidate_fingerprint": mask_hex_hash(self.candidate_fingerprint),
                 # Compatibility aliases for early offline callers.
                 "readiness_status": self.readiness_status, "mutation_call_count": self.mutation_call_count,
@@ -375,6 +385,8 @@ def run_zero_mutation_rehearsal(*, policy: DreamDexZeroMutationRehearsalPolicy,
         blockers.append("drawdown_above_hard_limit")
     elif evidence.preemptive_drawdown is None or evidence.drawdown_fraction >= evidence.preemptive_drawdown:
         blockers.append("drawdown_above_preemptive_threshold")
+    if evidence.gap_risk_status != "available" or evidence.gap_risk_budget_approved is not True:
+        blockers.append("gap_risk_unavailable")
     if policy.require_trading_enabled and evidence.trading_enabled is not True:
         blockers.append("trading_status_unavailable")
     if policy.require_contract_code and evidence.contract_code_present is not True:
@@ -443,6 +455,8 @@ def _result(policy: DreamDexZeroMutationRehearsalPolicy, evidence: DreamDexZeroM
         blockers=blockers,
         validation_errors=(),
         candidate_fingerprint=candidate.candidate_fingerprint if candidate else None,
+        gap_risk_status=evidence.gap_risk_status,
+        gap_risk_budget_approved=evidence.gap_risk_budget_approved,
     )
 
 

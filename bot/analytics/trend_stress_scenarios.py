@@ -121,6 +121,21 @@ class TrendStressResult:
     risk_compliance_status: str = "compliant"
     configured_preemptive_drawdown: Decimal = Decimal("0.08")
     entry_halt_latched: bool = False
+    gap_risk_approved_count: int = 0
+    gap_risk_blocked_count: int = 0
+    largest_adverse_step_return: Decimal | None = None
+    largest_adverse_step_from_price: Decimal | None = None
+    largest_adverse_step_to_price: Decimal | None = None
+    equity_before_largest_adverse_step: Decimal | None = None
+    peak_equity_before_largest_adverse_step: Decimal | None = None
+    drawdown_before_largest_adverse_step: Decimal | None = None
+    inventory_before_largest_adverse_step: Decimal | None = None
+    marked_exposure_before_largest_adverse_step: Decimal | None = None
+    reserved_buy_exposure_before_largest_adverse_step: Decimal | None = None
+    projected_equity_after_largest_adverse_step: Decimal | None = None
+    projected_drawdown_after_largest_adverse_step: Decimal | None = None
+    fee_slippage_contribution: Decimal | None = None
+    maximum_gap_safe_position_notional: Decimal | None = None
 
     @property
     def drawdown_guard_triggered(self) -> bool:
@@ -245,6 +260,7 @@ def build_engine(
     max_drawdown: Decimal = Decimal("0.10"),
     risk_exit_enabled: bool = False,
     paper_risk_exit_enabled: bool | None = None,
+    gap_aware: bool = True,
 ) -> ConservativePaperTradingEngine:
     """Build the production engine with deterministic, offline dependencies."""
     market = MarketCache()
@@ -295,7 +311,10 @@ def build_engine(
             )
         ),
         portfolio_risk_guard=PortfolioRiskGuard(
-            limits=PortfolioRiskLimits(max_drawdown=max_drawdown),
+            limits=PortfolioRiskLimits(
+                max_drawdown=max_drawdown,
+                require_gap_risk_assumptions=gap_aware,
+            ),
             risk_manager=risk_manager,
         ),
         confirmed_fill_ledger=ConfirmedFillLedger(),
@@ -343,6 +362,21 @@ def run_scenario(
     previous_drawdown = Decimal("0")
     hard_limit_gap_breach = False
     entry_halt_latched = False
+    gap_risk_approved_count = 0
+    gap_risk_blocked_count = 0
+    largest_adverse_step_return: Decimal | None = None
+    largest_adverse_step_from_price: Decimal | None = None
+    largest_adverse_step_to_price: Decimal | None = None
+    equity_before_largest_adverse_step: Decimal | None = None
+    peak_equity_before_largest_adverse_step: Decimal | None = None
+    drawdown_before_largest_adverse_step: Decimal | None = None
+    inventory_before_largest_adverse_step: Decimal | None = None
+    marked_exposure_before_largest_adverse_step: Decimal | None = None
+    reserved_buy_exposure_before_largest_adverse_step: Decimal | None = None
+    projected_equity_after_largest_adverse_step: Decimal | None = None
+    projected_drawdown_after_largest_adverse_step: Decimal | None = None
+    fee_slippage_contribution: Decimal | None = None
+    maximum_gap_safe_position_notional: Decimal | None = None
     competition_volume_before = (
         active_engine.competition.weekly_volume
         if active_engine.competition is not None
@@ -351,6 +385,56 @@ def run_scenario(
 
     for index, mid_price in enumerate(scenario.mid_prices):
         timestamp = SCENARIO_START + timedelta(seconds=index * scenario.step_seconds)
+        if index > 0:
+            previous_price = scenario.mid_prices[index - 1]
+            step_return = (mid_price - previous_price) / previous_price
+            if step_return < 0 and (
+                largest_adverse_step_return is None
+                or step_return < largest_adverse_step_return
+            ):
+                reserved_buys = sum(
+                    (
+                        order.intent.notional
+                        for order in active_engine.broker.open_orders
+                        if order.intent.side == "buy"
+                    ),
+                    Decimal("0"),
+                )
+                budget_before_step = active_engine.portfolio_risk_guard.calculate_gap_risk_budget(
+                    portfolio,
+                    reserved_order_exposure=reserved_buys,
+                )
+                before_equity = portfolio.equity
+                before_peak = portfolio.peak_equity
+                projected_equity = (
+                    portfolio.cash_balance
+                    + portfolio.base_position * mid_price
+                    - budget_before_step.fee_buffer
+                    - budget_before_step.exit_slippage_buffer
+                )
+                projected_dd = (
+                    max(before_peak - projected_equity, Decimal("0")) / before_peak
+                    if before_peak > 0
+                    else Decimal("1")
+                )
+                largest_adverse_step_return = step_return
+                largest_adverse_step_from_price = previous_price
+                largest_adverse_step_to_price = mid_price
+                equity_before_largest_adverse_step = before_equity
+                peak_equity_before_largest_adverse_step = before_peak
+                drawdown_before_largest_adverse_step = portfolio.drawdown
+                inventory_before_largest_adverse_step = portfolio.base_position
+                marked_exposure_before_largest_adverse_step = abs(portfolio.position_value)
+                reserved_buy_exposure_before_largest_adverse_step = reserved_buys
+                projected_equity_after_largest_adverse_step = projected_equity
+                projected_drawdown_after_largest_adverse_step = projected_dd
+                fee_slippage_contribution = (
+                    budget_before_step.fee_buffer
+                    + budget_before_step.exit_slippage_buffer
+                )
+                maximum_gap_safe_position_notional = (
+                    budget_before_step.maximum_gap_safe_position_notional
+                )
         _set_market(
             active_engine.market,
             mid_price=mid_price,
@@ -395,6 +479,12 @@ def run_scenario(
             entry_halt_latched = entry_halt_latched or result.portfolio_risk_decision.entry_halt_latched
         risk_exit_intents += getattr(result, "risk_exit_intents_count", 0)
         risk_exit_fills += getattr(result, "risk_exit_fills_count", 0)
+        gap_risk_approved_count += sum(
+            budget.gap_risk_budget_approved for budget in result.gap_risk_budgets
+        )
+        gap_risk_blocked_count += sum(
+            not budget.gap_risk_budget_approved for budget in result.gap_risk_budgets
+        )
         if getattr(result, "risk_exit_intents_count", 0) > 0 and any(
             intent.side == "buy" or intent.quantity > portfolio.base_position
             for intent in result.intents
@@ -550,6 +640,21 @@ def run_scenario(
         risk_compliance_status=("compliant" if maximum_drawdown <= configured_max_drawdown else "noncompliant"),
         configured_preemptive_drawdown=active_engine.portfolio_risk_guard.limits.preemptive_drawdown,
         entry_halt_latched=entry_halt_latched,
+        gap_risk_approved_count=gap_risk_approved_count,
+        gap_risk_blocked_count=gap_risk_blocked_count,
+        largest_adverse_step_return=largest_adverse_step_return,
+        largest_adverse_step_from_price=largest_adverse_step_from_price,
+        largest_adverse_step_to_price=largest_adverse_step_to_price,
+        equity_before_largest_adverse_step=equity_before_largest_adverse_step,
+        peak_equity_before_largest_adverse_step=peak_equity_before_largest_adverse_step,
+        drawdown_before_largest_adverse_step=drawdown_before_largest_adverse_step,
+        inventory_before_largest_adverse_step=inventory_before_largest_adverse_step,
+        marked_exposure_before_largest_adverse_step=marked_exposure_before_largest_adverse_step,
+        reserved_buy_exposure_before_largest_adverse_step=reserved_buy_exposure_before_largest_adverse_step,
+        projected_equity_after_largest_adverse_step=projected_equity_after_largest_adverse_step,
+        projected_drawdown_after_largest_adverse_step=projected_drawdown_after_largest_adverse_step,
+        fee_slippage_contribution=fee_slippage_contribution,
+        maximum_gap_safe_position_notional=maximum_gap_safe_position_notional,
     )
 
 
@@ -557,12 +662,13 @@ def run_all_scenarios() -> tuple[TrendStressResult, ...]:
     return tuple(run_scenario(scenario) for scenario in build_all_scenarios())
 
 
-def run_fast_sell_off_comparison() -> tuple[TrendStressResult, TrendStressResult]:
-    """Run FAST_SELL_OFF with the default and explicit paper risk exit."""
+def run_fast_sell_off_comparison() -> tuple[TrendStressResult, TrendStressResult, TrendStressResult]:
+    """Run legacy, gap-aware, and gap-aware emergency-exit profiles."""
     scenario = build_scenario("FAST_SELL_OFF")
     return (
-        run_scenario(scenario, engine=build_engine(risk_exit_enabled=False)),
-        run_scenario(scenario, engine=build_engine(risk_exit_enabled=True)),
+        run_scenario(scenario, engine=build_engine(risk_exit_enabled=False, gap_aware=False)),
+        run_scenario(scenario, engine=build_engine(risk_exit_enabled=False, gap_aware=True)),
+        run_scenario(scenario, engine=build_engine(risk_exit_enabled=True, gap_aware=True)),
     )
 
 

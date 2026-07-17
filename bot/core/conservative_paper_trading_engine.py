@@ -38,6 +38,7 @@ from bot.market.orderbook_depth_diagnostics import (
 )
 from bot.portfolio.portfolio_manager import PortfolioManager
 from bot.risk.portfolio_risk_guard import (
+    GapRiskBudget,
     PortfolioRiskDecision,
     PortfolioRiskGuard,
     PortfolioRiskLimits,
@@ -67,6 +68,7 @@ class ConservativePaperTradingStepResult:
     market_safety_decision: MarketSafetyDecision | None = None
     market_freshness_decision: MarketFreshnessDecision | None = None
     portfolio_risk_decision: PortfolioRiskDecision | None = None
+    gap_risk_budgets: list[GapRiskBudget] = field(default_factory=list)
     confirmed_fill_events: list[ConfirmedFillEvent] = field(default_factory=list)
     fair_play_decisions: list[FairPlayDecision] = field(default_factory=list)
     fair_play_allowed: bool | None = None
@@ -253,6 +255,40 @@ class ConservativePaperTradingEngine:
                 timestamp=timestamp,
             )
 
+        gap_risk_budgets: list[GapRiskBudget] = []
+        reserved_risk_exposure = sum(
+            (
+                order.intent.notional
+                for order in self.broker.open_orders
+                if self.portfolio_risk_guard.is_risk_increasing(
+                    self.portfolio,
+                    order.intent.side,
+                )
+            ),
+            Decimal("0"),
+        )
+        open_gap_budget = self.portfolio_risk_guard.calculate_gap_risk_budget(
+            self.portfolio,
+            reserved_order_exposure=reserved_risk_exposure,
+        )
+        gap_risk_budgets.append(open_gap_budget)
+        # Existing marked inventory may already be above the conservative
+        # post-shock cap.  That must not prevent a risk-reducing order from
+        # being generated; only reserved risk-increasing orders consume new
+        # capacity and trigger the pre-intent cancellation path here.  Each
+        # candidate is still evaluated independently below.
+        reserved_capacity = max(
+            open_gap_budget.maximum_gap_safe_position_notional
+            - open_gap_budget.current_marked_exposure,
+            Decimal("0"),
+        )
+        gap_capacity_blocked = (
+            self.portfolio_risk_guard.limits.require_gap_risk_assumptions
+            and reserved_risk_exposure > reserved_capacity
+        )
+        if gap_capacity_blocked:
+            self.order_manager.cancel_risk_increasing()
+
         position_before_fills = self.portfolio.base_position
         fills = self.broker.process_market(self.market)
 
@@ -303,7 +339,29 @@ class ConservativePaperTradingEngine:
                     near_flat_cycle_count=fair_play_status.near_flat_cycle_count,
                     orderbook_signal=orderbook_signal,
                     orderbook_depth_diagnostics=orderbook_depth_diagnostics,
+                    gap_risk_budgets=gap_risk_budgets,
                 )
+
+        if gap_capacity_blocked:
+            return ConservativePaperTradingStepResult(
+                mid_price=mid_price,
+                fills=fills,
+                competition_snapshot=self._competition_snapshot(),
+                market_safety_decision=safety_decision,
+                market_freshness_decision=freshness_decision,
+                portfolio_risk_decision=portfolio_risk_decision,
+                confirmed_fill_events=confirmed_fill_events,
+                fair_play_decisions=fair_play_decisions,
+                fair_play_allowed=(
+                    None if fair_play_status is None else not fair_play_status.latched
+                ),
+                fair_play_latched=(
+                    None if fair_play_status is None else fair_play_status.latched
+                ),
+                gap_risk_budgets=gap_risk_budgets,
+                orderbook_signal=orderbook_signal,
+                orderbook_depth_diagnostics=orderbook_depth_diagnostics,
+            )
 
         intents = self.strategy.generate_orders(
             market=self.market,
@@ -331,16 +389,38 @@ class ConservativePaperTradingEngine:
 
         decisions: list[OrderDecision] = []
         for intent in approved_intents:
-            budget_allowed, budget_reason = self.portfolio_risk_guard.projected_order_allowed(
+            budget = self.portfolio_risk_guard.calculate_gap_risk_budget(
                 self.portfolio,
                 side=intent.side,
+                price=intent.price,
+                quantity=intent.quantity,
                 notional=intent.notional,
                 reserved_order_exposure=sum(
-                    (order.intent.notional for order in self.broker.open_orders),
+                    (
+                        order.intent.notional
+                        for order in self.broker.open_orders
+                        if self.portfolio_risk_guard.is_risk_increasing(
+                            self.portfolio,
+                            order.intent.side,
+                        )
+                    ),
                     Decimal("0"),
                 ),
             )
-            if not budget_allowed:
+            gap_risk_budgets.append(budget)
+            budget_allowed = budget.approved
+            budget_reason = "risk_budget_approved" if budget_allowed else budget.blockers[0]
+            # A gap budget is an entry/exposure budget.  A candidate that
+            # reduces an existing position remains eligible even when the
+            # marked portfolio is already above the conservative stress cap;
+            # retaining that exit path is required for safe recovery.
+            risk_reducing = not self.portfolio_risk_guard.is_risk_increasing(
+                self.portfolio,
+                intent.side,
+            )
+            if not budget_allowed and risk_reducing:
+                decisions.append(self.execution.review_order(intent))
+            elif not budget_allowed:
                 decisions.append(
                     OrderDecision(
                         approved=False,
@@ -430,6 +510,7 @@ class ConservativePaperTradingEngine:
             purpose_counts=purpose_counts,
             orderbook_signal=orderbook_signal,
             orderbook_depth_diagnostics=orderbook_depth_diagnostics,
+            gap_risk_budgets=gap_risk_budgets,
         )
 
     def _handle_latched_risk_exit(

@@ -94,7 +94,9 @@ def test_explicit_reset_clears_latch():
 
 def test_projected_risk_budget_requires_nonzero_assumptions_and_headroom():
     guard = PortfolioRiskGuard()
-    portfolio = make_portfolio_at_price(Decimal("10"))
+    portfolio = PortfolioManager(initial_cash=Decimal("150"))
+    portfolio.buy(price=Decimal("10"), quantity=Decimal("1"))
+    portfolio.update_market_price(Decimal("10"))
 
     allowed, reason = guard.projected_order_allowed(
         portfolio,
@@ -115,6 +117,49 @@ def test_projected_risk_budget_requires_nonzero_assumptions_and_headroom():
     )
     assert allowed is True
     assert reason == "risk_budget_approved"
+
+
+def test_gap_budget_reports_headroom_reserve_and_shock_without_lookahead():
+    guard = PortfolioRiskGuard()
+    portfolio = PortfolioManager(initial_cash=Decimal("150"))
+    portfolio.buy(price=Decimal("10"), quantity=Decimal("1"))
+    portfolio.update_market_price(Decimal("10"))
+    budget = guard.calculate_gap_risk_budget(
+        portfolio,
+        side="buy",
+        price=Decimal("10"),
+        quantity=Decimal("0.5"),
+        notional=Decimal("5"),
+        reserved_order_exposure=Decimal("2"),
+    )
+    assert budget.remaining_hard_headroom == Decimal("15")
+    assert budget.minimum_reserved_headroom == Decimal("1.50")
+    assert budget.reserved_risk_increasing_exposure == Decimal("2")
+    assert budget.projected_shocked_drawdown is not None
+    assert budget.projected_shocked_drawdown < Decimal("0.10")
+    assert budget.projected_hard_limit_overshoot == Decimal("0")
+
+
+@pytest.mark.parametrize("field", [
+    "adverse_move_fraction_long",
+    "adverse_move_fraction_short",
+])
+def test_gap_policy_rejects_zero_or_missing_adverse_assumptions(field):
+    portfolio = PortfolioManager(initial_cash=Decimal("150"))
+    portfolio.update_market_price(Decimal("10"))
+    for value in (Decimal("0"), None):
+        guard = PortfolioRiskGuard(
+            limits=PortfolioRiskLimits(**{field: value}),
+        )
+        budget = guard.calculate_gap_risk_budget(
+            portfolio,
+            side="buy",
+            price=Decimal("10"),
+            quantity=Decimal("0.1"),
+            notional=Decimal("1"),
+        )
+        assert budget.approved is False
+        assert any("adverse_move_fraction" in blocker for blocker in budget.blockers)
 
 
 @pytest.mark.parametrize("max_drawdown", [Decimal("-0.01"), Decimal("1.01")])

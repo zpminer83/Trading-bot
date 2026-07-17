@@ -70,6 +70,7 @@ class DreamDexProductionReadinessPolicy:
     unresolved_reasons: tuple[str, ...] = ()
     maximum_drawdown_fraction: Decimal = Decimal("0.10")
     preemptive_drawdown_fraction: Decimal = Decimal("0.08")
+    require_gap_risk_approval: bool = True
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION or self.required_chain_id != 5031:
@@ -91,6 +92,8 @@ class DreamDexProductionReadinessPolicy:
             object.__setattr__(self, name, value)
         if self.preemptive_drawdown_fraction >= self.maximum_drawdown_fraction:
             raise ValueError("preemptive_drawdown_fraction_invalid")
+        if not isinstance(self.require_gap_risk_approval, bool):
+            raise ValueError("require_gap_risk_approval_invalid")
         object.__setattr__(self, "allow_real_signing", bool(self.allow_real_signing))
         object.__setattr__(self, "allow_real_submission", bool(self.allow_real_submission))
         object.__setattr__(self, "authoritative", False)
@@ -147,6 +150,8 @@ class DreamDexProductionReadinessEvidence:
     entry_halt_latched: bool = False
     emergency_exit_requested: bool = False
     emergency_exit_completed: bool = False
+    gap_risk_status: str = "unavailable"
+    gap_risk_budget_approved: bool | None = None
 
     def __post_init__(self) -> None:
         for name in ("drawdown_fraction", "preemptive_drawdown_fraction"):
@@ -223,6 +228,11 @@ def evaluate_production_readiness(policy: DreamDexProductionReadinessPolicy, evi
     confirmation = (not policy.require_receipt_confirmation or _ok(evidence.confirmation_status))
     reconciliation = (not policy.require_reconciliation or _ok(evidence.reconciliation_status, {"complete", "confirmed"}))
     risk_control = (
+        ((not policy.require_gap_risk_approval) or (
+            _ok(evidence.gap_risk_status, {"available", "confirmed", "approved"})
+            and evidence.gap_risk_budget_approved is True
+        ))
+        and
         _ok(evidence.risk_control_status, {"available", "confirmed", "approved", "within_limit"})
         and evidence.drawdown_fraction is not None
         and evidence.drawdown_fraction < policy.preemptive_drawdown_fraction
