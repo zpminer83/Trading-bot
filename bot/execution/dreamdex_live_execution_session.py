@@ -7,7 +7,7 @@ may inject deterministic callbacks explicitly.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from hashlib import sha256
 import json
@@ -171,6 +171,11 @@ class DreamDexExecutionArmingEvidence:
     explicit_session_approval: bool = False
     real_signing_policy_enabled: bool = False
     real_submission_policy_enabled: bool = False
+    execution_approval_present: bool = False
+    execution_approval_binding_match: bool = False
+    execution_approval_current: bool = False
+    execution_approval_consumed_for_session: bool = False
+    post_approval_revalidation_confirmed: bool = False
     arming_fingerprint: str = ""
     armed_for_signing: bool = False
     armed_for_submission: bool = False
@@ -207,6 +212,11 @@ def evaluate_execution_arming(policy: DreamDexLiveExecutionSessionPolicy, eviden
         ("live_execution_signing_lease_unavailable", evidence.signing_lease_active),
         ("live_execution_operation_not_allowlisted", evidence.operation_allowlisted),
         ("live_execution_explicit_approval_missing", evidence.explicit_session_approval),
+        ("execution_approval_unavailable", evidence.execution_approval_present),
+        ("execution_approval_binding_mismatch", evidence.execution_approval_binding_match),
+        ("execution_approval_expired", evidence.execution_approval_current),
+        ("execution_approval_replay_detected", evidence.execution_approval_consumed_for_session),
+        ("post_approval_revalidation_failed", evidence.post_approval_revalidation_confirmed),
     )
     blockers = [reason for reason, passed in checks if not passed]
     signing = not blockers and evidence.real_signing_policy_enabled and policy.allow_real_signing
@@ -389,6 +399,9 @@ class DreamDexLiveExecutionSessionDependencies:
     receipt_reader: Any = None
     reconciliation_builder: Any = None
     clock: Any = None
+    # Process-local only.  It is intentionally not persisted and records that a
+    # rejected request cannot be upgraded/reused by the same ceremony object.
+    terminal_session_fingerprints: set[str] = field(default_factory=set, compare=False, repr=False)
 
     def complete(self) -> bool:
         return all(callable(getattr(self, name)) for name in ("preflight", "persist_intent", "reserve_nonce", "revalidate_nonce", "acquire_signing_lease", "sign_and_verify", "submit_once", "confirm", "reconcile"))
@@ -429,10 +442,15 @@ def run_live_execution_session(*, policy: DreamDexLiveExecutionSessionPolicy, ar
         raise TypeError("typed_arming_evidence_required")
     armed = evaluate_execution_arming(policy, arming_evidence)
     stages: list[DreamDexLiveExecutionStageResult] = []
+    if dependencies is not None and request.session_request_fingerprint in dependencies.terminal_session_fingerprints:
+        _stage(stages, "session_reuse", "blocked", None, state=DreamDexLiveExecutionState.GATE_REJECTED.value, execution_performed=False, blockers=("live_execution_terminal_session_reused",))
+        return _result(request=request, state=DreamDexLiveExecutionState.GATE_REJECTED, stages=stages, blockers=("live_execution_terminal_session_reused",))
     if request.blockers or not armed.armed_for_submission:
         reasons = tuple(dict.fromkeys((*armed.blockers, "live_execution_launch_unapproved" if request.blockers else "")))
         reasons = tuple(item for item in reasons if item)
         _stage(stages, "arming", "blocked", None, state=DreamDexLiveExecutionState.GATE_REJECTED.value, execution_performed=False, blockers=reasons)
+        if dependencies is not None:
+            dependencies.terminal_session_fingerprints.add(request.session_request_fingerprint)
         return _result(request=request, state=DreamDexLiveExecutionState.GATE_REJECTED, stages=stages, blockers=reasons)
     if dependencies is None or not dependencies.complete():
         _stage(stages, "dependencies", "blocked", None, state=DreamDexLiveExecutionState.GATE_REJECTED.value, execution_performed=False, blockers=("live_execution_dependencies_incomplete",))

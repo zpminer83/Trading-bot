@@ -241,6 +241,23 @@ class DreamDexExecutionBlockers:
     LIVE_EXECUTION_SUBMISSION_DISABLED = "live_execution_submission_disabled"
     LIVE_EXECUTION_RECOVERY_REQUIRED = "live_execution_recovery_required"
     REAL_SUBMISSION_LAUNCH_GATE_BLOCKED = "real_submission_launch_gate_blocked"
+    PRODUCTION_READINESS_POLICY_INCOMPLETE = "production_readiness_policy_incomplete"
+    PRODUCTION_CONFIGURATION_INCOMPLETE = "production_configuration_incomplete"
+    EXECUTION_APPROVAL_UNAVAILABLE = "execution_approval_unavailable"
+    EXECUTION_APPROVAL_PROVIDER_UNAVAILABLE = "execution_approval_provider_unavailable"
+    EXECUTION_APPROVAL_TERMINAL_UNAVAILABLE = "execution_approval_terminal_unavailable"
+    EXECUTION_APPROVAL_REJECTED = "execution_approval_rejected"
+    EXECUTION_APPROVAL_EXPIRED = "execution_approval_expired"
+    EXECUTION_APPROVAL_BINDING_MISMATCH = "execution_approval_binding_mismatch"
+    EXECUTION_APPROVAL_REPLAY_DETECTED = "execution_approval_replay_detected"
+    POST_APPROVAL_REVALIDATION_UNAVAILABLE = "post_approval_revalidation_unavailable"
+    POST_APPROVAL_REVALIDATION_FAILED = "post_approval_revalidation_failed"
+    POST_APPROVAL_JOURNAL_CHANGED = "post_approval_journal_changed"
+    POST_APPROVAL_NONCE_CHANGED = "post_approval_nonce_changed"
+    POST_APPROVAL_FEES_CHANGED = "post_approval_fees_changed"
+    POST_APPROVAL_MARKET_EVIDENCE_CHANGED = "post_approval_market_evidence_changed"
+    POST_APPROVAL_ACCOUNT_EVIDENCE_CHANGED = "post_approval_account_evidence_changed"
+    PRODUCTION_SIGNER_INVOCATION_BLOCKED = "production_signer_invocation_blocked"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -320,6 +337,15 @@ class DreamDexExecutionBlockers:
         LIVE_EXECUTION_EXPLICIT_APPROVAL_MISSING, LIVE_EXECUTION_SIGNING_DISABLED,
         LIVE_EXECUTION_SUBMISSION_DISABLED, LIVE_EXECUTION_RECOVERY_REQUIRED,
         REAL_SUBMISSION_LAUNCH_GATE_BLOCKED,
+        PRODUCTION_READINESS_POLICY_INCOMPLETE, PRODUCTION_CONFIGURATION_INCOMPLETE,
+        EXECUTION_APPROVAL_UNAVAILABLE, EXECUTION_APPROVAL_PROVIDER_UNAVAILABLE,
+        EXECUTION_APPROVAL_TERMINAL_UNAVAILABLE, EXECUTION_APPROVAL_REJECTED,
+        EXECUTION_APPROVAL_EXPIRED, EXECUTION_APPROVAL_BINDING_MISMATCH,
+        EXECUTION_APPROVAL_REPLAY_DETECTED, POST_APPROVAL_REVALIDATION_UNAVAILABLE,
+        POST_APPROVAL_REVALIDATION_FAILED, POST_APPROVAL_JOURNAL_CHANGED,
+        POST_APPROVAL_NONCE_CHANGED, POST_APPROVAL_FEES_CHANGED,
+        POST_APPROVAL_MARKET_EVIDENCE_CHANGED, POST_APPROVAL_ACCOUNT_EVIDENCE_CHANGED,
+        PRODUCTION_SIGNER_INVOCATION_BLOCKED,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -540,6 +566,9 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "production_rpc_policy": "submission", "live_execution_session_model": "execution",
         "evaluate_execution_arming": "execution", "live_execution_session_orchestration": "execution",
         "enforce_multi_factor_arming": "execution", "enforce_single_live_session": "execution",
+        "production_readiness_model": "readiness", "evaluate_production_readiness": "readiness",
+        "execution_approval_preview": "approval", "execution_approval_binding": "approval",
+        "execution_approval_replay_protection": "approval", "production_execution_ceremony": "approval",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -550,6 +579,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "signer_address_discovery": "signing",
         "persist_raw_signed_transaction": "signed_transaction",
         "production_live_signing": "signing", "production_live_submission": "submission",
+        "unattended_execution_approval": "approval", "production_signer_invocation": "signing",
         "automatic_live_retry": "submission", "live_transaction_replacement": "submission", "automatic_submission_retry": "submission",
         "transaction_replacement": "submission", "receipt_lookup": "receipt", "validate_reduce_event": "receipt",
         "production_signer_integration": "signing", "production_execution_session": "execution", "real_transaction_submission": "submission",
@@ -568,6 +598,7 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "decode_signed_transaction": "signed_transaction", "recover_signed_transaction_sender": "signed_transaction",
         "recover_submission_by_hash": "submission",
         "observe_transaction_confirmation_once": "receipt", "monitor_transaction_confirmation": "receipt", "receipt_polling": "receipt",
+        "interactive_execution_approval_provider": "approval", "post_approval_revalidation": "approval",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())

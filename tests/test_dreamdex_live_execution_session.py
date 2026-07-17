@@ -59,6 +59,11 @@ def _armed():
         explicit_session_approval=True,
         real_signing_policy_enabled=True,
         real_submission_policy_enabled=True,
+        execution_approval_present=True,
+        execution_approval_binding_match=True,
+        execution_approval_current=True,
+        execution_approval_consumed_for_session=True,
+        post_approval_revalidation_confirmed=True,
     )
 
 
@@ -115,6 +120,19 @@ def test_default_session_has_zero_side_effects():
     assert result.submission_call_count == 0
     assert result.production_network_used is False
     assert result.production_secret_used is False
+    assert calls == []
+
+
+def test_gate_rejected_session_is_terminal_for_the_same_dependencies():
+    policy = _policy()
+    calls = []
+    deps = _deps(calls)
+    request = _request(policy)
+    first = run_live_execution_session(policy=policy, arming_evidence=DreamDexExecutionArmingEvidence(), request=request, dependencies=deps)
+    second = run_live_execution_session(policy=policy, arming_evidence=_armed(), request=request, dependencies=deps)
+    assert first.final_state == DreamDexLiveExecutionState.GATE_REJECTED.value
+    assert second.final_state == DreamDexLiveExecutionState.GATE_REJECTED.value
+    assert "live_execution_terminal_session_reused" in second.blockers
     assert calls == []
 
 

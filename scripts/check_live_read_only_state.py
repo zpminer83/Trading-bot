@@ -98,6 +98,7 @@ from bot.execution.dreamdex_live_execution_session import (
     build_live_execution_session_preview,
     evaluate_execution_arming,
 )
+from bot.execution.dreamdex_execution_approval import UnavailableDreamDexExecutionApprovalProvider
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
@@ -1144,6 +1145,35 @@ def _print_live_execution_session() -> None:
     print(f"  session blockers: {', '.join(arming.blockers) or 'none'}")
 
 
+def _print_execution_approval() -> None:
+    """Show static capability only; normal diagnostics never invoke a prompt."""
+    provider = UnavailableDreamDexExecutionApprovalProvider()
+    print("HUMAN-IN-THE-LOOP EXECUTION APPROVAL:")
+    print("  approval model: available_offline")
+    print("  interactive approval provider: available")
+    print("  unattended approval provider: unavailable")
+    print("  approval execution performed: NO")
+    print("  interactive terminal confirmed: NO")
+    print("  transaction preview available: NO")
+    print("  approval binding available: NO")
+    print("  challenge issued: NO")
+    print("  approval attempt count: 0")
+    print("  approval granted: NO")
+    print("  approval expired: NO")
+    print("  approval consumed: NO")
+    print("  approval persisted: NO")
+    print("  approval replay allowed: NO")
+    print("  post-approval revalidation: unavailable")
+    print("  binding unchanged: unresolved")
+    print("  journal unchanged: unresolved")
+    print("  nonce unchanged: unresolved")
+    print("  fees unchanged: unresolved")
+    print("  market/account evidence unchanged: unresolved")
+    print("  signer invocation allowed: NO")
+    print("  real submission allowed: NO")
+    print("  approval blockers: execution_approval_unavailable")
+
+
 def _print_end_to_end_dry_run() -> None:
     print("END-TO-END EXECUTION DRY-RUN:")
     print("  dry-run orchestrator: available_offline")
@@ -1282,6 +1312,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_transaction_confirmation(enabled=transaction_confirmation_enabled)
     _print_runtime_launch_gate()
     _print_live_execution_session()
+    _print_execution_approval()
     _print_end_to_end_dry_run()
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
@@ -1395,6 +1426,7 @@ def main() -> int:
         _print_encrypted_keystore_signer()
         _print_runtime_launch_gate()
         _print_live_execution_session()
+        _print_execution_approval()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2
@@ -1416,6 +1448,7 @@ def main() -> int:
         _print_encrypted_keystore_signer()
         _print_runtime_launch_gate()
         _print_live_execution_session()
+        _print_execution_approval()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2
