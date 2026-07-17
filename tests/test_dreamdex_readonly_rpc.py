@@ -18,7 +18,7 @@ def test_allowlist_is_exact_and_typed_transport_has_no_generic_or_mutation_api()
         "eth_chainId", "eth_getCode", "eth_getTransactionCount", "eth_estimateGas",
         "eth_getBlockByNumber", "eth_gasPrice", "eth_maxPriorityFeePerGas",
         "eth_feeHistory", "eth_getBalance", "eth_getTransactionReceipt",
-        "eth_blockNumber", "eth_getBlockByHash",
+        "eth_getTransactionByHash", "eth_blockNumber", "eth_getBlockByHash",
     }
     transport = FixtureDreamDexReadOnlyRpcTransport({"eth_chainId": "0x13a7"})
     assert not hasattr(transport, "call")

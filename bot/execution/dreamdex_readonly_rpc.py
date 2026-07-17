@@ -18,7 +18,7 @@ ALLOWED_RPC_METHODS = frozenset({
     "eth_chainId", "eth_getCode", "eth_getTransactionCount", "eth_estimateGas",
     "eth_getBlockByNumber", "eth_gasPrice", "eth_maxPriorityFeePerGas",
     "eth_feeHistory", "eth_getBalance", "eth_getTransactionReceipt",
-    "eth_blockNumber", "eth_getBlockByHash",
+    "eth_getTransactionByHash", "eth_blockNumber", "eth_getBlockByHash",
 })
 RPC_METHOD_ALLOWLIST = ALLOWED_RPC_METHODS
 MAX_RESPONSE_BODY_BYTES = 1_000_000

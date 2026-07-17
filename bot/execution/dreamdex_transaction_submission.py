@@ -602,4 +602,18 @@ DreamDexRawTransactionSubmissionTransport = DreamDexRawTransactionHttpSubmitter
 DreamDexReadOnlyTransactionRecoveryReader = DreamDexTransactionByHashHttpReader
 
 
-__all__ = [name for name in globals() if name.startswith("DreamDex") or name.startswith("run_") or name.startswith("recover_") or name.startswith("build_") or name.startswith("serialize_")] + ["submit_transaction_once", "recover_submission_by_hash"]
+def __getattr__(name: str) -> Any:
+    """Lazily expose the disarmed production adapter without a circular import."""
+    if name == "HttpDreamDexRawTransactionSubmitter":
+        from bot.execution.dreamdex_production_rpc import HttpDreamDexRawTransactionSubmitter
+        return HttpDreamDexRawTransactionSubmitter
+    if name == "HttpDreamDexTransactionRecoveryReader":
+        from bot.execution.dreamdex_production_rpc import HttpDreamDexTransactionRecoveryReader
+        return HttpDreamDexTransactionRecoveryReader
+    if name == "DreamDexProductionRpcPolicy":
+        from bot.execution.dreamdex_production_rpc import DreamDexProductionRpcPolicy
+        return DreamDexProductionRpcPolicy
+    raise AttributeError(name)
+
+
+__all__ = [name for name in globals() if name.startswith("DreamDex") or name.startswith("run_") or name.startswith("recover_") or name.startswith("build_") or name.startswith("serialize_")] + ["submit_transaction_once", "recover_submission_by_hash", "HttpDreamDexRawTransactionSubmitter", "HttpDreamDexTransactionRecoveryReader", "DreamDexProductionRpcPolicy"]

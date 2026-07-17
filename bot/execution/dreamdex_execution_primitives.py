@@ -222,6 +222,25 @@ class DreamDexExecutionBlockers:
     TRANSACTION_REPLACEMENT_DISABLED = "transaction_replacement_disabled"
     RECEIPT_LOOKUP_UNAVAILABLE = "receipt_lookup_unavailable"
     SUBMISSION_DETERMINISTIC_REJECTION = "submission_deterministic_rejection"
+    PRODUCTION_RPC_CONFIGURATION_UNAVAILABLE = "production_rpc_configuration_unavailable"
+    PRODUCTION_RPC_POLICY_INCOMPLETE = "production_rpc_policy_incomplete"
+    PRODUCTION_RPC_MUTATION_DISABLED = "production_rpc_mutation_disabled"
+    LIVE_EXECUTION_SESSION_UNAVAILABLE = "live_execution_session_unavailable"
+    LIVE_EXECUTION_POLICY_INCOMPLETE = "live_execution_policy_incomplete"
+    LIVE_EXECUTION_LAUNCH_UNAPPROVED = "live_execution_launch_unapproved"
+    LIVE_EXECUTION_ACCOUNT_EVIDENCE_NON_AUTHORITATIVE = "live_execution_account_evidence_non_authoritative"
+    LIVE_EXECUTION_MARKET_EVIDENCE_NON_AUTHORITATIVE = "live_execution_market_evidence_non_authoritative"
+    LIVE_EXECUTION_JOURNAL_UNAVAILABLE = "live_execution_journal_unavailable"
+    LIVE_EXECUTION_SIGNER_UNCONFIGURED = "live_execution_signer_unconfigured"
+    LIVE_EXECUTION_SIGNER_UNLOCK_UNVERIFIED = "live_execution_signer_unlock_unverified"
+    LIVE_EXECUTION_PREFLIGHT_UNCONFIRMED = "live_execution_preflight_unconfirmed"
+    LIVE_EXECUTION_NONCE_UNVALIDATED = "live_execution_nonce_unvalidated"
+    LIVE_EXECUTION_SIGNING_LEASE_UNAVAILABLE = "live_execution_signing_lease_unavailable"
+    LIVE_EXECUTION_EXPLICIT_APPROVAL_MISSING = "live_execution_explicit_approval_missing"
+    LIVE_EXECUTION_SIGNING_DISABLED = "live_execution_signing_disabled"
+    LIVE_EXECUTION_SUBMISSION_DISABLED = "live_execution_submission_disabled"
+    LIVE_EXECUTION_RECOVERY_REQUIRED = "live_execution_recovery_required"
+    REAL_SUBMISSION_LAUNCH_GATE_BLOCKED = "real_submission_launch_gate_blocked"
 
     ACCOUNT = (
         INCOMPLETE_ACCOUNT_STATE, BALANCE_SOURCE_UNAVAILABLE,
@@ -290,6 +309,17 @@ class DreamDexExecutionBlockers:
         RECEIPT_OBSERVATION_UNSTABLE, CONFIRMATION_MONITOR_TIMEOUT,
         CONFIRMATION_PERSISTENCE_UNAVAILABLE,
         SUBMISSION_DETERMINISTIC_REJECTION,
+        PRODUCTION_RPC_CONFIGURATION_UNAVAILABLE, PRODUCTION_RPC_POLICY_INCOMPLETE,
+        PRODUCTION_RPC_MUTATION_DISABLED, LIVE_EXECUTION_SESSION_UNAVAILABLE,
+        LIVE_EXECUTION_POLICY_INCOMPLETE, LIVE_EXECUTION_LAUNCH_UNAPPROVED,
+        LIVE_EXECUTION_ACCOUNT_EVIDENCE_NON_AUTHORITATIVE,
+        LIVE_EXECUTION_MARKET_EVIDENCE_NON_AUTHORITATIVE,
+        LIVE_EXECUTION_JOURNAL_UNAVAILABLE, LIVE_EXECUTION_SIGNER_UNCONFIGURED,
+        LIVE_EXECUTION_SIGNER_UNLOCK_UNVERIFIED, LIVE_EXECUTION_PREFLIGHT_UNCONFIRMED,
+        LIVE_EXECUTION_NONCE_UNVALIDATED, LIVE_EXECUTION_SIGNING_LEASE_UNAVAILABLE,
+        LIVE_EXECUTION_EXPLICIT_APPROVAL_MISSING, LIVE_EXECUTION_SIGNING_DISABLED,
+        LIVE_EXECUTION_SUBMISSION_DISABLED, LIVE_EXECUTION_RECOVERY_REQUIRED,
+        REAL_SUBMISSION_LAUNCH_GATE_BLOCKED,
     )
     ORDER_LIFECYCLE = (ORDER_ID_LIFECYCLE_UNCONFIRMED, DIRECT_ORDER_RECONCILIATION_UNAVAILABLE)
     RECONCILIATION = (
@@ -507,6 +537,9 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "synthetic_place_cancel_scenario": "dry_run",
         "encrypted_keystore_signer_model": "signing", "validate_encrypted_keystore": "signing",
         "inspect_keystore_public_address": "signing", "verify_derived_signer_address": "signing",
+        "production_rpc_policy": "submission", "live_execution_session_model": "execution",
+        "evaluate_execution_arming": "execution", "live_execution_session_orchestration": "execution",
+        "enforce_multi_factor_arming": "execution", "enforce_single_live_session": "execution",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -516,7 +549,8 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "fetch_lifecycle_live": "authentication", "resolve_identity_live": "authentication",
         "signer_address_discovery": "signing",
         "persist_raw_signed_transaction": "signed_transaction",
-        "production_raw_transaction_submitter": "submission", "automatic_submission_retry": "submission",
+        "production_live_signing": "signing", "production_live_submission": "submission",
+        "automatic_live_retry": "submission", "live_transaction_replacement": "submission", "automatic_submission_retry": "submission",
         "transaction_replacement": "submission", "receipt_lookup": "receipt", "validate_reduce_event": "receipt",
         "production_signer_integration": "signing", "production_execution_session": "execution", "real_transaction_submission": "submission",
         "export_private_key": "signing", "persist_decrypted_key": "signing",
@@ -526,10 +560,10 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "resolve_pending_nonce": "preflight", "estimate_transaction_gas": "preflight",
         "detect_fee_model": "preflight", "resolve_transaction_fees": "preflight",
         "check_native_fee_balance": "preflight",
-        "production_bound_signer": "signing", "os_backed_keystore_secret_provider": "signing",
+        "production_raw_transaction_submitter": "submission", "production_bound_signer": "signing", "os_backed_keystore_secret_provider": "signing",
         "interactive_keystore_secret_provider": "signing", "decrypt_encrypted_keystore": "signing", "sign_finalized_legacy_transaction": "signing",
         "sign_finalized_eip1559_transaction": "signing",
-        "recover_execution_state": "journal",
+        "recover_execution_state": "journal", "recover_live_execution_session": "execution",
         "revalidate_pending_nonce_live": "signing_lease", "acquire_signing_lease": "signing_lease",
         "decode_signed_transaction": "signed_transaction", "recover_signed_transaction_sender": "signed_transaction",
         "recover_submission_by_hash": "submission",

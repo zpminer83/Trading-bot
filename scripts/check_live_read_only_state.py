@@ -91,6 +91,13 @@ from bot.execution.dreamdex_signing_lease import (
 )
 from bot.execution.dreamdex_signed_transaction import build_signed_transaction_preview
 from bot.execution.dreamdex_transaction_submission import build_transaction_submission_preview
+from bot.execution.dreamdex_production_rpc import DreamDexProductionRpcPolicy, HttpDreamDexRawTransactionSubmitter
+from bot.execution.dreamdex_live_execution_session import (
+    DreamDexExecutionArmingEvidence,
+    DreamDexLiveExecutionSessionPolicy,
+    build_live_execution_session_preview,
+    evaluate_execution_arming,
+)
 from bot.integrations.dreamdex_authenticated_read_only import _parse_enable_flag
 
 
@@ -1099,6 +1106,44 @@ def _print_runtime_launch_gate() -> None:
     print(f"  launch decision fingerprint: {mask_hex_hash(decision.decision_fingerprint)}")
 
 
+def _print_live_execution_session() -> None:
+    """Print disarmed defaults without reading RPC/keystore or writing journal."""
+    rpc_policy = DreamDexProductionRpcPolicy()
+    session_policy = DreamDexLiveExecutionSessionPolicy()
+    arming = evaluate_execution_arming(session_policy, DreamDexExecutionArmingEvidence())
+    capabilities = build_execution_capability_matrix()
+    print("PRODUCTION LIVE EXECUTION SESSION:")
+    print("  live session model: available_offline")
+    print(f"  production RPC submitter: {capabilities.by_name('production_raw_transaction_submitter').status}")
+    print(f"  RPC mutation capability: {'enabled' if rpc_policy.allow_mutation_rpc else 'disabled'}")
+    print("  launch approval: NO")
+    print("  account evidence authoritative: NO")
+    print("  market evidence authoritative: NO")
+    print("  journal clean: unresolved")
+    print("  signer configured: NO")
+    print("  signer unlock verified current session: NO")
+    print("  RPC chain confirmed: NO")
+    print("  live preflight confirmed: NO")
+    print("  nonce revalidated: NO")
+    print("  signing lease active: NO")
+    print("  explicit session approval: NO")
+    print("  real signing policy enabled: NO")
+    print("  real submission policy enabled: NO")
+    print(f"  armed for signing: {'YES' if arming.armed_for_signing else 'NO'}")
+    print(f"  armed for submission: {'YES' if arming.armed_for_submission else 'NO'}")
+    print("  session execution performed: NO")
+    print("  signer invocation count: 0")
+    print("  submission call count: 0")
+    print("  real transaction signed: NO")
+    print("  real transaction submitted: NO")
+    print("  automatic retry count: 0")
+    print("  replacement count: 0")
+    print("  recovery required: NO")
+    print("  raw transaction output allowed: NO")
+    print("  Real submission enabled: NO")
+    print(f"  session blockers: {', '.join(arming.blockers) or 'none'}")
+
+
 def _print_end_to_end_dry_run() -> None:
     print("END-TO-END EXECUTION DRY-RUN:")
     print("  dry-run orchestrator: available_offline")
@@ -1236,6 +1281,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_transaction_submission_boundary(result=None, execution_performed=False)
     _print_transaction_confirmation(enabled=transaction_confirmation_enabled)
     _print_runtime_launch_gate()
+    _print_live_execution_session()
     _print_end_to_end_dry_run()
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
@@ -1348,6 +1394,7 @@ def main() -> int:
         _print_transaction_confirmation(enabled=False)
         _print_encrypted_keystore_signer()
         _print_runtime_launch_gate()
+        _print_live_execution_session()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2
@@ -1368,6 +1415,7 @@ def main() -> int:
         _print_transaction_confirmation(enabled=False)
         _print_encrypted_keystore_signer()
         _print_runtime_launch_gate()
+        _print_live_execution_session()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2
