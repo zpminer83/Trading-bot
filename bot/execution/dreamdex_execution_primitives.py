@@ -247,9 +247,11 @@ class DreamDexExecutionBlockers:
     EXECUTION_APPROVAL_PROVIDER_UNAVAILABLE = "execution_approval_provider_unavailable"
     EXECUTION_APPROVAL_TERMINAL_UNAVAILABLE = "execution_approval_terminal_unavailable"
     EXECUTION_APPROVAL_REJECTED = "execution_approval_rejected"
+    EXECUTION_APPROVAL_PROVIDER_ERROR = "execution_approval_provider_error"
     EXECUTION_APPROVAL_EXPIRED = "execution_approval_expired"
     EXECUTION_APPROVAL_BINDING_MISMATCH = "execution_approval_binding_mismatch"
     EXECUTION_APPROVAL_REPLAY_DETECTED = "execution_approval_replay_detected"
+    EXECUTION_APPROVAL_REGISTRY_CAPACITY = "execution_approval_registry_capacity"
     POST_APPROVAL_REVALIDATION_UNAVAILABLE = "post_approval_revalidation_unavailable"
     POST_APPROVAL_REVALIDATION_FAILED = "post_approval_revalidation_failed"
     POST_APPROVAL_JOURNAL_CHANGED = "post_approval_journal_changed"
@@ -340,8 +342,10 @@ class DreamDexExecutionBlockers:
         PRODUCTION_READINESS_POLICY_INCOMPLETE, PRODUCTION_CONFIGURATION_INCOMPLETE,
         EXECUTION_APPROVAL_UNAVAILABLE, EXECUTION_APPROVAL_PROVIDER_UNAVAILABLE,
         EXECUTION_APPROVAL_TERMINAL_UNAVAILABLE, EXECUTION_APPROVAL_REJECTED,
+        EXECUTION_APPROVAL_PROVIDER_ERROR,
         EXECUTION_APPROVAL_EXPIRED, EXECUTION_APPROVAL_BINDING_MISMATCH,
-        EXECUTION_APPROVAL_REPLAY_DETECTED, POST_APPROVAL_REVALIDATION_UNAVAILABLE,
+        EXECUTION_APPROVAL_REPLAY_DETECTED, EXECUTION_APPROVAL_REGISTRY_CAPACITY,
+        POST_APPROVAL_REVALIDATION_UNAVAILABLE,
         POST_APPROVAL_REVALIDATION_FAILED, POST_APPROVAL_JOURNAL_CHANGED,
         POST_APPROVAL_NONCE_CHANGED, POST_APPROVAL_FEES_CHANGED,
         POST_APPROVAL_MARKET_EVIDENCE_CHANGED, POST_APPROVAL_ACCOUNT_EVIDENCE_CHANGED,
@@ -569,6 +573,8 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "production_readiness_model": "readiness", "evaluate_production_readiness": "readiness",
         "execution_approval_preview": "approval", "execution_approval_binding": "approval",
         "execution_approval_replay_protection": "approval", "production_execution_ceremony": "approval",
+        "verify_rehearsal_zero_mutation": "rehearsal", "terminal_session_replay_protection": "rehearsal",
+        "bounded_approval_replay_registry": "approval", "approval_challenge_redaction": "approval",
     }
     unavailable = {
         "resolve_nonce": "envelope", "estimate_gas": "envelope", "resolve_fees": "envelope", "sign_transaction": "signing",
@@ -599,6 +605,8 @@ def build_execution_capability_matrix(*, blockers: Sequence[str] = ()) -> DreamD
         "recover_submission_by_hash": "submission",
         "observe_transaction_confirmation_once": "receipt", "monitor_transaction_confirmation": "receipt", "receipt_polling": "receipt",
         "interactive_execution_approval_provider": "approval", "post_approval_revalidation": "approval",
+        "zero_mutation_production_rehearsal": "rehearsal", "collect_live_read_only_rehearsal_evidence": "rehearsal",
+        "build_live_candidate_transaction_preview": "rehearsal",
     }
     values = [DreamDexExecutionCapability(name, ExecutionAvailability.AVAILABLE_OFFLINE.value, layer, source_status="offline", blocking=False) for name, layer in available.items()]
     values.extend(DreamDexExecutionCapability(name, ExecutionAvailability.PARTIAL.value, layer, source_status="opt_in_runtime", blocking=False, unresolved_reasons=("runtime_evidence_required",)) for name, layer in partial.items())

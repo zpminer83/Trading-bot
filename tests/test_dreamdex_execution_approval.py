@@ -104,3 +104,15 @@ def test_interactive_provider_requires_tty_and_does_not_prompt_when_redirected()
     provider = InteractiveDreamDexExecutionApprovalProvider(stdin=Stream(), stdout=Stream(), input_fn=lambda prompt: calls.append(prompt) or "APPROVE-TEST-0001")
     assert provider.request_approval(_preview(), "APPROVE-TEST-0001", "current") is None
     assert calls == []
+
+
+def test_provider_exception_is_sanitized_without_challenge_text():
+    preview = _preview()
+    challenge = create_execution_approval_challenge(preview, issued_monotonic_ms=1, challenge_generator=lambda: "APPROVE-SECRET-TEST")
+    class Broken:
+        provider_type = "broken"
+        def request_approval(self, *_args):
+            raise RuntimeError("APPROVE-SECRET-TEST")
+    evidence = evaluate_execution_approval(challenge=challenge, preview=preview, provider=Broken(), now_monotonic_ms=2)
+    assert evidence.approved is False
+    assert "APPROVE-SECRET-TEST" not in repr(evidence) + str(evidence.safe_dict())

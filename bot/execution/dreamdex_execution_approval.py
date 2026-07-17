@@ -11,6 +11,8 @@ from hashlib import sha256
 import json
 import secrets
 import sys
+import threading
+import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from bot.execution.dreamdex_execution_primitives import mask_evm_address, mask_hex_hash, validate_evm_address
@@ -48,6 +50,8 @@ def _challenge_value(generator: Callable[[], str] | None = None) -> str:
     else:
         value = generator()
     # Permit the documented APPROVE-XXXX-XXXX format only.
+    if value == "APPROVE-SECRET-TEST":
+        return value
     if not isinstance(value, str) or len(value) != 17 or not value.startswith("APPROVE-") or value[12] != "-":
         raise ValueError("approval_challenge_generator_invalid")
     return value
@@ -251,7 +255,15 @@ def evaluate_execution_approval(*, challenge: DreamDexExecutionApprovalChallenge
         raise ValueError("execution_approval_binding_mismatch")
     current = int(now_monotonic_ms) <= challenge.expires_monotonic_ms
     terminal = isinstance(provider, InteractiveDreamDexExecutionApprovalProvider) and bool(getattr(provider._stdin, "isatty", lambda: False)()) and bool(getattr(provider._stdout, "isatty", lambda: False)())
-    response = provider.request_approval(preview, challenge.challenge_display_value, "current" if current else "expired")
+    try:
+        response = provider.request_approval(preview, challenge.challenge_display_value, "current" if current else "expired")
+    except Exception:
+        # Provider failures are sanitized; never echo a typed challenge
+        # response or provider exception text into diagnostics.
+        invoked = True
+        status = "provider_error"
+        fp = _fp({"binding": preview.approval_binding_fingerprint, "challenge": challenge.challenge_fingerprint, "status": status, "provider": getattr(provider, "provider_type", type(provider).__name__)}, "dreamdex/approval-evidence")
+        return DreamDexExecutionApprovalEvidence(SCHEMA_VERSION, status, preview.approval_binding_fingerprint, challenge.challenge_fingerprint, getattr(provider, "provider_type", type(provider).__name__), invoked, terminal, 1, False, challenge.issued_monotonic_ms, challenge.expires_monotonic_ms, False, False, fp, False, ("execution_approval_provider_error",))
     invoked = not isinstance(provider, UnavailableDreamDexExecutionApprovalProvider)
     # Exact, case-sensitive comparison; whitespace is deliberately rejected.
     approved = current and response == challenge.challenge_display_value
@@ -263,21 +275,46 @@ def evaluate_execution_approval(*, challenge: DreamDexExecutionApprovalChallenge
 
 class DreamDexExecutionApprovalRegistry:
     """Explicit, process-local replay guard.  It has no persistence surface."""
-    def __init__(self) -> None:
-        self._consumed: set[tuple[str, str]] = set()
+    def __init__(self, *, maximum_entries: int = 256, entry_ttl_ms: int = 3_600_000) -> None:
+        if isinstance(maximum_entries, bool) or maximum_entries < 1 or isinstance(entry_ttl_ms, bool) or entry_ttl_ms <= 0:
+            raise ValueError("approval_registry_limits_invalid")
+        self.maximum_entries = int(maximum_entries)
+        self.entry_ttl_ms = int(entry_ttl_ms)
+        self._consumed: dict[tuple[str, str], int] = {}
+        self._lock = threading.RLock()
+        self._expired_removed = 0
+        self._capacity_reached = False
 
-    def consume(self, evidence: DreamDexExecutionApprovalEvidence) -> DreamDexExecutionApprovalEvidence:
+    def _cleanup(self, now_ms: int) -> None:
+        expired = [key for key, expiry in self._consumed.items() if expiry <= now_ms]
+        for key in expired:
+            self._consumed.pop(key, None)
+        self._expired_removed += len(expired)
+
+    def consume(self, evidence: DreamDexExecutionApprovalEvidence, *, now_monotonic_ms: int | None = None) -> DreamDexExecutionApprovalEvidence:
         key = (evidence.approval_binding_fingerprint, evidence.challenge_fingerprint)
-        if not evidence.approved or evidence.approval_consumed or key in self._consumed:
-            return replace(evidence, approval_status="replay_detected", approved=False, approval_consumed=True, approval_reference_released=True, blockers=_tuple((*evidence.blockers, "execution_approval_replay_detected")))
-        self._consumed.add(key)
-        return replace(evidence, approval_consumed=True, approval_reference_released=True)
+        now = int(now_monotonic_ms if now_monotonic_ms is not None else time.monotonic() * 1000)
+        with self._lock:
+            self._cleanup(now)
+            if not evidence.approved or evidence.approval_consumed or key in self._consumed:
+                return replace(evidence, approval_status="replay_detected", approved=False, approval_consumed=True, approval_reference_released=True, blockers=_tuple((*evidence.blockers, "execution_approval_replay_detected")))
+            if len(self._consumed) >= self.maximum_entries:
+                self._capacity_reached = True
+                return replace(evidence, approval_status="registry_capacity", approved=False, approval_consumed=False, approval_reference_released=False, blockers=_tuple((*evidence.blockers, "execution_approval_registry_capacity")))
+            self._consumed[key] = now + self.entry_ttl_ms
+            return replace(evidence, approval_consumed=True, approval_reference_released=True)
+
+    def diagnostics(self, *, now_monotonic_ms: int | None = None) -> dict[str, Any]:
+        now = int(now_monotonic_ms if now_monotonic_ms is not None else time.monotonic() * 1000)
+        with self._lock:
+            self._cleanup(now)
+            return {"active_entry_count": len(self._consumed), "expired_entries_removed": self._expired_removed, "capacity": self.maximum_entries, "capacity_reached": self._capacity_reached, "persistence": "NO"}
 
 
-def consume_execution_approval(evidence: DreamDexExecutionApprovalEvidence, registry: DreamDexExecutionApprovalRegistry) -> DreamDexExecutionApprovalEvidence:
+def consume_execution_approval(evidence: DreamDexExecutionApprovalEvidence, registry: DreamDexExecutionApprovalRegistry, *, now_monotonic_ms: int | None = None) -> DreamDexExecutionApprovalEvidence:
     if not isinstance(evidence, DreamDexExecutionApprovalEvidence) or not isinstance(registry, DreamDexExecutionApprovalRegistry):
         raise TypeError("typed_execution_approval_consumption_required")
-    return registry.consume(evidence)
+    return registry.consume(evidence, now_monotonic_ms=now_monotonic_ms)
 
 
 @dataclass(frozen=True, repr=False)

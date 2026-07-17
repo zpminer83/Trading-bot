@@ -1174,6 +1174,24 @@ def _print_execution_approval() -> None:
     print("  approval blockers: execution_approval_unavailable")
 
 
+def _print_zero_mutation_rehearsal() -> None:
+    """Static offline capability; this path never creates a collector or calls network."""
+    print("ZERO-MUTATION PRODUCTION REHEARSAL:")
+    print("  rehearsal model: available_offline")
+    print("  rehearsal execution performed: NO")
+    print("  network read calls: 0")
+    print("  mutation RPC calls: 0")
+    print("  production journal writes: NO")
+    print("  approval prompt performed: NO")
+    print("  keystore read: NO")
+    print("  password prompt: NO")
+    print("  signer invocation count: 0")
+    print("  submission call count: 0")
+    print("  ready for human review: NO")
+    print("  ready for signer invocation: NO")
+    print("  ready for real submission: NO")
+
+
 def _print_end_to_end_dry_run() -> None:
     print("END-TO-END EXECUTION DRY-RUN:")
     print("  dry-run orchestrator: available_offline")
@@ -1313,6 +1331,7 @@ def _print_report(snapshot, report, validation, *, reconciliation_bridge_enabled
     _print_runtime_launch_gate()
     _print_live_execution_session()
     _print_execution_approval()
+    _print_zero_mutation_rehearsal()
     _print_end_to_end_dry_run()
     _print_reconciliation_evidence_bridge(snapshot, enabled=reconciliation_bridge_enabled)
     book = snapshot.orderbook if isinstance(snapshot.orderbook, dict) else {}
@@ -1427,6 +1446,7 @@ def main() -> int:
         _print_runtime_launch_gate()
         _print_live_execution_session()
         _print_execution_approval()
+        _print_zero_mutation_rehearsal()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2
@@ -1449,6 +1469,7 @@ def main() -> int:
         _print_runtime_launch_gate()
         _print_live_execution_session()
         _print_execution_approval()
+        _print_zero_mutation_rehearsal()
         _print_end_to_end_dry_run()
         print("Real submission enabled: NO")
         return 2

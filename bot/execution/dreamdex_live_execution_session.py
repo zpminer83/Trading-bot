@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from hashlib import sha256
 import json
+import threading
 import time
 from typing import Any, Callable, Mapping, Sequence
 
@@ -58,6 +59,82 @@ def _value(value: Any, name: str, default: Any = None) -> Any:
     if isinstance(value, Mapping):
         return value.get(name, default)
     return getattr(value, name, default)
+
+
+class DreamDexTerminalSessionRegistry:
+    """Bounded process-local terminal-session protection.
+
+    Only canonical fingerprints, status and monotonic expiry are retained.
+    No dependency/object identity, paths, timestamps or transaction material is
+    used.  Callers share an instance explicitly when reconstructing a session.
+    """
+    def __init__(self, *, maximum_entries: int = 256, entry_ttl_ms: int = 3_600_000) -> None:
+        if isinstance(maximum_entries, bool) or maximum_entries < 1 or isinstance(entry_ttl_ms, bool) or entry_ttl_ms <= 0:
+            raise ValueError("terminal_registry_limits_invalid")
+        self.maximum_entries = int(maximum_entries)
+        self.entry_ttl_ms = int(entry_ttl_ms)
+        self._entries: dict[str, tuple[str, int]] = {}
+        self._lock = threading.RLock()
+        self._expired_removed = 0
+        self._capacity_reached = False
+
+    @staticmethod
+    def canonical_identity(*, session_request_fingerprint: str, operation: str, intent_fingerprint: str | None = None, rehearsal_intent_fingerprint: str | None = None, launch_decision_fingerprint: str | None = None, journal_snapshot_fingerprint: str | None = None, market_evidence_fingerprint: str | None = None, account_evidence_fingerprint: str | None = None) -> str:
+        return _fp({"session_request_fingerprint": session_request_fingerprint, "operation": operation, "intent_fingerprint": intent_fingerprint, "rehearsal_intent_fingerprint": rehearsal_intent_fingerprint, "launch_decision_fingerprint": launch_decision_fingerprint, "journal_snapshot_fingerprint": journal_snapshot_fingerprint, "market_evidence_fingerprint": market_evidence_fingerprint, "account_evidence_fingerprint": account_evidence_fingerprint}, "dreamdex/terminal-session")
+
+    def _cleanup(self, now_ms: int) -> int:
+        expired = [key for key, (_, expiry) in self._entries.items() if expiry <= now_ms]
+        for key in expired:
+            self._entries.pop(key, None)
+        self._expired_removed += len(expired)
+        return len(expired)
+
+    def check_or_record_rejected(self, identity: str, *, now_monotonic_ms: int | None = None) -> tuple[bool, str]:
+        now = int(now_monotonic_ms if now_monotonic_ms is not None else time.monotonic() * 1000)
+        with self._lock:
+            self._cleanup(now)
+            if identity in self._entries:
+                return True, "live_execution_terminal_session_reused"
+            if len(self._entries) >= self.maximum_entries:
+                self._capacity_reached = True
+                return True, "live_execution_terminal_registry_capacity"
+            self._entries[identity] = ("gate_rejected", now + self.entry_ttl_ms)
+            return False, ""
+
+    def check(self, identity: str, *, now_monotonic_ms: int | None = None) -> tuple[bool, str]:
+        now = int(now_monotonic_ms if now_monotonic_ms is not None else time.monotonic() * 1000)
+        with self._lock:
+            self._cleanup(now)
+            if identity in self._entries:
+                return True, "live_execution_terminal_session_reused"
+            if len(self._entries) >= self.maximum_entries:
+                self._capacity_reached = True
+                return True, "live_execution_terminal_registry_capacity"
+            return False, ""
+
+    def record_rejected(self, identity: str, *, now_monotonic_ms: int | None = None) -> tuple[bool, str]:
+        now = int(now_monotonic_ms if now_monotonic_ms is not None else time.monotonic() * 1000)
+        with self._lock:
+            self._cleanup(now)
+            if identity in self._entries:
+                return True, "live_execution_terminal_session_reused"
+            if len(self._entries) >= self.maximum_entries:
+                self._capacity_reached = True
+                return True, "live_execution_terminal_registry_capacity"
+            self._entries[identity] = ("gate_rejected", now + self.entry_ttl_ms)
+            return False, ""
+
+    def diagnostics(self, *, now_monotonic_ms: int | None = None) -> dict[str, Any]:
+        now = int(now_monotonic_ms if now_monotonic_ms is not None else time.monotonic() * 1000)
+        with self._lock:
+            self._cleanup(now)
+            return {"active_entry_count": len(self._entries), "expired_entries_removed": self._expired_removed, "capacity": self.maximum_entries, "capacity_reached": self._capacity_reached, "persistence": "NO"}
+
+
+# Used only for the extended logical-session identity.  Legacy callers retain
+# their dependency-local behavior for compatibility; new callers get process-
+# local protection even when dependencies are reconstructed.
+_EXTENDED_TERMINAL_SESSION_REGISTRY = DreamDexTerminalSessionRegistry()
 
 
 @dataclass(frozen=True, repr=False)
@@ -240,6 +317,10 @@ class DreamDexLiveExecutionSessionRequest:
     launch_decision_fingerprint: str
     journal_snapshot_fingerprint: str
     session_request_fingerprint: str = ""
+    intent_fingerprint: str | None = None
+    rehearsal_intent_fingerprint: str | None = None
+    market_evidence_fingerprint: str | None = None
+    account_evidence_fingerprint: str | None = None
     authoritative: bool = False
     blockers: tuple[str, ...] = ()
 
@@ -251,19 +332,23 @@ class DreamDexLiveExecutionSessionRequest:
         for name in ("unsigned_request_fingerprint", "launch_decision_fingerprint", "journal_snapshot_fingerprint"):
             if not isinstance(getattr(self, name), str) or not getattr(self, name):
                 raise ValueError(f"{name}_required")
+        for name in ("intent_fingerprint", "rehearsal_intent_fingerprint", "market_evidence_fingerprint", "account_evidence_fingerprint"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or not value):
+                raise ValueError(f"{name}_invalid")
         object.__setattr__(self, "authoritative", False)
         object.__setattr__(self, "blockers", _tuple(self.blockers))
         if not self.session_request_fingerprint:
             object.__setattr__(self, "session_request_fingerprint", _fp({"operation": self.operation, "market": self.market_address, "signer": self.signer_address, "unsigned": self.unsigned_request_fingerprint, "launch": self.launch_decision_fingerprint, "journal": self.journal_snapshot_fingerprint}, "dreamdex/live-session-request"))
 
     def safe_dict(self) -> dict[str, Any]:
-        return {"schema_version": self.schema_version, "operation": self.operation, "market_address_masked": mask_evm_address(self.market_address), "signer_address_masked": mask_evm_address(self.signer_address), "unsigned_request_fingerprint": mask_hex_hash(self.unsigned_request_fingerprint), "launch_decision_fingerprint": mask_hex_hash(self.launch_decision_fingerprint), "journal_snapshot_fingerprint": mask_hex_hash(self.journal_snapshot_fingerprint), "session_request_fingerprint": mask_hex_hash(self.session_request_fingerprint), "authoritative": False, "blockers": self.blockers}
+        return {"schema_version": self.schema_version, "operation": self.operation, "market_address_masked": mask_evm_address(self.market_address), "signer_address_masked": mask_evm_address(self.signer_address), "unsigned_request_fingerprint": mask_hex_hash(self.unsigned_request_fingerprint), "launch_decision_fingerprint": mask_hex_hash(self.launch_decision_fingerprint), "journal_snapshot_fingerprint": mask_hex_hash(self.journal_snapshot_fingerprint), "session_request_fingerprint": mask_hex_hash(self.session_request_fingerprint), "intent_fingerprint": mask_hex_hash(self.intent_fingerprint), "rehearsal_intent_fingerprint": mask_hex_hash(self.rehearsal_intent_fingerprint), "market_evidence_fingerprint": mask_hex_hash(self.market_evidence_fingerprint), "account_evidence_fingerprint": mask_hex_hash(self.account_evidence_fingerprint), "authoritative": False, "blockers": self.blockers}
 
     def __repr__(self) -> str:
         return f"DreamDexLiveExecutionSessionRequest(operation={self.operation!r}, market={mask_evm_address(self.market_address)!r}, signer={mask_evm_address(self.signer_address)!r})"
 
 
-def build_live_execution_session_request(*, policy: DreamDexLiveExecutionSessionPolicy, operation: str, market_address: str, signer_address: str, unsigned_request_fingerprint: str, launch_decision_fingerprint: str, journal_snapshot_fingerprint: str) -> DreamDexLiveExecutionSessionRequest:
+def build_live_execution_session_request(*, policy: DreamDexLiveExecutionSessionPolicy, operation: str, market_address: str, signer_address: str, unsigned_request_fingerprint: str, launch_decision_fingerprint: str, journal_snapshot_fingerprint: str, intent_fingerprint: str | None = None, rehearsal_intent_fingerprint: str | None = None, market_evidence_fingerprint: str | None = None, account_evidence_fingerprint: str | None = None) -> DreamDexLiveExecutionSessionRequest:
     blockers: list[str] = []
     if not policy.complete:
         blockers.append("live_execution_policy_incomplete")
@@ -273,7 +358,7 @@ def build_live_execution_session_request(*, policy: DreamDexLiveExecutionSession
         blockers.append("live_execution_market_mismatch")
     if policy.required_signer_address is None or signer_address.lower() != policy.required_signer_address.lower():
         blockers.append("live_execution_signer_mismatch")
-    return DreamDexLiveExecutionSessionRequest(SCHEMA_VERSION, operation, market_address, signer_address, unsigned_request_fingerprint, launch_decision_fingerprint, journal_snapshot_fingerprint, blockers=tuple(blockers))
+    return DreamDexLiveExecutionSessionRequest(SCHEMA_VERSION, operation, market_address, signer_address, unsigned_request_fingerprint, launch_decision_fingerprint, journal_snapshot_fingerprint, intent_fingerprint=intent_fingerprint, rehearsal_intent_fingerprint=rehearsal_intent_fingerprint, market_evidence_fingerprint=market_evidence_fingerprint, account_evidence_fingerprint=account_evidence_fingerprint, blockers=tuple(blockers))
 
 
 @dataclass(frozen=True, repr=False)
@@ -402,6 +487,7 @@ class DreamDexLiveExecutionSessionDependencies:
     # Process-local only.  It is intentionally not persisted and records that a
     # rejected request cannot be upgraded/reused by the same ceremony object.
     terminal_session_fingerprints: set[str] = field(default_factory=set, compare=False, repr=False)
+    terminal_session_registry: DreamDexTerminalSessionRegistry | None = field(default=None, compare=False, repr=False)
 
     def complete(self) -> bool:
         return all(callable(getattr(self, name)) for name in ("preflight", "persist_intent", "reserve_nonce", "revalidate_nonce", "acquire_signing_lease", "sign_and_verify", "submit_once", "confirm", "reconcile"))
@@ -442,6 +528,17 @@ def run_live_execution_session(*, policy: DreamDexLiveExecutionSessionPolicy, ar
         raise TypeError("typed_arming_evidence_required")
     armed = evaluate_execution_arming(policy, arming_evidence)
     stages: list[DreamDexLiveExecutionStageResult] = []
+    terminal_identity = DreamDexTerminalSessionRegistry.canonical_identity(session_request_fingerprint=request.session_request_fingerprint, operation=request.operation, intent_fingerprint=request.intent_fingerprint, rehearsal_intent_fingerprint=request.rehearsal_intent_fingerprint, launch_decision_fingerprint=request.launch_decision_fingerprint, journal_snapshot_fingerprint=request.journal_snapshot_fingerprint, market_evidence_fingerprint=request.market_evidence_fingerprint, account_evidence_fingerprint=request.account_evidence_fingerprint)
+    registry = None
+    if dependencies is not None:
+        registry = dependencies.terminal_session_registry
+    if registry is None and (request.intent_fingerprint or request.rehearsal_intent_fingerprint or request.market_evidence_fingerprint or request.account_evidence_fingerprint):
+        registry = _EXTENDED_TERMINAL_SESSION_REGISTRY
+    if registry is not None:
+        reused, reason = registry.check(terminal_identity)
+        if reused:
+            _stage(stages, "session_reuse", "blocked", None, state=DreamDexLiveExecutionState.GATE_REJECTED.value, execution_performed=False, blockers=(reason,))
+            return _result(request=request, state=DreamDexLiveExecutionState.GATE_REJECTED, stages=stages, blockers=(reason,))
     if dependencies is not None and request.session_request_fingerprint in dependencies.terminal_session_fingerprints:
         _stage(stages, "session_reuse", "blocked", None, state=DreamDexLiveExecutionState.GATE_REJECTED.value, execution_performed=False, blockers=("live_execution_terminal_session_reused",))
         return _result(request=request, state=DreamDexLiveExecutionState.GATE_REJECTED, stages=stages, blockers=("live_execution_terminal_session_reused",))
@@ -451,6 +548,8 @@ def run_live_execution_session(*, policy: DreamDexLiveExecutionSessionPolicy, ar
         _stage(stages, "arming", "blocked", None, state=DreamDexLiveExecutionState.GATE_REJECTED.value, execution_performed=False, blockers=reasons)
         if dependencies is not None:
             dependencies.terminal_session_fingerprints.add(request.session_request_fingerprint)
+            if registry is not None:
+                registry.record_rejected(terminal_identity)
         return _result(request=request, state=DreamDexLiveExecutionState.GATE_REJECTED, stages=stages, blockers=reasons)
     if dependencies is None or not dependencies.complete():
         _stage(stages, "dependencies", "blocked", None, state=DreamDexLiveExecutionState.GATE_REJECTED.value, execution_performed=False, blockers=("live_execution_dependencies_incomplete",))
