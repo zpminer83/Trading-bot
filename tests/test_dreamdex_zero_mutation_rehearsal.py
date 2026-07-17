@@ -1,11 +1,17 @@
 from decimal import Decimal
+from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
 from bot.execution.dreamdex_zero_mutation_rehearsal import (
     DreamDexZeroMutationRehearsalEvidence,
+    DreamDexLiveReadOnlyRehearsalDependencies,
     DreamDexZeroMutationRehearsalPolicy,
+    READ_ONLY_REHEARSAL_RPC_ALLOWLIST,
+    READ_ONLY_REHEARSAL_FORBIDDEN_PREFIXES,
     build_rehearsal_candidate,
+    collect_live_read_only_rehearsal_evidence_from_dependencies,
     collect_live_read_only_rehearsal_evidence,
     run_zero_mutation_rehearsal,
 )
@@ -16,15 +22,16 @@ def _policy(**kwargs):
 
 
 def _evidence(**kwargs):
-    values = dict(market_status="available", account_status="available", rpc_status="available", chain_id=5031,
+    values = dict(market_status="available", orderbook_status="available", account_status="available", rpc_status="available", chain_id=5031,
                   target_code_status="available", pending_nonce_status="available", native_balance_status="available",
                   gas_estimate_status="available", fee_status="available", market_rules_status="available",
                   runtime_gate_status="available", risk_status="available", fair_play_status="available",
                   market_age_ms=1, account_age_ms=1, source_authority="authoritative", network_read_call_count=7,
                   market_identity_status="confirmed", account_identity_status="confirmed", trading_enabled=True,
                   contract_code_present=True, pending_nonce=7, gas_estimate=21000, estimated_fee_wei=1000, native_balance_wei=1000000,
-                  gap_risk_status="available", gap_risk_budget_approved=True)
-    values.update(drawdown_fraction=Decimal("0"), preemptive_drawdown=Decimal("0.08"), hard_drawdown_limit=Decimal("0.10"))
+                  gap_risk_status="available", gap_risk_budget_approved=True,
+                  account_authority_status="confirmed", open_order_status="available_empty", fills_status="available_empty")
+    values.update(drawdown_fraction=Decimal("0"), preemptive_drawdown=Decimal("0.08"), hard_drawdown_limit=Decimal("0.10"), projected_shocked_drawdown=Decimal("0.02"))
     values.update(kwargs)
     return DreamDexZeroMutationRehearsalEvidence(**values)
 
@@ -103,3 +110,85 @@ def test_safe_diagnostics_do_not_expose_raw_address_or_calldata():
 def test_evidence_collector_accepts_typed_mapping():
     evidence = collect_live_read_only_rehearsal_evidence(lambda: {"market_status": "available", "network_read_call_count": 1})
     assert evidence.market_status == "available" and evidence.network_read_call_count == 1
+
+
+def test_live_dependency_bundle_is_reader_only_and_rejects_secret_configuration():
+    reader = lambda: None
+    deps = DreamDexLiveReadOnlyRehearsalDependencies(reader, reader, reader, safe_config={"required_market_symbol": "SOMI:USDso"})
+    assert "read-only" in repr(deps)
+    assert not any(hasattr(deps, name) for name in ("signer", "submitter", "secret_provider", "journal"))
+    with pytest.raises(ValueError):
+        DreamDexLiveReadOnlyRehearsalDependencies(reader, reader, reader, safe_config={"access_token": "not-accepted"})
+
+
+def test_dependency_collector_uses_typed_sources_and_clamps_future_age():
+    observed = datetime.now(timezone.utc) + timedelta(seconds=10)
+    market = SimpleNamespace(
+        status="available", observed_at=observed,
+        metadata=SimpleNamespace(symbol="SOMI:USDso", trading_rules=SimpleNamespace(available=True, trading_enabled=True)),
+    )
+    account = SimpleNamespace(
+        observed_at=observed, account_address_semantics="unresolved",
+        open_orders_status="source_unavailable", fills_status="source_unavailable",
+    )
+    calls = []
+    deps = DreamDexLiveReadOnlyRehearsalDependencies(
+        lambda: calls.append("market") or market,
+        lambda: calls.append("account") or account,
+        lambda: calls.append("rpc") or {"status": "unavailable", "read_only_rpc_call_count": 7},
+        monotonic_clock=lambda: 1.0,
+        safe_config={"required_market_symbol": "SOMI:USDso"},
+    )
+    evidence = collect_live_read_only_rehearsal_evidence_from_dependencies(deps)
+    assert calls == ["market", "account", "rpc"]
+    assert evidence.market_age_ms == 0 and evidence.account_age_ms == 0
+    assert evidence.account_authority_status == "unresolved"
+    assert evidence.open_order_status == "source_unavailable"
+    assert evidence.fills_status == "source_unavailable"
+    assert evidence.read_only_rpc_call_count == 7
+
+
+def test_dependency_collector_blocks_crossed_or_wide_orderbooks():
+    metadata = SimpleNamespace(
+        symbol="SOMI:USDso", pool_contract="0x1111111111111111111111111111111111111111",
+        observed_at=datetime.now(timezone.utc),
+        trading_rules=SimpleNamespace(available=True, trading_enabled=True),
+    )
+    account = SimpleNamespace(
+        observed_at=datetime.now(timezone.utc), account_address_semantics="resolved",
+        open_orders_status="available_empty", fills_status="available_empty",
+    )
+    rpc = {"status": "available", "chain_id": 5031, "read_only_rpc_call_count": 7}
+    def collect(book):
+        deps = DreamDexLiveReadOnlyRehearsalDependencies(
+            lambda: SimpleNamespace(status="available", observed_at=datetime.now(timezone.utc), metadata=metadata, orderbook=book),
+            lambda: account, lambda: rpc, safe_config={"required_market_symbol": "SOMI:USDso"},
+        )
+        return collect_live_read_only_rehearsal_evidence_from_dependencies(deps)
+    assert collect({"bids": [{"price": "1.01", "quantity": "1"}], "asks": [{"price": "1.00", "quantity": "1"}]}).orderbook_status == "unavailable"
+    assert collect({"bids": [{"price": "1.00", "quantity": "1"}], "asks": [{"price": "2.00", "quantity": "1"}]}).orderbook_status == "unavailable"
+
+
+def test_rehearsal_rpc_allowlist_has_only_read_only_methods():
+    assert READ_ONLY_REHEARSAL_RPC_ALLOWLIST == {"eth_chainId", "eth_getCode", "eth_getTransactionCount", "eth_estimateGas", "eth_gasPrice", "eth_maxPriorityFeePerGas", "eth_getBalance"}
+    assert all(not method.startswith(READ_ONLY_REHEARSAL_FORBIDDEN_PREFIXES) for method in READ_ONLY_REHEARSAL_RPC_ALLOWLIST)
+    assert not any(method in READ_ONLY_REHEARSAL_RPC_ALLOWLIST for method in ("eth_sendTransaction", "eth_sendRawTransaction", "personal_sign", "wallet_sendTransaction"))
+
+
+def test_fixture_cli_is_deterministic_and_live_mode_is_explicit(monkeypatch, capsys):
+    import scripts.run_dreamdex_zero_mutation_rehearsal as script
+
+    assert script.main(["--mode", "fixture"]) == 0
+    fixture_output = capsys.readouterr().out
+    assert "mode: fixture" in fixture_output
+    assert "mutation RPC calls: 0" in fixture_output
+    assert "submission call count: 0" in fixture_output
+    assert "http" not in fixture_output.lower()
+
+    monkeypatch.setattr(script, "_live_dependencies", lambda symbol: (_ for _ in ()).throw(RuntimeError("unavailable")))
+    assert script.main(["--mode", "live-read-only"]) != 0
+    live_output = capsys.readouterr().out
+    assert "mode: live-read-only" in live_output
+    assert "submission call count: 0" in live_output
+    assert "private" not in live_output.lower()
+    assert "token" not in live_output.lower()
