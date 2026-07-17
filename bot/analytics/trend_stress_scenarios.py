@@ -108,6 +108,19 @@ class TrendStressResult:
     invariant_passed: bool
     invariant_failures: tuple[str, ...] = field(default_factory=tuple)
     steps: int = 0
+    peak_equity: Decimal = Decimal("0")
+    realized_pnl: Decimal = Decimal("0")
+    unrealized_pnl: Decimal = Decimal("0")
+    fees_paid: Decimal = Decimal("0")
+    reserved_order_exposure: Decimal = Decimal("0")
+    open_order_exposure: Decimal = Decimal("0")
+    hard_limit_gap_breach: bool = False
+    normal_intents_after_latch: int = 0
+    automatic_retries: int = 0
+    replacement_count: int = 0
+    risk_compliance_status: str = "compliant"
+    configured_preemptive_drawdown: Decimal = Decimal("0.08")
+    entry_halt_latched: bool = False
 
     @property
     def drawdown_guard_triggered(self) -> bool:
@@ -326,6 +339,10 @@ def run_scenario(
     risk_exit_inventory_increase = False
     invariant_failures: list[str] = []
     entry_submission_after_latch = False
+    normal_intents_after_latch = 0
+    previous_drawdown = Decimal("0")
+    hard_limit_gap_breach = False
+    entry_halt_latched = False
     competition_volume_before = (
         active_engine.competition.weekly_volume
         if active_engine.competition is not None
@@ -343,9 +360,14 @@ def run_scenario(
         )
         was_fair_play_latched = bool(active_engine.fair_play_guard and active_engine.fair_play_guard.latched)
         was_risk_latched = active_engine.portfolio_risk_guard.latched
+        was_entry_halt_latched = active_engine.portfolio_risk_guard.entry_halt_latched
         result: ConservativePaperTradingStepResult = active_engine.step(timestamp=timestamp)
 
         generated_orders += len(result.intents)
+        if was_risk_latched or was_entry_halt_latched:
+            normal_intents_after_latch += sum(
+                intent.purpose == OrderPurpose.ENTRY for intent in result.intents
+            )
         submitted_orders += len(result.submitted_orders)
         rejected_orders += sum(not decision.approved for decision in result.decisions)
         rejected_orders += result.fair_play_blocked_intents_count
@@ -370,6 +392,7 @@ def run_scenario(
                     maximum_drawdown_after_latch,
                     result.portfolio_risk_decision.drawdown,
                 )
+            entry_halt_latched = entry_halt_latched or result.portfolio_risk_decision.entry_halt_latched
         risk_exit_intents += getattr(result, "risk_exit_intents_count", 0)
         risk_exit_fills += getattr(result, "risk_exit_fills_count", 0)
         if getattr(result, "risk_exit_intents_count", 0) > 0 and any(
@@ -391,6 +414,13 @@ def run_scenario(
             maximum_drawdown_observed,
             portfolio.drawdown,
         )
+        current_drawdown = portfolio.drawdown
+        if (
+            current_drawdown > configured_drawdown_threshold
+            and previous_drawdown <= configured_drawdown_threshold
+        ):
+            hard_limit_gap_breach = True
+        previous_drawdown = current_drawdown
         maximum_base_inventory = max(maximum_base_inventory, portfolio.base_position)
         maximum_notional_exposure = max(
             maximum_notional_exposure,
@@ -431,6 +461,11 @@ def run_scenario(
     configured_max_drawdown = active_engine.portfolio_risk_guard.limits.max_drawdown
     if maximum_drawdown >= configured_max_drawdown and not risk_latched:
         invariant_failures.append("drawdown threshold was reached without a risk latch")
+    if maximum_drawdown > configured_max_drawdown:
+        if hard_limit_gap_breach:
+            invariant_failures.append("HARD_LIMIT_GAP_BREACH")
+        else:
+            invariant_failures.append("hard drawdown limit breached")
     competition_volume_after = (
         active_engine.competition.weekly_volume
         if active_engine.competition is not None
@@ -440,6 +475,8 @@ def run_scenario(
         invariant_failures.append("competition volume included non-confirmed volume")
     if entry_submission_after_latch:
         invariant_failures.append("ENTRY order submitted after fair-play latch")
+    if normal_intents_after_latch:
+        invariant_failures.append("normal strategy intent generated after risk latch")
     if open_orders_after_shutdown != 0:
         invariant_failures.append("open paper orders remained after shutdown")
 
@@ -494,6 +531,25 @@ def run_scenario(
         invariant_passed=not invariant_failures,
         invariant_failures=tuple(invariant_failures),
         steps=len(scenario.mid_prices),
+        peak_equity=portfolio.peak_equity,
+        realized_pnl=portfolio.realized_pnl,
+        unrealized_pnl=portfolio.unrealized_pnl,
+        fees_paid=portfolio.fees_paid,
+        reserved_order_exposure=sum(
+            (order.intent.notional for order in active_engine.broker.open_orders),
+            Decimal("0"),
+        ),
+        open_order_exposure=sum(
+            (order.intent.notional for order in active_engine.broker.open_orders),
+            Decimal("0"),
+        ),
+        hard_limit_gap_breach=hard_limit_gap_breach,
+        normal_intents_after_latch=normal_intents_after_latch,
+        automatic_retries=0,
+        replacement_count=0,
+        risk_compliance_status=("compliant" if maximum_drawdown <= configured_max_drawdown else "noncompliant"),
+        configured_preemptive_drawdown=active_engine.portfolio_risk_guard.limits.preemptive_drawdown,
+        entry_halt_latched=entry_halt_latched,
     )
 
 

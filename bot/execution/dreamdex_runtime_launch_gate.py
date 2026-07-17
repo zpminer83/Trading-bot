@@ -75,6 +75,7 @@ class DreamDexRuntimeLaunchPolicy:
     allow_real_submission: bool = False
     authoritative: bool = False
     unresolved_reasons: tuple[str, ...] = ()
+    preemptive_drawdown_fraction: Decimal | None = Decimal("0.08")
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
@@ -87,12 +88,16 @@ class DreamDexRuntimeLaunchPolicy:
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"{name}_invalid")
-        for name in ("maximum_orderbook_spread_bps", "maximum_order_notional", "maximum_position_notional", "maximum_daily_loss", "maximum_drawdown_fraction"):
+        for name in ("maximum_orderbook_spread_bps", "maximum_order_notional", "maximum_position_notional", "maximum_daily_loss", "maximum_drawdown_fraction", "preemptive_drawdown_fraction"):
             parsed = _decimal(getattr(self, name), name)
             if parsed is not None:
                 object.__setattr__(self, name, parsed)
         if self.maximum_drawdown_fraction is not None and self.maximum_drawdown_fraction > 1:
             raise ValueError("maximum_drawdown_fraction_invalid")
+        if self.preemptive_drawdown_fraction is not None and self.preemptive_drawdown_fraction > 1:
+            raise ValueError("preemptive_drawdown_fraction_invalid")
+        if self.preemptive_drawdown_fraction is not None and self.maximum_drawdown_fraction is not None and self.preemptive_drawdown_fraction >= self.maximum_drawdown_fraction:
+            raise ValueError("preemptive_drawdown_fraction_invalid")
         object.__setattr__(self, "allow_reduce_order", bool(self.allow_reduce_order))
         object.__setattr__(self, "allow_automatic_retry", False)
         object.__setattr__(self, "allow_replacement", False)
@@ -102,7 +107,7 @@ class DreamDexRuntimeLaunchPolicy:
 
     @property
     def complete(self) -> bool:
-        required = (self.required_chain_id, self.required_market_symbol, self.required_market_address, self.required_signer_address, self.maximum_market_data_age_ms, self.maximum_account_data_age_ms, self.maximum_orderbook_spread_bps, self.maximum_orderbook_cross_depth, self.minimum_orderbook_depth, self.maximum_order_notional, self.maximum_position_notional, self.maximum_open_orders, self.maximum_daily_loss, self.maximum_drawdown_fraction, self.maximum_transaction_fee_wei, self.maximum_active_intents, self.maximum_active_nonce_reservations, self.maximum_active_signing_leases)
+        required = (self.required_chain_id, self.required_market_symbol, self.required_market_address, self.required_signer_address, self.maximum_market_data_age_ms, self.maximum_account_data_age_ms, self.maximum_orderbook_spread_bps, self.maximum_orderbook_cross_depth, self.minimum_orderbook_depth, self.maximum_order_notional, self.maximum_position_notional, self.maximum_open_orders, self.maximum_daily_loss, self.maximum_drawdown_fraction, self.preemptive_drawdown_fraction, self.maximum_transaction_fee_wei, self.maximum_active_intents, self.maximum_active_nonce_reservations, self.maximum_active_signing_leases)
         return not self.unresolved_reasons and all(item is not None for item in required)
 
     def safe_dict(self) -> dict[str, Any]:
@@ -166,13 +171,18 @@ class DreamDexRuntimeLaunchEvidence:
     source_authority_status: str = "unavailable"
     conflicts: tuple[str, ...] = ()
     unresolved_reasons: tuple[str, ...] = ()
+    preemptive_drawdown_fraction: Decimal | None = None
+    entry_halt_latched: bool = False
+    kill_switch_latched: bool = False
+    emergency_exit_requested: bool = False
+    emergency_exit_completed: bool = False
 
     def __post_init__(self) -> None:
         for name in ("market_data_age_ms", "account_data_age_ms", "open_order_count", "active_intent_count", "active_nonce_reservation_count", "active_signing_lease_count"):
             value = getattr(self, name)
             if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
                 raise ValueError(f"{name}_invalid")
-        for name in ("spread_bps", "position_notional", "daily_pnl", "drawdown_fraction"):
+        for name in ("spread_bps", "position_notional", "daily_pnl", "drawdown_fraction", "preemptive_drawdown_fraction"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, _decimal(value, name))
@@ -255,7 +265,7 @@ def evaluate_runtime_launch_gate(policy: DreamDexRuntimeLaunchPolicy, evidence: 
     if not orderbook: blockers.append("orderbook_launch_gate_failed")
     account = policy_ok and (status_ok(evidence.account_identity_status, {"confirmed", "available", "source_confirmed"}) if policy.require_account_identity else True) and status_ok(evidence.account_data_status, {"fresh", "available", "confirmed"}) and evidence.account_data_age_ms is not None and evidence.account_data_age_ms <= (policy.maximum_account_data_age_ms or -1) and (status_ok(evidence.balance_status) if policy.require_balance_evidence else True) and (status_ok(evidence.open_order_status) if policy.require_open_order_evidence else True)
     if not account: blockers.append("account_launch_gate_failed")
-    risk = policy_ok and status_ok(evidence.position_status, {"within_limits", "available", "confirmed"}) and (status_ok(evidence.risk_status, {"approved", "available", "confirmed"}) if policy.require_risk_approval else True) and evidence.position_notional is not None and evidence.position_notional <= (policy.maximum_position_notional or Decimal("-1")) and evidence.open_order_count is not None and evidence.open_order_count <= (policy.maximum_open_orders or -1) and status_ok(evidence.daily_pnl_status, {"within_limit", "available", "confirmed"}) and evidence.daily_pnl is not None and evidence.daily_pnl >= -(policy.maximum_daily_loss or Decimal("-1")) and status_ok(evidence.drawdown_status, {"within_limit", "available", "confirmed"}) and evidence.drawdown_fraction is not None and evidence.drawdown_fraction <= (policy.maximum_drawdown_fraction or Decimal("-1"))
+    risk = policy_ok and status_ok(evidence.position_status, {"within_limits", "available", "confirmed"}) and (status_ok(evidence.risk_status, {"approved", "available", "confirmed"}) if policy.require_risk_approval else True) and evidence.position_notional is not None and evidence.position_notional <= (policy.maximum_position_notional or Decimal("-1")) and evidence.open_order_count is not None and evidence.open_order_count <= (policy.maximum_open_orders or -1) and status_ok(evidence.daily_pnl_status, {"within_limit", "available", "confirmed"}) and evidence.daily_pnl is not None and evidence.daily_pnl >= -(policy.maximum_daily_loss or Decimal("-1")) and status_ok(evidence.drawdown_status, {"within_limit", "available", "confirmed"}) and evidence.drawdown_fraction is not None and evidence.drawdown_fraction <= (policy.maximum_drawdown_fraction or Decimal("-1")) and (evidence.preemptive_drawdown_fraction is None or evidence.drawdown_fraction < evidence.preemptive_drawdown_fraction) and not evidence.entry_halt_latched and not evidence.kill_switch_latched and not evidence.emergency_exit_requested
     if not risk: blockers.append("risk_gate_failed")
     fair = policy_ok and (status_ok(evidence.fair_play_status, {"approved", "available", "confirmed"}) if policy.require_fair_play_approval else True)
     if not fair: blockers.append("fair_play_gate_failed")

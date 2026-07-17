@@ -27,6 +27,7 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         market_age_ms=0, account_age_ms=0, source_authority="authoritative", network_read_call_count=9,
         market_identity_status="confirmed", account_identity_status="confirmed", trading_enabled=True,
         contract_code_present=True, pending_nonce=7, gas_estimate=21000, estimated_fee_wei=1000, native_balance_wei=1000000,
+        drawdown_fraction=Decimal("0"), preemptive_drawdown=Decimal("0.08"), hard_drawdown_limit=Decimal("0.10"),
         source_fingerprint="fixture-source", market_fingerprint="fixture-market", account_fingerprint="fixture-account",
     )
     candidate = build_rehearsal_candidate(market_symbol=policy.required_market_symbol or "SOMI:USDso", side="BUY",

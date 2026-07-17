@@ -202,6 +202,12 @@ class ConservativePaperTradingEngine:
                 market_freshness_decision=freshness_decision,
             )
 
+        # Mark the portfolio immediately after the freshness/safety gates and
+        # before any risk, fill, or strategy work.  All downstream risk
+        # decisions therefore use the same authoritative marked equity.
+        if mid_price is not None:
+            self.portfolio.update_market_price(mid_price)
+
         orderbook_depth_diagnostics: OrderBookDepthDiagnostics | None = None
         orderbook = self.market.get_orderbook(self.symbol)
         if orderbook is not None:
@@ -217,9 +223,6 @@ class ConservativePaperTradingEngine:
                     orderbook,
                     observed_at=timestamp,
                 )
-
-        if mid_price is not None:
-            self.portfolio.update_market_price(mid_price)
 
         portfolio_risk_decision = self.portfolio_risk_guard.evaluate(
             self.portfolio
@@ -326,7 +329,27 @@ class ConservativePaperTradingEngine:
 
             fair_play_status = self.fair_play_guard.status()
 
-        decisions = [self.execution.review_order(intent) for intent in approved_intents]
+        decisions: list[OrderDecision] = []
+        for intent in approved_intents:
+            budget_allowed, budget_reason = self.portfolio_risk_guard.projected_order_allowed(
+                self.portfolio,
+                side=intent.side,
+                notional=intent.notional,
+                reserved_order_exposure=sum(
+                    (order.intent.notional for order in self.broker.open_orders),
+                    Decimal("0"),
+                ),
+            )
+            if not budget_allowed:
+                decisions.append(
+                    OrderDecision(
+                        approved=False,
+                        reason=budget_reason,
+                        intent=intent,
+                    )
+                )
+            else:
+                decisions.append(self.execution.review_order(intent))
 
         submitted_orders = self.order_manager.replace_orders(
             decisions,
@@ -504,6 +527,8 @@ class ConservativePaperTradingEngine:
         fair_play_status = None
         if self.fair_play_guard is not None:
             fair_play_status = self.fair_play_guard.consume(confirmed_fill_events)
+        if self.portfolio.base_position <= 0:
+            self.portfolio_risk_guard.mark_emergency_exit_completed()
         risk_exit_reason = "risk_exit_emergency_capital_protection"
         risk_exit_fill_count = sum(
             event.purpose == OrderPurpose.RISK_EXIT.value

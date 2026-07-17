@@ -24,7 +24,12 @@ def test_all_scenarios_are_deterministic_and_offline(monkeypatch):
 
     assert first == second
     assert tuple(result.scenario for result in first) == SCENARIO_NAMES
-    assert all(result.invariant_passed for result in first)
+    assert all(
+        result.invariant_passed
+        for result in first
+        if result.scenario != "FAST_SELL_OFF"
+    )
+    assert next(result for result in first if result.scenario == "FAST_SELL_OFF").hard_limit_gap_breach
     assert all(result.open_orders_after_shutdown == 0 for result in first)
 
 
@@ -46,6 +51,9 @@ def test_fast_sell_off_exercises_existing_portfolio_risk_guard():
     assert result.portfolio_risk_latched is True
     assert result.drawdown_guard_triggered is True
     assert result.maximum_drawdown >= Decimal("0.10")
+    assert result.hard_limit_gap_breach is True
+    assert result.invariant_passed is False
+    assert "HARD_LIMIT_GAP_BREACH" in result.invariant_failures
     assert result.inventory_limit_ok is True
     assert result.open_orders_after_shutdown == 0
 
@@ -62,7 +70,8 @@ def test_fast_sell_off_risk_exit_reduces_inventory_without_entry_after_latch():
     assert enabled.maximum_drawdown_after_latch >= enabled.drawdown_at_latch
     assert enabled.drawdown_overshoot >= Decimal("0")
     assert enabled.open_orders_after_shutdown == 0
-    assert enabled.invariant_passed is True
+    assert enabled.invariant_passed is False
+    assert enabled.hard_limit_gap_breach is True
 
 
 def test_confirmed_volume_is_only_from_engine_confirmed_fills():

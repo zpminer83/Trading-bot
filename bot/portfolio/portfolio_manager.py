@@ -22,6 +22,9 @@ class PortfolioManager:
 
         self.realized_pnl = Decimal("0")
         self.total_volume = Decimal("0")
+        self.fees_paid = Decimal("0")
+        self.reserved_cash = Decimal("0")
+        self.reserved_base = Decimal("0")
 
         self.peak_equity = initial_cash
 
@@ -45,6 +48,10 @@ class PortfolioManager:
         return self.realized_pnl + self.unrealized_pnl
 
     @property
+    def starting_equity(self) -> Decimal:
+        return self.initial_cash
+
+    @property
     def drawdown(self) -> Decimal:
         if self.peak_equity <= 0:
             return Decimal("0")
@@ -60,10 +67,13 @@ class PortfolioManager:
         self.last_price = price
         self._update_peak_equity()
 
-    def buy(self, price: Decimal, quantity: Decimal) -> None:
+    def buy(self, price: Decimal, quantity: Decimal, *, fee: Decimal = Decimal("0")) -> None:
         cost = price * quantity
+        fee = Decimal(str(fee))
+        if fee < 0:
+            raise ValueError("fee must be non-negative")
 
-        if cost > self.cash_balance:
+        if cost + fee > self.cash_balance:
             raise ValueError("Insufficient cash balance")
 
         old_position = self.base_position
@@ -77,26 +87,31 @@ class PortfolioManager:
 
         self.average_entry_price = new_cost_basis / new_position
 
-        self.cash_balance -= cost
+        self.cash_balance -= cost + fee
         self.base_position = new_position
         self.last_price = price
         self.total_volume += cost
+        self.fees_paid += fee
 
         self._update_peak_equity()
 
-    def sell(self, price: Decimal, quantity: Decimal) -> None:
+    def sell(self, price: Decimal, quantity: Decimal, *, fee: Decimal = Decimal("0")) -> None:
         if quantity > self.base_position:
             raise ValueError("Cannot sell more than current position")
+        fee = Decimal(str(fee))
+        if fee < 0:
+            raise ValueError("fee must be non-negative")
 
         proceeds = price * quantity
 
         pnl = (price - self.average_entry_price) * quantity
         self.realized_pnl += pnl
 
-        self.cash_balance += proceeds
+        self.cash_balance += proceeds - fee
         self.base_position -= quantity
         self.last_price = price
         self.total_volume += proceeds
+        self.fees_paid += fee
 
         if self.base_position == 0:
             self.average_entry_price = Decimal("0")

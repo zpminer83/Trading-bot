@@ -48,6 +48,26 @@ def test_market_and_risk_failures_short_circuit_permissions():
     assert risk.risk_gate_passed is False and risk.allowed_to_run_synthetic_dry_run is False
 
 
+def test_preemptive_halt_and_latched_kill_switch_block_runtime_start():
+    preemptive = evaluate_runtime_launch_gate(
+        _policy(),
+        _evidence(
+            drawdown_fraction=Decimal("0.08"),
+            preemptive_drawdown_fraction=Decimal("0.08"),
+        ),
+        synthetic_dependencies_supplied=True,
+    )
+    latched = evaluate_runtime_launch_gate(
+        _policy(),
+        _evidence(kill_switch_latched=True),
+        synthetic_dependencies_supplied=True,
+    )
+    assert preemptive.risk_gate_passed is False
+    assert latched.risk_gate_passed is False
+    assert preemptive.allowed_to_build_intent is False
+    assert latched.allowed_to_run_synthetic_dry_run is False
+
+
 def test_valid_evidence_allows_only_explicit_synthetic_mode():
     blocked = evaluate_runtime_launch_gate(_policy(), _evidence(), synthetic_dependencies_supplied=False)
     allowed = evaluate_runtime_launch_gate(_policy(), _evidence(), synthetic_dependencies_supplied=True)

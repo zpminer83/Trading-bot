@@ -23,6 +23,7 @@ def _evidence(**kwargs):
                   market_age_ms=1, account_age_ms=1, source_authority="authoritative", network_read_call_count=7,
                   market_identity_status="confirmed", account_identity_status="confirmed", trading_enabled=True,
                   contract_code_present=True, pending_nonce=7, gas_estimate=21000, estimated_fee_wei=1000, native_balance_wei=1000000)
+    values.update(drawdown_fraction=Decimal("0"), preemptive_drawdown=Decimal("0.08"), hard_drawdown_limit=Decimal("0.10"))
     values.update(kwargs)
     return DreamDexZeroMutationRehearsalEvidence(**values)
 

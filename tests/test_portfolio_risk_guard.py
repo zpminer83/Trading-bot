@@ -16,16 +16,28 @@ def make_portfolio_at_price(price: Decimal) -> PortfolioManager:
     return portfolio
 
 
-def test_drawdown_below_threshold_is_allowed():
+def test_drawdown_below_hard_but_above_preemptive_threshold_halts_entries():
     guard = PortfolioRiskGuard()
     portfolio = make_portfolio_at_price(Decimal("8.60"))
 
     decision = guard.evaluate(portfolio)
 
     assert portfolio.drawdown < Decimal("0.10")
+    assert decision.allowed is False
+    assert decision.reason == "preemptive_drawdown_halt"
+    assert decision.latched is False
+    assert decision.entry_halt_latched is True
+
+
+def test_drawdown_below_preemptive_threshold_is_allowed():
+    guard = PortfolioRiskGuard()
+    portfolio = make_portfolio_at_price(Decimal("8.90"))
+
+    decision = guard.evaluate(portfolio)
+
+    assert portfolio.drawdown < Decimal("0.08")
     assert decision.allowed is True
     assert decision.reason == "ok"
-    assert decision.latched is False
 
 
 def test_drawdown_exactly_at_threshold_triggers_stop():
@@ -78,6 +90,31 @@ def test_explicit_reset_clears_latch():
     assert decision.allowed is True
     assert decision.reason == "ok"
     assert decision.latched is False
+
+
+def test_projected_risk_budget_requires_nonzero_assumptions_and_headroom():
+    guard = PortfolioRiskGuard()
+    portfolio = make_portfolio_at_price(Decimal("10"))
+
+    allowed, reason = guard.projected_order_allowed(
+        portfolio,
+        side="buy",
+        notional=Decimal("1"),
+        adverse_move_ratio=None,
+    )
+    assert allowed is False
+    assert reason == "risk_budget_assumptions_required"
+
+    allowed, reason = guard.projected_order_allowed(
+        portfolio,
+        side="buy",
+        notional=Decimal("1"),
+        adverse_move_ratio=Decimal("0.02"),
+        slippage_ratio=Decimal("0.01"),
+        fee_ratio=Decimal("0.001"),
+    )
+    assert allowed is True
+    assert reason == "risk_budget_approved"
 
 
 @pytest.mark.parametrize("max_drawdown", [Decimal("-0.01"), Decimal("1.01")])

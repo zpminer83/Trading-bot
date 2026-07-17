@@ -6,6 +6,7 @@ environment access, network client, journal handle, signer, or submitter.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from decimal import Decimal
 from hashlib import sha256
 import json
 from typing import Any, Sequence
@@ -67,6 +68,8 @@ class DreamDexProductionReadinessPolicy:
     allow_real_submission: bool = False
     authoritative: bool = False
     unresolved_reasons: tuple[str, ...] = ()
+    maximum_drawdown_fraction: Decimal = Decimal("0.10")
+    preemptive_drawdown_fraction: Decimal = Decimal("0.08")
 
     def __post_init__(self) -> None:
         if self.schema_version != SCHEMA_VERSION or self.required_chain_id != 5031:
@@ -81,6 +84,13 @@ class DreamDexProductionReadinessPolicy:
             raise ValueError("maximum_approval_attempts_must_be_one")
         if self.allow_unattended_approval or self.allow_approval_persistence or self.allow_automatic_retry or self.allow_replacement:
             raise ValueError("unsafe_production_readiness_policy")
+        for name in ("maximum_drawdown_fraction", "preemptive_drawdown_fraction"):
+            value = Decimal(str(getattr(self, name)))
+            if not value.is_finite() or value < 0 or value > 1:
+                raise ValueError(f"{name}_invalid")
+            object.__setattr__(self, name, value)
+        if self.preemptive_drawdown_fraction >= self.maximum_drawdown_fraction:
+            raise ValueError("preemptive_drawdown_fraction_invalid")
         object.__setattr__(self, "allow_real_signing", bool(self.allow_real_signing))
         object.__setattr__(self, "allow_real_submission", bool(self.allow_real_submission))
         object.__setattr__(self, "authoritative", False)
@@ -130,8 +140,22 @@ class DreamDexProductionReadinessEvidence:
     production_network_status: str = "not_used"
     conflicts: tuple[str, ...] = ()
     unresolved_reasons: tuple[str, ...] = ()
+    risk_control_status: str = "unavailable"
+    drawdown_fraction: Decimal | None = None
+    preemptive_drawdown_fraction: Decimal | None = None
+    kill_switch_latched: bool = False
+    entry_halt_latched: bool = False
+    emergency_exit_requested: bool = False
+    emergency_exit_completed: bool = False
 
     def __post_init__(self) -> None:
+        for name in ("drawdown_fraction", "preemptive_drawdown_fraction"):
+            value = getattr(self, name)
+            if value is not None:
+                parsed = Decimal(str(value))
+                if not parsed.is_finite() or parsed < 0 or parsed > 1:
+                    raise ValueError(f"{name}_invalid")
+                object.__setattr__(self, name, parsed)
         object.__setattr__(self, "conflicts", _tuple(self.conflicts))
         object.__setattr__(self, "unresolved_reasons", _tuple(self.unresolved_reasons))
 
@@ -198,15 +222,25 @@ def evaluate_production_readiness(policy: DreamDexProductionReadinessPolicy, evi
     pipeline = (not policy.require_runtime_launch_gate or _ok(evidence.runtime_launch_status, {"approved", "pass", "confirmed"})) and (not policy.require_live_preflight or _ok(evidence.preflight_status, {"confirmed", "complete"})) and (not policy.require_nonce_revalidation or _ok(evidence.nonce_reservation_status, {"confirmed", "reserved"})) and (not policy.require_signing_lease or _ok(evidence.signing_lease_status, {"confirmed", "active"})) and (not policy.require_submission_boundary or _ok(evidence.submission_boundary_status))
     confirmation = (not policy.require_receipt_confirmation or _ok(evidence.confirmation_status))
     reconciliation = (not policy.require_reconciliation or _ok(evidence.reconciliation_status, {"complete", "confirmed"}))
+    risk_control = (
+        _ok(evidence.risk_control_status, {"available", "confirmed", "approved", "within_limit"})
+        and evidence.drawdown_fraction is not None
+        and evidence.drawdown_fraction < policy.preemptive_drawdown_fraction
+        and not evidence.entry_halt_latched
+        and not evidence.kill_switch_latched
+        and not evidence.emergency_exit_requested
+    )
     human = (not policy.require_human_approval or evidence.human_approval_capability_status in {"available_offline", "available", "partial"})
     revalidation = (not policy.require_post_approval_revalidation or evidence.post_approval_revalidation_status in {"available_offline", "available", "partial", "confirmed"})
     blockers: list[str] = []
     for passed, reason in ((configuration, "production_configuration_incomplete"), (market, "market_launch_gate_failed"), (account, "account_launch_gate_failed"), (journal, "execution_journal_unavailable"), (signer, "transaction_signer_unavailable"), (rpc, "production_rpc_policy_incomplete"), (pipeline, "live_execution_preflight_unconfirmed"), (confirmation, "receipt_lookup_unavailable"), (reconciliation, "direct_order_reconciliation_unavailable"), (human, "execution_approval_unavailable"), (revalidation, "post_approval_revalidation_unavailable")):
         if not passed: blockers.append(reason)
+    if not risk_control:
+        blockers.append("portfolio_risk_control_unavailable")
     if evidence.conflicts: blockers.append("production_readiness_conflict")
     if not policy.allow_real_signing: blockers.append("production_signer_invocation_blocked")
     if not policy.allow_real_submission: blockers.append("real_submission_launch_gate_blocked")
-    preview = architecture and configuration and market and account and journal and rpc and pipeline
+    preview = architecture and configuration and market and account and journal and rpc and pipeline and risk_control
     request_approval = preview and human
     revalidate = request_approval and revalidation
     payload = {"policy": policy.safe_dict(), "evidence": evidence.safe_dict(), "architecture": architecture, "blockers": _tuple(blockers)}

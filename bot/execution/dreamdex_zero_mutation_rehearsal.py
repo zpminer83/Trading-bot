@@ -136,6 +136,12 @@ class DreamDexZeroMutationRehearsalEvidence:
     estimated_fee_wei: int | None = None
     native_balance_wei: int | None = None
     open_order_status: str = "unavailable"
+    drawdown_fraction: Decimal | None = None
+    preemptive_drawdown: Decimal | None = None
+    hard_drawdown_limit: Decimal | None = None
+    kill_switch_latched: bool = False
+    emergency_exit_requested: bool = False
+    emergency_exit_completed: bool = False
 
     def safe_dict(self) -> dict[str, Any]:
         return {"market_status": self.market_status, "account_status": self.account_status, "rpc_status": self.rpc_status,
@@ -155,7 +161,12 @@ class DreamDexZeroMutationRehearsalEvidence:
                 "account_identity_status": self.account_identity_status, "trading_enabled": self.trading_enabled,
                 "contract_code_present": self.contract_code_present, "pending_nonce": self.pending_nonce,
                 "gas_estimate": self.gas_estimate, "estimated_fee_wei": self.estimated_fee_wei,
-                "native_balance_wei": self.native_balance_wei, "open_order_status": self.open_order_status}
+                "native_balance_wei": self.native_balance_wei, "open_order_status": self.open_order_status,
+                "drawdown_fraction": str(self.drawdown_fraction) if self.drawdown_fraction is not None else None,
+                "preemptive_drawdown": str(self.preemptive_drawdown) if self.preemptive_drawdown is not None else None,
+                "hard_drawdown_limit": str(self.hard_drawdown_limit) if self.hard_drawdown_limit is not None else None,
+                "kill_switch_latched": self.kill_switch_latched, "emergency_exit_requested": self.emergency_exit_requested,
+                "emergency_exit_completed": self.emergency_exit_completed}
 
     def __repr__(self) -> str:
         return "DreamDexZeroMutationRehearsalEvidence(<safe>)"
@@ -354,6 +365,16 @@ def run_zero_mutation_rehearsal(*, policy: DreamDexZeroMutationRehearsalPolicy,
             blockers.append(blocker)
     if evidence.chain_id != policy.required_chain_id:
         blockers.append("rpc_chain_mismatch")
+    if evidence.kill_switch_latched:
+        blockers.append("kill_switch_latched")
+    if evidence.emergency_exit_requested and not evidence.emergency_exit_completed:
+        blockers.append("emergency_exit_unresolved")
+    if evidence.drawdown_fraction is None:
+        blockers.append("drawdown_evidence_unavailable")
+    elif evidence.hard_drawdown_limit is None or evidence.drawdown_fraction > evidence.hard_drawdown_limit:
+        blockers.append("drawdown_above_hard_limit")
+    elif evidence.preemptive_drawdown is None or evidence.drawdown_fraction >= evidence.preemptive_drawdown:
+        blockers.append("drawdown_above_preemptive_threshold")
     if policy.require_trading_enabled and evidence.trading_enabled is not True:
         blockers.append("trading_status_unavailable")
     if policy.require_contract_code and evidence.contract_code_present is not True:

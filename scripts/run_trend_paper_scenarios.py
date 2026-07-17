@@ -67,6 +67,27 @@ def main() -> int:
     )
 
     print()
+    print("RISK DRAWDOWN CONTROL:")
+    for result in (*results, fast_sell_off_before, fast_sell_off_after):
+        print(
+            f"  {result.scenario} [{('risk-exit' if result.risk_exit_enabled else 'normal')}]: "
+            f"starting={_fmt_decimal(result.initial_equity)} "
+            f"peak={_fmt_decimal(result.peak_equity)} "
+            f"current={_fmt_decimal(result.final_equity)} "
+            f"drawdown={_fmt_decimal(result.maximum_drawdown * Decimal('100'))}% "
+            f"preemptive={_fmt_decimal(result.configured_preemptive_drawdown * Decimal('100'))}% "
+            f"hard={_fmt_decimal(result.configured_drawdown_threshold * Decimal('100'))}% "
+            f"entry_halt={'YES' if result.entry_halt_latched else 'NO'} "
+            f"kill_switch={'YES' if result.portfolio_risk_latched else 'NO'} "
+            f"normal_after_latch={result.normal_intents_after_latch} "
+            f"risk_exits={result.risk_exit_intents}/{result.risk_exit_fills} "
+            f"open={result.open_orders_after_shutdown} "
+            f"compliance={result.risk_compliance_status}"
+        )
+        if result.invariant_failures:
+            print("    blockers: " + "; ".join(result.invariant_failures))
+
+    print()
     for result in results:
         print(
             f"{result.scenario}: equity "

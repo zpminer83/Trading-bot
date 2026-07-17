@@ -301,6 +301,7 @@ def print_portfolio_risk(result) -> None:
     decision = getattr(result, "portfolio_risk_decision", None)
 
     print()
+    print("RISK DRAWDOWN CONTROL:")
     print("Portfolio risk:")
 
     if decision is None:
@@ -318,6 +319,13 @@ def print_portfolio_risk(result) -> None:
         "Max drawdown : "
         f"{fmt_decimal(decision.max_drawdown * Decimal('100'))}%"
     )
+    print(
+        "Preemptive  : "
+        f"{fmt_decimal(decision.preemptive_drawdown * Decimal('100'))}%"
+    )
+    print(f"Entry halt  : {decision.entry_halt_latched}")
+    print(f"Emergency requested : {decision.emergency_exit_requested}")
+    print(f"Emergency completed : {decision.emergency_exit_completed}")
     print(f"Equity       : {fmt_decimal(decision.equity)}")
     print(f"Peak equity  : {fmt_decimal(decision.peak_equity)}")
 
@@ -519,7 +527,10 @@ def main() -> None:
     )
 
     portfolio_risk_limits = PortfolioRiskLimits(
-        max_drawdown=env_decimal("PAPER_MAX_DRAWDOWN_RATIO", "0.10")
+        max_drawdown=env_decimal("PAPER_MAX_DRAWDOWN_RATIO", "0.10"),
+        preemptive_drawdown=env_decimal(
+            "PAPER_PREEMPTIVE_DRAWDOWN_RATIO", "0.08"
+        ),
     )
     paper_risk_exit_enabled = env_bool("PAPER_RISK_EXIT_ENABLED", False)
     fair_play_limits = None
@@ -612,6 +623,10 @@ def main() -> None:
     print(
         "Max drawdown : "
         f"{fmt_decimal(portfolio_risk_limits.max_drawdown * Decimal('100'))}%"
+    )
+    print(
+        "Preemptive halt : "
+        f"{fmt_decimal(portfolio_risk_limits.preemptive_drawdown * Decimal('100'))}%"
     )
     print(
         "Paper risk exit: "
