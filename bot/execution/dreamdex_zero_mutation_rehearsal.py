@@ -16,6 +16,80 @@ from typing import Any, Callable, Mapping, Protocol
 
 from .dreamdex_execution_primitives import mask_evm_address, mask_hex_hash, sha256_hex, validate_evm_address
 
+ADDRESS_ROLE_SOURCE_NAMES = frozenset({
+    "dedicated_owner_environment",
+    "dedicated_trading_environment",
+    "authoritative_public_market_evidence",
+    "explicit_typed_test_fixture",
+    "unavailable",
+})
+ADDRESS_ROLE_BINDING_STATUSES = frozenset({"confirmed", "unavailable", "role_conflict"})
+
+
+@dataclass(frozen=True, repr=False)
+class DreamDexLiveReadOnlyAddressRoleConfiguration:
+    """Value-free binding of the three public address roles.
+
+    Raw addresses deliberately do not belong to this model.  Callers retain
+    them only in their short-lived reader closures and expose masked values in
+    CLI diagnostics.
+    """
+
+    transaction_owner_configured: bool = False
+    trading_account_configured: bool = False
+    market_target_configured: bool = False
+    transaction_owner_source: str = "unavailable"
+    trading_account_source: str = "unavailable"
+    market_target_source: str = "unavailable"
+    transaction_owner_valid: bool = False
+    trading_account_valid: bool = False
+    market_target_valid: bool = False
+    owner_trading_addresses_distinct: bool = False
+    owner_target_addresses_distinct: bool = False
+    trading_target_addresses_distinct: bool = False
+    direct_owner_mode_selected: bool = False
+    role_binding_status: str = "unavailable"
+    market_target_address_masked: str = "<missing>"
+    configuration_fingerprint: str = ""
+    blockers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in ("transaction_owner_source", "trading_account_source", "market_target_source"):
+            if getattr(self, name) not in ADDRESS_ROLE_SOURCE_NAMES:
+                raise ValueError("invalid_address_role_source")
+        if self.role_binding_status not in ADDRESS_ROLE_BINDING_STATUSES:
+            raise ValueError("invalid_address_role_binding_status")
+        object.__setattr__(self, "blockers", tuple(dict.fromkeys(str(item) for item in self.blockers)))
+        object.__setattr__(self, "direct_owner_mode_selected", bool(self.direct_owner_mode_selected))
+
+    @property
+    def ready(self) -> bool:
+        return self.role_binding_status == "confirmed" and self.direct_owner_mode_selected
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "transaction_owner_configured": self.transaction_owner_configured,
+            "trading_account_configured": self.trading_account_configured,
+            "market_target_configured": self.market_target_configured,
+            "transaction_owner_source": self.transaction_owner_source,
+            "trading_account_source": self.trading_account_source,
+            "market_target_source": self.market_target_source,
+            "transaction_owner_valid": self.transaction_owner_valid,
+            "trading_account_valid": self.trading_account_valid,
+            "market_target_valid": self.market_target_valid,
+            "owner_trading_addresses_distinct": self.owner_trading_addresses_distinct,
+            "owner_target_addresses_distinct": self.owner_target_addresses_distinct,
+            "trading_target_addresses_distinct": self.trading_target_addresses_distinct,
+            "direct_owner_mode_selected": self.direct_owner_mode_selected,
+            "role_binding_status": self.role_binding_status,
+            "market_target_address": self.market_target_address_masked,
+            "configuration_fingerprint": mask_hex_hash(self.configuration_fingerprint) if self.configuration_fingerprint else "",
+            "blockers": list(self.blockers),
+        }
+
+    def __repr__(self) -> str:
+        return f"DreamDexLiveReadOnlyAddressRoleConfiguration(status={self.role_binding_status!r}, direct_owner={self.direct_owner_mode_selected!r})"
+
 READ_ONLY_REHEARSAL_RPC_ALLOWLIST = frozenset({
     "eth_chainId", "eth_getCode", "eth_getTransactionCount", "eth_estimateGas",
     "eth_gasPrice", "eth_maxPriorityFeePerGas", "eth_getBalance",
@@ -42,6 +116,7 @@ LIVE_ENDPOINT_SCHEME_STATUSES = frozenset({"https", "local_fixture", "invalid", 
 # turn an unknown result into an affirmative trading prerequisite.
 LIVE_EVIDENCE_RESULT_STATUSES = frozenset({
     "confirmed", "not_configured", "not_attempted_due_to_prerequisite",
+    "configured", "valid", "invalid", "role_conflict", "authenticated_source_unavailable",
     "authentication_unavailable", "authentication_rejected",
     "transport_unavailable", "response_malformed", "schema_unsupported",
     "source_non_authoritative", "stale", "identity_mismatch",
@@ -261,6 +336,8 @@ class DreamDexLiveReadOnlyRehearsalDependencies:
     risk_snapshot: Mapping[str, Any] = field(default_factory=dict)
     fair_play_snapshot: Mapping[str, Any] = field(default_factory=dict)
     configuration_status: DreamDexLiveReadOnlyConfigurationStatus = field(default_factory=_default_configuration_status)
+    address_role_configuration: DreamDexLiveReadOnlyAddressRoleConfiguration = field(default_factory=DreamDexLiveReadOnlyAddressRoleConfiguration)
+    address_role_builder: Callable[[str | None], DreamDexLiveReadOnlyAddressRoleConfiguration] | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -271,6 +348,8 @@ class DreamDexLiveReadOnlyRehearsalDependencies:
         ):
             if not callable(getattr(self, name)):
                 raise TypeError(f"{name}_must_be_callable")
+        if self.address_role_builder is not None and not callable(self.address_role_builder):
+            raise TypeError("address_role_builder_must_be_callable")
         try:
             safe_config = dict(self.safe_config)
             risk_snapshot = dict(self.risk_snapshot)
@@ -300,6 +379,106 @@ def _d(value: Any) -> Decimal | None:
 
 def _safe_fp(value: Any) -> str:
     return sha256_hex(json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode())
+
+
+def _role_address_valid(value: Any) -> bool:
+    """Strict local validation; no ENS, chain lookup, or network fallback."""
+    if isinstance(value, bool) or not isinstance(value, str):
+        return False
+    if value != value.strip() or any(ord(char) < 32 or char.isspace() for char in value):
+        return False
+    try:
+        normalized = validate_evm_address(value, field="role_address")
+    except (TypeError, ValueError):
+        return False
+    if normalized == "0x" + "0" * 40:
+        return False
+    # Lower/upper hex are accepted by Ethereum convention.  Mixed-case input
+    # is accepted only when the installed eth-utils checksum implementation
+    # confirms it; no address is repaired or normalized via a lookup.
+    if value[2:].islower() or value[2:].isupper():
+        return True
+    try:
+        from eth_utils import to_checksum_address
+        return value == to_checksum_address(normalized)
+    except Exception:
+        return False
+
+
+def build_address_role_configuration(
+    *,
+    transaction_owner: Any = None,
+    trading_account: Any = None,
+    market_target: Any = None,
+    transaction_owner_source: str = "unavailable",
+    trading_account_source: str = "unavailable",
+    market_target_source: str = "unavailable",
+    explicit_typed_test_fixture: bool = False,
+) -> DreamDexLiveReadOnlyAddressRoleConfiguration:
+    """Build a role-only snapshot without retaining any raw address."""
+    owner_configured = bool(transaction_owner)
+    trading_configured = bool(trading_account)
+    target_configured = bool(market_target)
+    owner_valid = _role_address_valid(transaction_owner)
+    trading_valid = _role_address_valid(trading_account)
+    target_valid = _role_address_valid(market_target)
+    if explicit_typed_test_fixture:
+        transaction_owner_source = trading_account_source = market_target_source = "explicit_typed_test_fixture"
+    blockers: list[str] = []
+    if not owner_configured:
+        blockers.extend(("transaction_owner_address_unavailable", "transaction_owner_not_explicitly_configured"))
+    elif not owner_valid:
+        blockers.append("transaction_owner_address_invalid")
+    if not trading_configured:
+        blockers.append("trading_account_address_unavailable")
+    elif not trading_valid:
+        blockers.append("trading_account_address_invalid")
+    if not target_configured:
+        blockers.append("market_target_address_unavailable")
+    elif not target_valid:
+        blockers.append("market_target_address_invalid")
+    owner_trading_distinct = owner_valid and trading_valid and str(transaction_owner).lower() != str(trading_account).lower()
+    owner_target_distinct = owner_valid and target_valid and str(transaction_owner).lower() != str(market_target).lower()
+    trading_target_distinct = trading_valid and target_valid and str(trading_account).lower() != str(market_target).lower()
+    if owner_valid and trading_valid and not owner_trading_distinct:
+        blockers.append("transaction_owner_trading_account_role_conflict")
+    if owner_valid and target_valid and not owner_target_distinct:
+        blockers.append("transaction_owner_market_target_role_conflict")
+    if trading_valid and target_valid and not trading_target_distinct:
+        blockers.append("trading_account_market_target_role_conflict")
+    conflicts = any(reason.endswith("role_conflict") for reason in blockers)
+    direct_owner_selected = owner_valid and not conflicts
+    if not owner_valid:
+        blockers.append("automatic_address_role_substitution_forbidden")
+    status = "role_conflict" if conflicts else ("confirmed" if owner_valid and trading_valid and target_valid else "unavailable")
+    fingerprint = _safe_fp({
+        "owner_configured": owner_configured, "trading_configured": trading_configured,
+        "target_configured": target_configured, "owner_valid": owner_valid,
+        "trading_valid": trading_valid, "target_valid": target_valid,
+        "owner_trading_distinct": owner_trading_distinct,
+        "owner_target_distinct": owner_target_distinct,
+        "trading_target_distinct": trading_target_distinct,
+        "status": status,
+    })
+    return DreamDexLiveReadOnlyAddressRoleConfiguration(
+        transaction_owner_configured=owner_configured,
+        trading_account_configured=trading_configured,
+        market_target_configured=target_configured,
+        transaction_owner_source=transaction_owner_source if owner_configured else "unavailable",
+        trading_account_source=trading_account_source if trading_configured else "unavailable",
+        market_target_source=market_target_source if target_configured else "unavailable",
+        transaction_owner_valid=owner_valid,
+        trading_account_valid=trading_valid,
+        market_target_valid=target_valid,
+        owner_trading_addresses_distinct=owner_trading_distinct,
+        owner_target_addresses_distinct=owner_target_distinct,
+        trading_target_addresses_distinct=trading_target_distinct,
+        direct_owner_mode_selected=direct_owner_selected,
+        role_binding_status=status,
+        market_target_address_masked=mask_evm_address(market_target) if target_valid else "<missing>",
+        configuration_fingerprint=fingerprint,
+        blockers=tuple(dict.fromkeys(blockers)),
+    )
 
 
 @dataclass(frozen=True, repr=False)
@@ -450,6 +629,7 @@ class DreamDexZeroMutationRehearsalEvidence:
     cancel_operation_status: str = "unavailable"
     trading_status_source: str = "unavailable"
     trading_status_authority: str = "non_authoritative"
+    address_role_configuration: DreamDexLiveReadOnlyAddressRoleConfiguration = field(default_factory=DreamDexLiveReadOnlyAddressRoleConfiguration)
 
     def safe_dict(self) -> dict[str, Any]:
         return {"market_status": self.market_status, "account_status": self.account_status, "rpc_status": self.rpc_status,
@@ -504,7 +684,8 @@ class DreamDexZeroMutationRehearsalEvidence:
                 "place_operation_status": self.place_operation_status,
                 "cancel_operation_status": self.cancel_operation_status,
                 "trading_status_source": self.trading_status_source,
-                "trading_status_authority": self.trading_status_authority}
+                "trading_status_authority": self.trading_status_authority,
+                "address_role_configuration": self.address_role_configuration.safe_dict()}
 
     def __repr__(self) -> str:
         return "DreamDexZeroMutationRehearsalEvidence(<safe>)"
@@ -626,6 +807,7 @@ class DreamDexZeroMutationRehearsalResult:
     cancel_operation_status: str = "unavailable"
     trading_status_source: str = "unavailable"
     trading_status_authority: str = "non_authoritative"
+    address_role_configuration: DreamDexLiveReadOnlyAddressRoleConfiguration = field(default_factory=DreamDexLiveReadOnlyAddressRoleConfiguration)
 
     @property
     def readiness_status(self) -> str:
@@ -715,6 +897,7 @@ class DreamDexZeroMutationRehearsalResult:
                 "cancel_operation_status": self.cancel_operation_status,
                 "trading_status_source": self.trading_status_source,
                 "trading_status_authority": self.trading_status_authority,
+                "address_role_configuration": self.address_role_configuration.safe_dict(),
                 # Compatibility aliases for early offline callers.
                 "readiness_status": self.readiness_status, "mutation_call_count": self.mutation_call_count,
                 "temporary_rehearsal_journal_used": self.temporary_rehearsal_journal_used,
@@ -889,6 +1072,13 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     orderbook_status = "available" if best_bid is not None and best_ask is not None and best_bid < best_ask and spread_bps is not None and spread_bps <= maximum_spread_bps else "unavailable"
     market_symbol = _reader_value(metadata, "symbol")
     market_pool = _reader_value(metadata, "pool_contract", _reader_value(metadata, "pool_address"))
+    role_configuration = dependencies.address_role_configuration
+    role_builder = dependencies.address_role_builder
+    if callable(role_builder):
+        try:
+            role_configuration = role_builder(market_pool)
+        except Exception:
+            role_configuration = dependencies.address_role_configuration
     expected_symbol = dependencies.safe_config.get("required_market_symbol")
     expected_pool = dependencies.safe_config.get("required_market_address")
     market_identity = "confirmed" if market_symbol and (expected_symbol is None or market_symbol == expected_symbol) and market_pool and (expected_pool is None or market_pool == expected_pool) else "unavailable"
@@ -970,7 +1160,10 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
             "session_not_configured" if account is not None and raw_auth_transport in {"", "unconfigured", "not_configured"} else
             (account_auth if account_exc else "authentication_unavailable"))
     account_result = "confirmed" if account_status == "available" else ("source_non_authoritative" if account is not None else "authentication_unavailable")
-    account_identity_result = "confirmed" if account_authority == "confirmed" else "source_non_authoritative"
+    account_identity_result = (
+        "confirmed" if account_authority == "confirmed" else
+        ("authenticated_source_unavailable" if account is None else "source_non_authoritative")
+    )
     authenticated_obj = _reader_value(account, "authenticated")
     authenticated_balance_status = _reader_value(authenticated_obj, "balances_status")
     authenticated_balance = _reader_value(account, "authenticated_trading_balance_status", _reader_value(account, "balance_status", _reader_value(authenticated_balance_status, "status", "unavailable")))
@@ -981,7 +1174,53 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
             return "confirmed"
         return "confirmed_unavailable_from_source" if configured else "not_configured"
 
-    evidence_statuses: list[DreamDexLiveReadOnlyEvidenceStatus] = [
+    def _role_result(configured: bool, valid: bool) -> str:
+        return "valid" if valid else ("invalid" if configured else "not_configured")
+
+    role_evidence_statuses = [
+        _evidence_status(
+            "transaction_owner_configuration", performed=False,
+            result=_role_result(role_configuration.transaction_owner_configured, role_configuration.transaction_owner_valid),
+            source=role_configuration.transaction_owner_source,
+            authority="non_authoritative", blocker=role_configuration.blockers[0] if not role_configuration.transaction_owner_valid and role_configuration.blockers else None,
+            purpose="explicit contest-owner transaction signer role",
+        ),
+        _evidence_status(
+            "trading_account_configuration", performed=False,
+            result=_role_result(role_configuration.trading_account_configured, role_configuration.trading_account_valid),
+            source=role_configuration.trading_account_source,
+            authority="non_authoritative", purpose="authenticated trading account role",
+        ),
+        _evidence_status(
+            "market_target_configuration", performed=False,
+            result=_role_result(role_configuration.market_target_configured, role_configuration.market_target_valid),
+            source=role_configuration.market_target_source,
+            authority="authoritative" if role_configuration.market_target_valid else "non_authoritative",
+            typed_method="GET /markets", purpose="exact market/pool transaction target",
+        ),
+        _evidence_status(
+            "owner_trading_role_separation", performed=False,
+            result=("confirmed" if role_configuration.owner_trading_addresses_distinct else ("role_conflict" if role_configuration.transaction_owner_configured and role_configuration.trading_account_configured else "not_configured")),
+            source="role_binding", authority="non_authoritative",
+            blocker="transaction_owner_trading_account_role_conflict" if role_configuration.transaction_owner_configured and role_configuration.trading_account_configured and not role_configuration.owner_trading_addresses_distinct else None,
+            purpose="prevent owner/trading substitution",
+        ),
+        _evidence_status(
+            "owner_target_role_separation", performed=False,
+            result=("confirmed" if role_configuration.owner_target_addresses_distinct else ("role_conflict" if role_configuration.transaction_owner_valid and role_configuration.market_target_valid else "not_configured")),
+            source="role_binding", authority="non_authoritative",
+            blocker="transaction_owner_market_target_role_conflict" if role_configuration.transaction_owner_valid and role_configuration.market_target_valid and not role_configuration.owner_target_addresses_distinct else None,
+            purpose="prevent owner/target substitution",
+        ),
+        _evidence_status(
+            "trading_target_role_separation", performed=False,
+            result=("confirmed" if role_configuration.trading_target_addresses_distinct else ("role_conflict" if role_configuration.trading_account_valid and role_configuration.market_target_valid else "not_configured")),
+            source="role_binding", authority="non_authoritative",
+            blocker="trading_account_market_target_role_conflict" if role_configuration.trading_account_valid and role_configuration.market_target_valid and not role_configuration.trading_target_addresses_distinct else None,
+            purpose="prevent trading-account/target substitution",
+        ),
+    ]
+    evidence_statuses: list[DreamDexLiveReadOnlyEvidenceStatus] = role_evidence_statuses + [
         _evidence_status("market_identity", performed=public_calls > 0, result=identity_result,
                          source="public_market", transport=market_transport, schema="confirmed" if metadata is not None else "schema_unsupported",
                          identity=identity_result, authority="authoritative" if market_identity == "confirmed" else "non_authoritative",
@@ -1138,6 +1377,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         cancel_operation_status="confirmed_unavailable_from_source",
         trading_status_source=trading_status_source,
         trading_status_authority=trading_status_authority,
+        address_role_configuration=role_configuration,
     )
 
 
@@ -1150,6 +1390,7 @@ def _causal_blocker_sets(evidence: DreamDexZeroMutationRehearsalEvidence,
     not_attempted: list[str] = []
     if evidence.evidence_statuses:
         primary.extend(evidence.configuration_status.blockers)
+        primary.extend(evidence.address_role_configuration.blockers)
         primary.extend(evidence.primary_blockers)
         derived.extend(evidence.derived_blockers)
         not_attempted.extend(evidence.not_attempted_stages)
@@ -1359,6 +1600,7 @@ def _result(policy: DreamDexZeroMutationRehearsalPolicy, evidence: DreamDexZeroM
         cancel_operation_status=evidence.cancel_operation_status,
         trading_status_source=evidence.trading_status_source,
         trading_status_authority=evidence.trading_status_authority,
+        address_role_configuration=evidence.address_role_configuration,
     )
 
 

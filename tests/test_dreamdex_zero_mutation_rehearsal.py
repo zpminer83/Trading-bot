@@ -17,6 +17,8 @@ from bot.execution.dreamdex_zero_mutation_rehearsal import (
     collect_live_read_only_rehearsal_evidence_from_dependencies,
     collect_live_read_only_rehearsal_evidence,
     run_zero_mutation_rehearsal,
+    DreamDexLiveReadOnlyAddressRoleConfiguration,
+    build_address_role_configuration,
 )
 from bot.execution.dreamdex_readonly_rpc import PINNED_SOMNIA_MAINNET_RPC_URL
 
@@ -404,3 +406,98 @@ def test_live_typed_preflight_order_is_offline_and_account_optional(monkeypatch)
     assert result["read_only_rpc_call_count"] == 4
     assert result["pending_nonce_status"] == "not_attempted_due_to_prerequisite"
     assert result["gas_estimate_status"] == "not_attempted_due_to_prerequisite"
+
+
+def test_live_preflight_binds_nonce_and_native_balance_to_owner_only(monkeypatch):
+    import scripts.run_dreamdex_zero_mutation_rehearsal as script
+
+    owner = "0x" + "1" * 40
+    trading = "0x" + "2" * 40
+    pool = "0x" + "3" * 40
+    calls = []
+
+    class FakeRpc:
+        def get_chain_id(self):
+            calls.append(("eth_chainId", None)); return 5031
+        def get_contract_code(self, address):
+            calls.append(("eth_getCode", address)); return "0x6000"
+        def get_gas_price(self):
+            calls.append(("eth_gasPrice", None)); return 10
+        def get_max_priority_fee_per_gas(self):
+            calls.append(("eth_maxPriorityFeePerGas", None)); return 2
+        def get_pending_nonce(self, address):
+            calls.append(("eth_getTransactionCount", address)); return 1
+        def get_native_balance(self, address):
+            calls.append(("eth_getBalance", address)); return 100
+
+    class FakeMarketSource:
+        def __init__(self, *_args): pass
+        def metadata(self):
+            return SimpleNamespace(symbol="SOMI:USDso", pool_contract=pool, observed_at=datetime.now(timezone.utc))
+        def orderbook(self):
+            return {"bids": [{"price": "1", "quantity": "1"}], "asks": [{"price": "2", "quantity": "1"}]}
+
+    monkeypatch.setattr(script, "DreamDexReadOnlyRpcTransport", lambda *_args, **_kwargs: FakeRpc())
+    monkeypatch.setattr(script, "MarketReadOnlySource", FakeMarketSource)
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", owner)
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_TRADING_ADDRESS", trading)
+    monkeypatch.delenv("DREAMDEX_READ_ONLY_RPC_URL", raising=False)
+    monkeypatch.delenv("DREAMDEX_RPC_URL", raising=False)
+
+    dependencies = script._live_dependencies("SOMI:USDso")
+    result = dependencies.typed_rpc_preflight_reader()
+
+    assert result["pending_nonce_status"] == "confirmed"
+    assert result["native_balance_status"] == "confirmed"
+    assert ("eth_getTransactionCount", owner) in calls
+    assert ("eth_getBalance", owner) in calls
+    assert ("eth_getCode", pool) in calls
+    assert all(address not in {trading, pool} for method, address in calls if method in {"eth_getTransactionCount", "eth_getBalance"})
+
+
+def test_address_role_configuration_is_strict_and_value_free():
+    owner = "0x" + "1" * 40
+    trading = "0x" + "2" * 40
+    target = "0x" + "3" * 40
+    config = build_address_role_configuration(
+        transaction_owner=owner, trading_account=trading, market_target=target,
+        transaction_owner_source="dedicated_owner_environment",
+        trading_account_source="dedicated_trading_environment",
+        market_target_source="authoritative_public_market_evidence",
+    )
+    assert config.ready is True
+    assert config.owner_trading_addresses_distinct is True
+    assert config.safe_dict()["market_target_address"] != target
+    assert owner not in repr(config) and trading not in str(config.safe_dict())
+    for value in ("0x" + "0" * 40, "0x123", "  " + owner, True):
+        invalid = build_address_role_configuration(transaction_owner=value)
+        assert invalid.transaction_owner_valid is False
+        assert "transaction_owner_address_invalid" in invalid.blockers or "transaction_owner_address_unavailable" in invalid.blockers
+
+
+def test_address_role_conflicts_never_auto_select_or_substitute():
+    address = "0x" + "1" * 40
+    conflict = build_address_role_configuration(
+        transaction_owner=address, trading_account=address, market_target="0x" + "2" * 40,
+        transaction_owner_source="dedicated_owner_environment",
+        trading_account_source="dedicated_trading_environment",
+        market_target_source="authoritative_public_market_evidence",
+    )
+    assert conflict.role_binding_status == "role_conflict"
+    assert conflict.direct_owner_mode_selected is False
+    assert "transaction_owner_trading_account_role_conflict" in conflict.blockers
+
+
+def test_generic_address_environment_is_ignored(monkeypatch):
+    import scripts.run_dreamdex_zero_mutation_rehearsal as script
+    monkeypatch.setenv("ADDRESS", "0x" + "1" * 40)
+    monkeypatch.delenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", raising=False)
+    monkeypatch.delenv("DREAMDEX_READ_ONLY_TRADING_ADDRESS", raising=False)
+    deps = script._live_dependencies("SOMI:USDso")
+    assert deps.address_role_configuration.transaction_owner_configured is False
+    assert deps.address_role_configuration.trading_account_configured is False
+
+
+def test_role_model_source_values_are_allowlisted():
+    with pytest.raises(ValueError):
+        DreamDexLiveReadOnlyAddressRoleConfiguration(transaction_owner_source="WALLET_ADDRESS")

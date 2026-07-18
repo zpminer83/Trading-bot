@@ -18,10 +18,12 @@ from bot.execution.dreamdex_zero_mutation_rehearsal import (
     DreamDexLiveReadOnlyEvidenceStatus,
     DreamDexLiveReadOnlyEndpointConfigurationStatus,
     DreamDexLiveReadOnlyConfigurationStatus,
+    DreamDexLiveReadOnlyAddressRoleConfiguration,
     DreamDexLiveReadOnlyRehearsalDependencies,
     DreamDexZeroMutationRehearsalEvidence,
     DreamDexZeroMutationRehearsalPolicy,
     build_rehearsal_candidate,
+    build_address_role_configuration,
     collect_live_read_only_rehearsal_evidence_from_dependencies,
     run_zero_mutation_rehearsal,
 )
@@ -29,6 +31,7 @@ from bot.execution.dreamdex_readonly_rpc import (
     DreamDexReadOnlyRpcTransport,
     PINNED_SOMNIA_MAINNET_RPC_URL,
 )
+from bot.execution.dreamdex_execution_primitives import mask_evm_address
 from bot.integrations.dreamdex_authenticated_read_only import (
     PRODUCTION_BASE_URL,
     build_authenticated_read_only_transport_from_env,
@@ -44,6 +47,7 @@ from bot.integrations.dreamdex_read_only import (
 
 def _configuration_status(*, base_url: str | None, rpc_url: str | None, owner: str | None,
                           authenticated: object, symbol: str,
+                          role_configuration: object | None = None,
                           public_endpoint_status: DreamDexLiveReadOnlyEndpointConfigurationStatus | None = None,
                           rpc_endpoint_status: DreamDexLiveReadOnlyEndpointConfigurationStatus | None = None) -> DreamDexLiveReadOnlyConfigurationStatus:
     public_endpoint_status = public_endpoint_status or _endpoint_status(
@@ -70,13 +74,22 @@ def _configuration_status(*, base_url: str | None, rpc_url: str | None, owner: s
         blockers.append("authenticated_session_not_configured")
     if auth_configured and not owner:
         blockers.append("account_address_configuration_unavailable")
-    fingerprint_input = f"public={public_ready}|rpc={rpc_ready}|auth={auth_configured}|owner={bool(owner)}|symbol={symbol}|chain=5031"
+    # Market-target role is resolved only after the public market response;
+    # do not carry its pre-fetch placeholder blocker into configuration.
+    role_blockers = tuple(
+        item for item in getattr(role_configuration, "blockers", ())
+        if not str(item).startswith("market_target_")
+    )
+    blockers.extend(role_blockers)
+    trading_valid = bool(getattr(role_configuration, "trading_account_valid", False))
+    owner_valid = bool(getattr(role_configuration, "transaction_owner_valid", False))
+    fingerprint_input = f"public={public_ready}|rpc={rpc_ready}|auth={auth_configured}|owner={owner_valid}|trading={trading_valid}|symbol={symbol}|chain=5031"
     return DreamDexLiveReadOnlyConfigurationStatus(
         public_api_configured=public_ok, rpc_configured=rpc_ok,
         authenticated_session_configured=auth_configured,
         authenticated_session_current=False, required_chain_id=5031,
         market_symbol=symbol, public_transport_ready=public_ready,
-        rpc_transport_ready=rpc_ready, account_transport_ready=auth_configured and bool(owner) and public_ready,
+        rpc_transport_ready=rpc_ready, account_transport_ready=auth_configured and owner_valid and trading_valid and public_ready,
         configuration_fingerprint="0x" + sha256(fingerprint_input.encode()).hexdigest(),
         blockers=tuple(blockers),
         public_endpoint_status=public_endpoint_status,
@@ -165,7 +178,7 @@ def _safe_rpc_url(value: str | None, *, allow_local_fixture: bool = False,
 
 
 def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
-    names = ("market_listed", "market_identity", "order_book", "market_rules", "market_lifecycle", "trading_status", "trading_enabled", "place_supported", "cancel_supported", "account_identity",
+    names = ("transaction_owner_configuration", "trading_account_configuration", "market_target_configuration", "owner_trading_role_separation", "owner_target_role_separation", "trading_target_role_separation", "market_listed", "market_identity", "order_book", "market_rules", "market_lifecycle", "trading_status", "trading_enabled", "place_supported", "cancel_supported", "account_identity",
              "trading_balances", "open_orders", "recent_fills", "chain_id", "target_code",
              "pending_nonce", "native_gas_balance", "fee_data", "gas_estimate")
     statuses = tuple(DreamDexLiveReadOnlyEvidenceStatus(
@@ -188,6 +201,14 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
             syntax_valid=True, scheme_status="https", transport_ready=True,
             configuration_fingerprint="0x" + "2" * 64),
     )
+    role_configuration = DreamDexLiveReadOnlyAddressRoleConfiguration(
+        transaction_owner_configured=True, trading_account_configured=True, market_target_configured=True,
+        transaction_owner_source="explicit_typed_test_fixture", trading_account_source="explicit_typed_test_fixture",
+        market_target_source="explicit_typed_test_fixture", transaction_owner_valid=True,
+        trading_account_valid=True, market_target_valid=True, owner_trading_addresses_distinct=True,
+        owner_target_addresses_distinct=True, trading_target_addresses_distinct=True,
+        direct_owner_mode_selected=True, role_binding_status="confirmed", configuration_fingerprint="fixture-role",
+    )
     evidence = DreamDexZeroMutationRehearsalEvidence(
         market_status="available", orderbook_status="available", account_status="available", rpc_status="available", chain_id=5031,
         target_code_status="available", pending_nonce_status="available", native_balance_status="available",
@@ -205,6 +226,7 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         market_listed_status="confirmed", market_lifecycle_status="confirmed", trading_enabled_status="confirmed",
         place_operation_status="confirmed", cancel_operation_status="confirmed",
         trading_status_source="fixture", trading_status_authority="authoritative",
+        address_role_configuration=role_configuration,
         configuration_status=configuration,
         source_fingerprint="fixture-source", market_fingerprint="fixture-market", account_fingerprint="fixture-account",
     )
@@ -237,6 +259,12 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
     """Build the explicit live read-only bundle from existing transports."""
     owner = os.environ.get("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "")
     trading = os.environ.get("DREAMDEX_READ_ONLY_TRADING_ADDRESS", "")
+    initial_role_configuration = build_address_role_configuration(
+        transaction_owner=owner or None, trading_account=trading or None,
+        transaction_owner_source="dedicated_owner_environment" if owner else "unavailable",
+        trading_account_source="dedicated_trading_environment" if trading else "unavailable",
+    )
+    owner_for_rpc = owner if initial_role_configuration.transaction_owner_valid else ""
     public_override = os.environ.get("DREAMDEX_READ_ONLY_BASE_URL")
     public_api_override = os.environ.get("DREAMDEX_API_BASE_URL")
     raw_base = public_override or public_api_override or PRODUCTION_BASE_URL
@@ -256,14 +284,23 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
     rpc_endpoint = _endpoint_status(raw_rpc, endpoint_type="rpc", source_name=rpc_source)
     rpc_url = _safe_rpc_url(raw_rpc, source_name=rpc_source)
     authenticated = build_authenticated_read_only_transport_from_env()
-    configuration = _configuration_status(base_url=base_url, rpc_url=rpc_url or None, owner=owner or None,
+    configuration = _configuration_status(base_url=base_url, rpc_url=rpc_url or None, owner=owner_for_rpc or None,
                                           authenticated=authenticated, symbol=symbol,
+                                          role_configuration=initial_role_configuration,
                                           public_endpoint_status=public_endpoint, rpc_endpoint_status=rpc_endpoint)
     market_source = MarketReadOnlySource(HttpGetTransport(base_url or PRODUCTION_BASE_URL), symbol)
     market_cache: dict[str, object] = {}
     account_cache: dict[str, object] = {}
     rpc = DreamDexReadOnlyRpcTransport(rpc_url) if rpc_url else None
     candidate_state: dict[str, bool] = {"ready": False}
+
+    def build_roles(target: str | None = None):
+        return build_address_role_configuration(
+            transaction_owner=owner or None, trading_account=trading or None, market_target=target,
+            transaction_owner_source="dedicated_owner_environment" if owner else "unavailable",
+            trading_account_source="dedicated_trading_environment" if trading else "unavailable",
+            market_target_source="authoritative_public_market_evidence" if target else "unavailable",
+        )
 
     def read_market():
         if not configuration.ready_for_public:
@@ -285,8 +322,8 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
             adapter = DreamDexReadOnlyAdapter(
                 transport=HttpGetTransport(base_url or PRODUCTION_BASE_URL),
                 rpc_transport=(HttpRpcTransport(rpc_url) if rpc_url else SimpleNamespace(call=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rpc_configuration_unavailable")))),
-                owner=owner,
-                trading_address=trading or None,
+                owner=owner_for_rpc,
+                trading_address=trading if initial_role_configuration.trading_account_valid else None,
                 symbol=symbol,
                 authenticated_transport=authenticated,
                 owner_platform_role=os.environ.get("DREAMDEX_READ_ONLY_OWNER_PLATFORM_ROLE"),
@@ -380,14 +417,14 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
         nonce_status = "not_attempted_due_to_prerequisite"
         native_balance = None
         native_status = "not_attempted_due_to_prerequisite"
-        if owner:
-            pending_nonce, nonce_status = call("eth_getTransactionCount", lambda: rpc.get_pending_nonce(owner))
-            native_balance, native_status = call("eth_getBalance", lambda: rpc.get_native_balance(owner))
+        if owner_for_rpc:
+            pending_nonce, nonce_status = call("eth_getTransactionCount", lambda: rpc.get_pending_nonce(owner_for_rpc))
+            native_balance, native_status = call("eth_getBalance", lambda: rpc.get_native_balance(owner_for_rpc))
 
-        if candidate_state["ready"] and pool and owner and code_present:
+        if candidate_state["ready"] and pool and owner_for_rpc and code_present:
             gas_estimate, gas_estimate_status = call(
                 "eth_estimateGas",
-                lambda: rpc.estimate_gas({"from": owner, "to": pool, "value": "0x0", "data": "0x"}),
+                lambda: rpc.estimate_gas({"from": owner_for_rpc, "to": pool, "value": "0x0", "data": "0x"}),
             )
             gas_estimate_status = "confirmed" if gas_estimate is not None else gas_estimate_status
         else:
@@ -426,6 +463,8 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
         typed_rpc_preflight_reader=read_preflight,
         safe_config={"required_market_symbol": symbol, "_candidate_state": candidate_state},
         configuration_status=configuration,
+        address_role_configuration=initial_role_configuration,
+        address_role_builder=build_roles,
     )
 
 
@@ -589,6 +628,54 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{endpoint_label} redirects allowed: {display(endpoint.get('redirects_allowed', False))}")
         print(f"{endpoint_label} transport ready: {display(endpoint.get('transport_ready', False))}")
         print(f"{endpoint_label} blockers: {', '.join(endpoint.get('blockers', [])) or 'none'}")
+    print("LIVE READ-ONLY ADDRESS ROLE BINDING:")
+    role_data = data.get("address_role_configuration", {})
+    owner_env = os.environ.get("DREAMDEX_READ_ONLY_OWNER_ADDRESS")
+    trading_env = os.environ.get("DREAMDEX_READ_ONLY_TRADING_ADDRESS")
+    print("execution mode: direct_owner")
+    print("transaction sender role: transaction_owner_signer")
+    print("signer policy expected role: transaction_owner_signer")
+    print("nonce subject role: transaction_owner_signer")
+    print("native gas balance subject role: transaction_owner_signer")
+    print("market target role: market_target")
+    print("trading account signer substitution: FORBIDDEN")
+    print(f"transaction owner configured: {display(role_data.get('transaction_owner_configured', False))}")
+    print(f"transaction owner valid: {display(role_data.get('transaction_owner_valid', False))}")
+    print(f"transaction owner source: {role_data.get('transaction_owner_source', 'unavailable')}")
+    print(f"transaction owner address: {mask_evm_address(owner_env)}")
+    print("transaction owner key control verified: NO")
+    print(f"trading account configured: {display(role_data.get('trading_account_configured', False))}")
+    print(f"trading account valid: {display(role_data.get('trading_account_valid', False))}")
+    print(f"trading account source: {role_data.get('trading_account_source', 'unavailable')}")
+    print(f"trading account address: {mask_evm_address(trading_env)}")
+    print(f"market target configured: {display(role_data.get('market_target_configured', False))}")
+    print(f"market target valid: {display(role_data.get('market_target_valid', False))}")
+    print(f"market target source: {role_data.get('market_target_source', 'unavailable')}")
+    print(f"market target address: {role_data.get('market_target_address', '<unavailable>')}")
+    print(f"owner/trading roles distinct: {display(role_data.get('owner_trading_addresses_distinct', False))}")
+    print(f"owner/target roles distinct: {display(role_data.get('owner_target_addresses_distinct', False))}")
+    print(f"trading/target roles distinct: {display(role_data.get('trading_target_addresses_distinct', False))}")
+    print("automatic role substitution allowed: NO")
+    role_evidence = {item.get("evidence_name"): item for item in data.get("evidence_statuses", [])}
+    for label, key in (
+        ("owner pending nonce request performed", "pending_nonce"),
+        ("owner pending nonce confirmed", "pending_nonce"),
+        ("owner native balance request performed", "native_gas_balance"),
+        ("owner native balance confirmed", "native_gas_balance"),
+        ("trading account authenticated binding", "account_identity"),
+        ("market target code confirmed", "target_code"),
+    ):
+        item = role_evidence.get(key, {})
+        if label.endswith("performed"):
+            value = "YES" if item.get("request_performed") else "NO"
+        elif label.endswith("confirmed"):
+            value = "YES" if item.get("result_status") == "confirmed" else "NO"
+        else:
+            value = item.get("result_status", "authenticated_source_unavailable")
+        print(f"{label}: {value}")
+    print(f"role blockers: {', '.join(role_data.get('blockers', [])) or 'none'}")
+    print("owner address key control verified: NO")
+    print("production signer configured: NO")
     print("LIVE READ-ONLY RPC EVIDENCE:")
     print(f"RPC source: {configuration_data.get('rpc_endpoint_status', {}).get('source_name', 'unavailable')}")
     print("endpoint syntax: " + display(configuration_data.get("rpc_endpoint_status", {}).get("syntax_valid", False)))
