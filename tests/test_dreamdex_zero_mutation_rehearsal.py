@@ -6,6 +6,7 @@ import pytest
 
 from bot.execution.dreamdex_zero_mutation_rehearsal import (
     DreamDexLiveReadOnlyEvidenceStatus,
+    DreamDexLiveReadOnlyEndpointConfigurationStatus,
     DreamDexLiveReadOnlyConfigurationStatus,
     DreamDexZeroMutationRehearsalEvidence,
     DreamDexLiveReadOnlyRehearsalDependencies,
@@ -47,6 +48,27 @@ def test_safe_configuration_status_has_no_endpoint_or_secret_values():
     assert "token" not in text.lower()
     assert "0x" + "b" * 64 not in text
     assert status.safe_dict()["blockers"] == ["authenticated_session_not_configured"]
+
+
+def test_endpoint_configuration_status_is_value_free_and_source_allowlisted():
+    from scripts.run_dreamdex_zero_mutation_rehearsal import _endpoint_status
+
+    status = _endpoint_status("https://api.dreamdex.io/v0", endpoint_type="public_api", source_name="pinned_production")
+    assert status.ready is True
+    assert "api.dreamdex.io" not in repr(status)
+    assert status.safe_dict()["redirects_allowed"] is False
+    with pytest.raises(ValueError):
+        DreamDexLiveReadOnlyEndpointConfigurationStatus(endpoint_type="public_api", source_name="arbitrary_env_name")
+
+
+def test_endpoint_validation_rejects_userinfo_fragment_and_credential_query_without_echoing_values():
+    from scripts.run_dreamdex_zero_mutation_rehearsal import _endpoint_status
+
+    for value in ("https://user:pass@rpc.example", "https://rpc.example/#fragment", "https://rpc.example/path?token=secret"):
+        status = _endpoint_status(value, endpoint_type="rpc", source_name="dedicated_rpc_read_only")
+        text = repr(status) + str(status.safe_dict())
+        assert status.ready is False
+        assert "user:pass" not in text and "token=secret" not in text
 
 
 def test_live_causal_gas_stage_is_not_attempted_without_candidate():
@@ -254,6 +276,31 @@ def test_dependency_collector_blocks_crossed_or_wide_orderbooks():
         return collect_live_read_only_rehearsal_evidence_from_dependencies(deps)
     assert collect({"bids": [{"price": "1.01", "quantity": "1"}], "asks": [{"price": "1.00", "quantity": "1"}]}).orderbook_status == "unavailable"
     assert collect({"bids": [{"price": "1.00", "quantity": "1"}], "asks": [{"price": "2.00", "quantity": "1"}]}).orderbook_status == "unavailable"
+
+
+def test_explicit_disabled_trading_status_is_distinct_from_unavailable():
+    metadata = SimpleNamespace(
+        symbol="SOMI:USDso", pool_contract="0x1111111111111111111111111111111111111111",
+        observed_at=datetime.now(timezone.utc),
+        trading_rules=SimpleNamespace(
+            available=True, trading_enabled=False,
+            status_for=lambda name: "confirmed" if name == "trading_enabled" else "unavailable",
+        ),
+    )
+    market = SimpleNamespace(
+        status="available", observed_at=datetime.now(timezone.utc), metadata=metadata,
+        orderbook={"bids": [{"price": "1", "quantity": "1"}], "asks": [{"price": "2", "quantity": "1"}]},
+    )
+    evidence = collect_live_read_only_rehearsal_evidence_from_dependencies(
+        DreamDexLiveReadOnlyRehearsalDependencies(
+            lambda: market, lambda: None, lambda: {"status": "not_configured"},
+            safe_config={"required_market_symbol": "SOMI:USDso"},
+        )
+    )
+    status = next(item for item in evidence.evidence_statuses if item.evidence_name == "trading_status")
+    assert status.result_status == "confirmed"
+    assert status.blocker == "market_trading_disabled"
+    assert evidence.trading_enabled is False
 
 
 def test_rehearsal_rpc_allowlist_has_only_read_only_methods():

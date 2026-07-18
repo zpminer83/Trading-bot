@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 
 from bot.execution.dreamdex_zero_mutation_rehearsal import (
     DreamDexLiveReadOnlyEvidenceStatus,
+    DreamDexLiveReadOnlyEndpointConfigurationStatus,
     DreamDexLiveReadOnlyConfigurationStatus,
     DreamDexLiveReadOnlyRehearsalDependencies,
     DreamDexZeroMutationRehearsalEvidence,
@@ -38,55 +39,128 @@ from bot.integrations.dreamdex_read_only import (
 
 
 def _configuration_status(*, base_url: str | None, rpc_url: str | None, owner: str | None,
-                          authenticated: object, symbol: str) -> DreamDexLiveReadOnlyConfigurationStatus:
-    public_ok = bool(base_url)
-    rpc_ok = bool(rpc_url)
+                          authenticated: object, symbol: str,
+                          public_endpoint_status: DreamDexLiveReadOnlyEndpointConfigurationStatus | None = None,
+                          rpc_endpoint_status: DreamDexLiveReadOnlyEndpointConfigurationStatus | None = None) -> DreamDexLiveReadOnlyConfigurationStatus:
+    public_endpoint_status = public_endpoint_status or _endpoint_status(
+        base_url, endpoint_type="public_api", source_name="pinned_production" if base_url else "not_configured")
+    rpc_endpoint_status = rpc_endpoint_status or _endpoint_status(
+        rpc_url, endpoint_type="rpc", source_name="dedicated_rpc_read_only" if rpc_url else "not_configured")
+    public_ok = public_endpoint_status.configured
+    rpc_ok = rpc_endpoint_status.configured
+    public_ready = public_endpoint_status.ready
+    rpc_ready = rpc_endpoint_status.ready
     auth_configured = bool(getattr(authenticated, "configured", False))
     blockers: list[str] = []
-    if not public_ok:
+    if not public_ready:
         blockers.append("public_api_configuration_unavailable")
+    if public_endpoint_status.configured and not public_ready:
+        blockers.append("public_api_configuration_invalid")
+    blockers.extend(public_endpoint_status.blockers)
     if not rpc_ok:
         blockers.append("rpc_configuration_unavailable")
+    elif not rpc_ready:
+        blockers.append("rpc_configuration_invalid")
+    blockers.extend(rpc_endpoint_status.blockers)
     if not auth_configured:
         blockers.append("authenticated_session_not_configured")
     if auth_configured and not owner:
         blockers.append("account_address_configuration_unavailable")
-    fingerprint_input = f"public={public_ok}|rpc={rpc_ok}|auth={auth_configured}|owner={bool(owner)}|symbol={symbol}|chain=5031"
+    fingerprint_input = f"public={public_ready}|rpc={rpc_ready}|auth={auth_configured}|owner={bool(owner)}|symbol={symbol}|chain=5031"
     return DreamDexLiveReadOnlyConfigurationStatus(
         public_api_configured=public_ok, rpc_configured=rpc_ok,
         authenticated_session_configured=auth_configured,
         authenticated_session_current=False, required_chain_id=5031,
-        market_symbol=symbol, public_transport_ready=public_ok,
-        rpc_transport_ready=rpc_ok, account_transport_ready=auth_configured and bool(owner),
+        market_symbol=symbol, public_transport_ready=public_ready,
+        rpc_transport_ready=rpc_ready, account_transport_ready=auth_configured and bool(owner) and public_ready,
         configuration_fingerprint="0x" + sha256(fingerprint_input.encode()).hexdigest(),
         blockers=tuple(blockers),
+        public_endpoint_status=public_endpoint_status,
+        rpc_endpoint_status=rpc_endpoint_status,
     )
 
 
-def _safe_public_base(value: str | None) -> str | None:
+def _endpoint_status(value: str | None, *, endpoint_type: str, source_name: str,
+                     allow_local_fixture: bool = False) -> DreamDexLiveReadOnlyEndpointConfigurationStatus:
+    """Validate endpoint syntax without retaining or echoing its value."""
+    configured = bool(value)
+    if not configured:
+        return DreamDexLiveReadOnlyEndpointConfigurationStatus(endpoint_type=endpoint_type, source_name="not_configured")
+    text = str(value)
+    try:
+        parsed = urlparse(text)
+        hostname = parsed.hostname
+    except ValueError:
+        fingerprint = "0x" + sha256(f"{endpoint_type}|{source_name}|malformed".encode()).hexdigest()
+        return DreamDexLiveReadOnlyEndpointConfigurationStatus(
+            endpoint_type=endpoint_type, configured=True, source_name=source_name,
+            syntax_valid=False, scheme_status="invalid", transport_ready=False,
+            configuration_fingerprint=fingerprint,
+            blockers=(f"{endpoint_type}_endpoint_syntax_invalid",),
+        )
+    blockers: list[str] = []
+    credentials = bool(parsed.username or parsed.password)
+    marker_text = (parsed.path + "?" + parsed.query).lower()
+    credentials = credentials or any(marker in marker_text for marker in ("token", "secret", "bearer", "password", "credential", "apikey", "api_key"))
+    if credentials:
+        blockers.append(f"{endpoint_type}_endpoint_credentials_embedded")
+    syntax_valid = len(text) <= 2048 and not any(char.isspace() or ord(char) < 32 for char in text)
+    syntax_valid = syntax_valid and bool(parsed.scheme and parsed.netloc and hostname)
+    local = hostname in {"localhost", "127.0.0.1", "::1"}
+    scheme_status = "local_fixture" if allow_local_fixture and local and parsed.scheme in {"http", "https"} else ("https" if parsed.scheme == "https" else "invalid")
+    if scheme_status == "invalid":
+        blockers.append(f"{endpoint_type}_endpoint_https_required")
+    if parsed.fragment:
+        syntax_valid = False
+        blockers.append(f"{endpoint_type}_endpoint_fragment_forbidden")
+    if endpoint_type == "public_api":
+        if hostname not in {"api.dreamdex.io", "stg.api.dreamdex.io"} and not (allow_local_fixture and local):
+            syntax_valid = False
+            blockers.append("public_api_endpoint_host_unapproved")
+        if parsed.path.rstrip("/") != "/v0" and not (allow_local_fixture and local):
+            syntax_valid = False
+            blockers.append("public_api_endpoint_path_unapproved")
+        if parsed.query:
+            syntax_valid = False
+            blockers.append("public_api_endpoint_query_forbidden")
+    else:
+        if parsed.query:
+            syntax_valid = False
+            blockers.append("rpc_endpoint_query_forbidden")
+        if parsed.path not in {"", "/"} and not credentials:
+            syntax_valid = False
+            blockers.append("rpc_endpoint_path_forbidden")
+    transport_ready = syntax_valid and scheme_status in {"https", "local_fixture"} and not credentials and not parsed.fragment
+    fingerprint = "0x" + sha256(f"{endpoint_type}|{source_name}|{syntax_valid}|{scheme_status}|{credentials}|{transport_ready}".encode()).hexdigest()
+    return DreamDexLiveReadOnlyEndpointConfigurationStatus(
+        endpoint_type=endpoint_type, configured=True, source_name=source_name,
+        syntax_valid=syntax_valid, scheme_status=scheme_status,
+        credentials_embedded=credentials, redirects_allowed=False,
+        transport_ready=transport_ready, configuration_fingerprint=fingerprint,
+        blockers=tuple(dict.fromkeys(blockers)),
+    )
+
+
+def _safe_public_base(value: str | None, *, allow_local_fixture: bool = False) -> str | None:
     if not value:
         return None
-    parsed = urlparse(str(value))
-    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        return None
-    if parsed.hostname not in {"api.dreamdex.io", "stg.api.dreamdex.io"}:
-        return None
-    if parsed.path.rstrip("/") != "/v0":
+    status = _endpoint_status(value, endpoint_type="public_api", source_name="dedicated_public_read_only", allow_local_fixture=allow_local_fixture)
+    if not status.ready:
         return None
     return str(value).rstrip("/")
 
 
-def _safe_rpc_url(value: str | None) -> str | None:
+def _safe_rpc_url(value: str | None, *, allow_local_fixture: bool = False) -> str | None:
     if not value:
         return None
-    parsed = urlparse(str(value))
-    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+    status = _endpoint_status(value, endpoint_type="rpc", source_name="dedicated_rpc_read_only", allow_local_fixture=allow_local_fixture)
+    if not status.ready:
         return None
     return str(value).rstrip("/")
 
 
 def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
-    names = ("market_identity", "order_book", "market_rules", "trading_status", "account_identity",
+    names = ("market_listed", "market_identity", "order_book", "market_rules", "market_lifecycle", "trading_status", "trading_enabled", "place_supported", "cancel_supported", "account_identity",
              "trading_balances", "open_orders", "recent_fills", "chain_id", "target_code",
              "pending_nonce", "native_gas_balance", "fee_data", "gas_estimate")
     statuses = tuple(DreamDexLiveReadOnlyEvidenceStatus(
@@ -99,7 +173,16 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         authenticated_session_configured=True, authenticated_session_current=True,
         required_chain_id=5031, market_symbol=policy.required_market_symbol or "SOMI:USDso",
         public_transport_ready=True, rpc_transport_ready=True, account_transport_ready=True,
-        configuration_fingerprint="0x" + "f" * 64)
+        configuration_fingerprint="0x" + "f" * 64,
+        public_endpoint_status=DreamDexLiveReadOnlyEndpointConfigurationStatus(
+            endpoint_type="public_api", configured=True, source_name="pinned_production",
+            syntax_valid=True, scheme_status="https", transport_ready=True,
+            configuration_fingerprint="0x" + "1" * 64),
+        rpc_endpoint_status=DreamDexLiveReadOnlyEndpointConfigurationStatus(
+            endpoint_type="rpc", configured=True, source_name="dedicated_rpc_read_only",
+            syntax_valid=True, scheme_status="https", transport_ready=True,
+            configuration_fingerprint="0x" + "2" * 64),
+    )
     evidence = DreamDexZeroMutationRehearsalEvidence(
         market_status="available", orderbook_status="available", account_status="available", rpc_status="available", chain_id=5031,
         target_code_status="available", pending_nonce_status="available", native_balance_status="available",
@@ -114,6 +197,9 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         evidence_statuses=statuses,
         native_gas_balance_evidence="confirmed", authenticated_trading_balance_evidence="confirmed",
         available_order_currency_balance="confirmed", available_base_asset_balance="confirmed",
+        market_listed_status="confirmed", market_lifecycle_status="confirmed", trading_enabled_status="confirmed",
+        place_operation_status="confirmed", cancel_operation_status="confirmed",
+        trading_status_source="fixture", trading_status_authority="authoritative",
         configuration_status=configuration,
         source_fingerprint="fixture-source", market_fingerprint="fixture-market", account_fingerprint="fixture-account",
     )
@@ -125,7 +211,7 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
 
 
 def _default_evidence(configuration_status: DreamDexLiveReadOnlyConfigurationStatus | None = None) -> DreamDexZeroMutationRehearsalEvidence:
-    names = ("market_identity", "order_book", "market_rules", "trading_status", "account_identity",
+    names = ("market_listed", "market_identity", "order_book", "market_rules", "market_lifecycle", "trading_status", "trading_enabled", "place_supported", "cancel_supported", "account_identity",
              "trading_balances", "open_orders", "recent_fills", "chain_id", "target_code",
              "pending_nonce", "native_gas_balance", "fee_data", "gas_estimate")
     configuration_status = configuration_status or DreamDexLiveReadOnlyConfigurationStatus(blockers=("live_read_only_configuration_unavailable",))
@@ -146,20 +232,19 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
     """Build the explicit live read-only bundle from existing transports."""
     owner = os.environ.get("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "")
     trading = os.environ.get("DREAMDEX_READ_ONLY_TRADING_ADDRESS", "")
-    base_url = _safe_public_base(
-        os.environ.get("DREAMDEX_READ_ONLY_BASE_URL")
-        or os.environ.get("DREAMDEX_API_BASE_URL")
-        or os.environ.get("BASE_URL")
-        or PRODUCTION_BASE_URL
-    )
-    rpc_url = _safe_rpc_url(
-        os.environ.get("DREAMDEX_READ_ONLY_RPC_URL")
-        or os.environ.get("DREAMDEX_RPC_URL")
-        or os.environ.get("RPC_URL", "")
-    )
+    public_override = os.environ.get("DREAMDEX_READ_ONLY_BASE_URL")
+    public_api_override = os.environ.get("DREAMDEX_API_BASE_URL")
+    raw_base = public_override or public_api_override or PRODUCTION_BASE_URL
+    public_source = "dedicated_public_read_only" if public_override else ("dedicated_public_api" if public_api_override else "pinned_production")
+    public_endpoint = _endpoint_status(raw_base, endpoint_type="public_api", source_name=public_source)
+    base_url = _safe_public_base(raw_base)
+    raw_rpc = os.environ.get("DREAMDEX_READ_ONLY_RPC_URL") or os.environ.get("DREAMDEX_RPC_URL")
+    rpc_endpoint = _endpoint_status(raw_rpc, endpoint_type="rpc", source_name="dedicated_rpc_read_only" if os.environ.get("DREAMDEX_READ_ONLY_RPC_URL") else ("dedicated_rpc" if os.environ.get("DREAMDEX_RPC_URL") else "not_configured"))
+    rpc_url = _safe_rpc_url(raw_rpc)
     authenticated = build_authenticated_read_only_transport_from_env()
     configuration = _configuration_status(base_url=base_url, rpc_url=rpc_url or None, owner=owner or None,
-                                          authenticated=authenticated, symbol=symbol)
+                                          authenticated=authenticated, symbol=symbol,
+                                          public_endpoint_status=public_endpoint, rpc_endpoint_status=rpc_endpoint)
     market_source = MarketReadOnlySource(HttpGetTransport(base_url or PRODUCTION_BASE_URL), symbol)
     market_cache: dict[str, object] = {}
     account_cache: dict[str, object] = {}
@@ -203,7 +288,7 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
     def read_preflight():
         if rpc is None:
             return {
-                "status": "not_configured", "read_only_rpc_call_count": 0,
+                "status": "not_configured" if not configuration.rpc_configured else "configuration_invalid", "read_only_rpc_call_count": 0,
                 "gas_estimate_status": "not_attempted_due_to_prerequisite",
                 "call_statuses": {"gas_estimate": "not_attempted_due_to_prerequisite"},
             }
@@ -423,6 +508,23 @@ def main(argv: list[str] | None = None) -> int:
     ):
         print(f"{label}: {display(configuration_data.get(key))}")
     print(f"configuration blockers: {', '.join(configuration_data.get('blockers', [])) or 'none'}")
+    for endpoint_label, endpoint_key in (("public endpoint", "public_endpoint_status"), ("RPC endpoint", "rpc_endpoint_status")):
+        endpoint = configuration_data.get(endpoint_key, {})
+        print(f"{endpoint_label} configured: {display(endpoint.get('configured', False))}")
+        print(f"{endpoint_label} syntax valid: {display(endpoint.get('syntax_valid', False))}")
+        scheme_display = endpoint.get("scheme_status", "unavailable")
+        if scheme_display == "https":
+            scheme_display = "secure"
+        print(f"{endpoint_label} scheme: {scheme_display}")
+        print(f"{endpoint_label} redirects allowed: {display(endpoint.get('redirects_allowed', False))}")
+        print(f"{endpoint_label} transport ready: {display(endpoint.get('transport_ready', False))}")
+        print(f"{endpoint_label} blockers: {', '.join(endpoint.get('blockers', [])) or 'none'}")
+    print("TRADING STATUS SOURCE AUDIT:")
+    print("source | exact field/function | authority | auth | read-only | parser | usable")
+    print("public_market | tradingEnabled/status in GET /markets | source-confirmed field | none | yes | supported | only when explicit")
+    print("authenticated_market | existing authenticated field | separately classified | existing session | yes | not selected | no")
+    print("contract_view | no source-confirmed function selected | unavailable | none | eth_call only if audited | unavailable | no")
+    print("place/cancel support | no confirmed public field | unavailable | none | read-only | unavailable | no")
     print("LIVE READ-ONLY EVIDENCE MATRIX:")
     print("evidence | called | transport | auth | schema | authority | result")
     for item in data.get("evidence_statuses", []):

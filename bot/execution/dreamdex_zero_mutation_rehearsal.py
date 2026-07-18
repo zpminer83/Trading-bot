@@ -27,6 +27,15 @@ READ_ONLY_REHEARSAL_FORBIDDEN_METHODS = frozenset({
     "personal_sign", "wallet_sendTransaction",
 })
 
+# Endpoint configuration is represented by symbolic source names only.  Raw
+# URLs are deliberately kept outside the rehearsal evidence model.
+LIVE_ENDPOINT_TYPES = frozenset({"public_api", "rpc"})
+LIVE_ENDPOINT_SOURCE_NAMES = frozenset({
+    "not_configured", "pinned_production", "dedicated_public_read_only",
+    "dedicated_public_api", "dedicated_rpc_read_only", "dedicated_rpc",
+})
+LIVE_ENDPOINT_SCHEME_STATUSES = frozenset({"https", "local_fixture", "invalid", "unavailable"})
+
 # Evidence vocabulary is deliberately finite so a diagnostic cannot quietly
 # turn an unknown result into an affirmative trading prerequisite.
 LIVE_EVIDENCE_RESULT_STATUSES = frozenset({
@@ -116,6 +125,66 @@ class ReadOnlyRehearsalReader(Protocol):
 
 
 @dataclass(frozen=True, repr=False)
+class DreamDexLiveReadOnlyEndpointConfigurationStatus:
+    """Value-free validation result for one public or RPC endpoint.
+
+    The endpoint itself is intentionally absent.  This object is suitable for
+    diagnostics and journaling without leaking hosts, paths, query strings or
+    embedded credentials.
+    """
+
+    endpoint_type: str
+    configured: bool = False
+    source_name: str = "not_configured"
+    syntax_valid: bool = False
+    scheme_status: str = "unavailable"
+    credentials_embedded: bool = False
+    redirects_allowed: bool = False
+    transport_ready: bool = False
+    configuration_fingerprint: str = ""
+    blockers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.endpoint_type not in LIVE_ENDPOINT_TYPES:
+            raise ValueError("invalid_live_endpoint_type")
+        if self.source_name not in LIVE_ENDPOINT_SOURCE_NAMES:
+            raise ValueError("invalid_live_endpoint_source")
+        if self.scheme_status not in LIVE_ENDPOINT_SCHEME_STATUSES:
+            raise ValueError("invalid_live_endpoint_scheme_status")
+        object.__setattr__(self, "redirects_allowed", False)
+        object.__setattr__(self, "blockers", tuple(dict.fromkeys(str(item) for item in self.blockers)))
+
+    @property
+    def ready(self) -> bool:
+        return self.configured and self.syntax_valid and not self.credentials_embedded and self.transport_ready
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "endpoint_type": self.endpoint_type,
+            "configured": self.configured,
+            "source_name": self.source_name,
+            "syntax_valid": self.syntax_valid,
+            "scheme_status": self.scheme_status,
+            "credentials_embedded": self.credentials_embedded,
+            "redirects_allowed": False,
+            "transport_ready": self.transport_ready,
+            "configuration_fingerprint": mask_hex_hash(self.configuration_fingerprint) if self.configuration_fingerprint else "",
+            "blockers": list(self.blockers),
+        }
+
+    def __repr__(self) -> str:
+        return f"DreamDexLiveReadOnlyEndpointConfigurationStatus({self.endpoint_type!r}, ready={self.ready!r})"
+
+
+def _default_endpoint_status() -> DreamDexLiveReadOnlyEndpointConfigurationStatus:
+    return DreamDexLiveReadOnlyEndpointConfigurationStatus(endpoint_type="public_api")
+
+
+def _default_rpc_endpoint_status() -> DreamDexLiveReadOnlyEndpointConfigurationStatus:
+    return DreamDexLiveReadOnlyEndpointConfigurationStatus(endpoint_type="rpc")
+
+
+@dataclass(frozen=True, repr=False)
 class DreamDexLiveReadOnlyConfigurationStatus:
     """Safe summary of discovered non-secret live-read-only configuration."""
 
@@ -130,6 +199,8 @@ class DreamDexLiveReadOnlyConfigurationStatus:
     account_transport_ready: bool = False
     configuration_fingerprint: str = ""
     blockers: tuple[str, ...] = ()
+    public_endpoint_status: DreamDexLiveReadOnlyEndpointConfigurationStatus = field(default_factory=_default_endpoint_status)
+    rpc_endpoint_status: DreamDexLiveReadOnlyEndpointConfigurationStatus = field(default_factory=_default_rpc_endpoint_status)
 
     def __post_init__(self) -> None:
         if self.required_chain_id != 5031:
@@ -159,6 +230,8 @@ class DreamDexLiveReadOnlyConfigurationStatus:
             "account_transport_ready": self.account_transport_ready,
             "configuration_fingerprint": mask_hex_hash(self.configuration_fingerprint) if self.configuration_fingerprint else "",
             "blockers": list(self.blockers),
+            "public_endpoint_status": self.public_endpoint_status.safe_dict(),
+            "rpc_endpoint_status": self.rpc_endpoint_status.safe_dict(),
         }
 
     def __repr__(self) -> str:
@@ -368,6 +441,13 @@ class DreamDexZeroMutationRehearsalEvidence:
     derived_blockers: tuple[str, ...] = ()
     not_attempted_stages: tuple[str, ...] = ()
     configuration_status: DreamDexLiveReadOnlyConfigurationStatus = field(default_factory=_default_configuration_status)
+    market_listed_status: str = "unavailable"
+    market_lifecycle_status: str = "unavailable"
+    trading_enabled_status: str = "unavailable"
+    place_operation_status: str = "unavailable"
+    cancel_operation_status: str = "unavailable"
+    trading_status_source: str = "unavailable"
+    trading_status_authority: str = "non_authoritative"
 
     def safe_dict(self) -> dict[str, Any]:
         return {"market_status": self.market_status, "account_status": self.account_status, "rpc_status": self.rpc_status,
@@ -415,7 +495,14 @@ class DreamDexZeroMutationRehearsalEvidence:
                 "primary_blockers": list(self.primary_blockers),
                 "derived_blockers": list(self.derived_blockers),
                 "not_attempted_stages": list(self.not_attempted_stages),
-                "configuration_status": self.configuration_status.safe_dict()}
+                "configuration_status": self.configuration_status.safe_dict(),
+                "market_listed_status": self.market_listed_status,
+                "market_lifecycle_status": self.market_lifecycle_status,
+                "trading_enabled_status": self.trading_enabled_status,
+                "place_operation_status": self.place_operation_status,
+                "cancel_operation_status": self.cancel_operation_status,
+                "trading_status_source": self.trading_status_source,
+                "trading_status_authority": self.trading_status_authority}
 
     def __repr__(self) -> str:
         return "DreamDexZeroMutationRehearsalEvidence(<safe>)"
@@ -530,6 +617,13 @@ class DreamDexZeroMutationRehearsalResult:
     derived_blockers: tuple[str, ...] = ()
     not_attempted_stages: tuple[str, ...] = ()
     configuration_status: DreamDexLiveReadOnlyConfigurationStatus = field(default_factory=_default_configuration_status)
+    market_listed_status: str = "unavailable"
+    market_lifecycle_status: str = "unavailable"
+    trading_enabled_status: str = "unavailable"
+    place_operation_status: str = "unavailable"
+    cancel_operation_status: str = "unavailable"
+    trading_status_source: str = "unavailable"
+    trading_status_authority: str = "non_authoritative"
 
     @property
     def readiness_status(self) -> str:
@@ -612,6 +706,13 @@ class DreamDexZeroMutationRehearsalResult:
                 "derived_blockers": list(self.derived_blockers),
                 "not_attempted_stages": list(self.not_attempted_stages),
                 "configuration_status": self.configuration_status.safe_dict(),
+                "market_listed_status": self.market_listed_status,
+                "market_lifecycle_status": self.market_lifecycle_status,
+                "trading_enabled_status": self.trading_enabled_status,
+                "place_operation_status": self.place_operation_status,
+                "cancel_operation_status": self.cancel_operation_status,
+                "trading_status_source": self.trading_status_source,
+                "trading_status_authority": self.trading_status_authority,
                 # Compatibility aliases for early offline callers.
                 "readiness_status": self.readiness_status, "mutation_call_count": self.mutation_call_count,
                 "temporary_rehearsal_journal_used": self.temporary_rehearsal_journal_used,
@@ -764,6 +865,13 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     rules = _reader_value(metadata, "trading_rules")
     market_status = _safe_source_status(market)
     rules_available = bool(_reader_value(rules, "available", False))
+    rules_status_for = getattr(rules, "status_for", None)
+    if callable(rules_status_for):
+        lifecycle_evidence_status = str(rules_status_for("market_status"))
+        trading_evidence_status = str(rules_status_for("trading_enabled"))
+    else:
+        lifecycle_evidence_status = "confirmed" if _reader_value(rules, "market_status") is not None else "unavailable"
+        trading_evidence_status = "confirmed" if _reader_value(rules, "trading_enabled") is True else "unavailable"
     book = _reader_value(market, "orderbook")
     if isinstance(book, Mapping):
         bids = book.get("bids", book.get("bid", []))
@@ -783,6 +891,10 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     expected_pool = dependencies.safe_config.get("required_market_address")
     market_identity = "confirmed" if market_symbol and (expected_symbol is None or market_symbol == expected_symbol) and market_pool and (expected_pool is None or market_pool == expected_pool) else "unavailable"
     trading_enabled = _reader_value(rules, "trading_enabled") is True
+    market_listed_status = "confirmed" if metadata is not None and market_symbol else "unavailable"
+    market_lifecycle_status = "confirmed" if lifecycle_evidence_status == "confirmed" else "confirmed_unavailable_from_source"
+    trading_status_source = "public_markets" if trading_evidence_status == "confirmed" else "unavailable"
+    trading_status_authority = "authoritative" if trading_evidence_status == "confirmed" else "non_authoritative"
     observed_at = _reader_value(metadata, "observed_at", _reader_value(market, "observed_at"))
     market_age_ms = None
     if observed_at is not None:
@@ -839,7 +951,12 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     identity_result = "confirmed" if market_identity == "confirmed" else ("identity_mismatch" if market_symbol and expected_symbol and market_symbol != expected_symbol else "confirmed_unavailable_from_source")
     orderbook_result = "confirmed" if orderbook_status == "available" else ("schema_unsupported" if market is not None else "transport_unavailable")
     rules_result = "confirmed" if rules_available else ("confirmed_unavailable_from_source" if metadata is not None else "transport_unavailable")
-    trading_result = "confirmed" if _reader_value(rules, "trading_enabled") is True else "confirmed_unavailable_from_source"
+    if trading_evidence_status == "confirmed":
+        trading_result = "confirmed"
+        trading_blocker = None if trading_enabled else "market_trading_disabled"
+    else:
+        trading_result = "confirmed_unavailable_from_source"
+        trading_blocker = "trading_status_unavailable"
     raw_auth_transport = str(_reader_value(account, "authenticated_transport_status", ""))
     auth_state = str(_reader_value(_reader_value(account, "auth_snapshot"), "state", ""))
     if auth_state in {"expired", "session_expired"}:
@@ -878,10 +995,33 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
                          blocker=None if rules_result == "confirmed" else "market_rules_unavailable",
                          typed_method="GET /markets", purpose="complete trading rules"),
         _evidence_status("trading_status", performed=public_calls > 0, result=trading_result, source="public_market", transport=market_transport,
-                         schema="confirmed" if _reader_value(rules, "trading_enabled") is not None else "schema_unsupported",
-                         authority="authoritative" if _reader_value(rules, "trading_enabled") is True else "non_authoritative",
-                         blocker=None if trading_result == "confirmed" else "trading_status_unavailable",
+                         schema="confirmed" if trading_evidence_status == "confirmed" else "schema_unsupported",
+                         authority=trading_status_authority,
+                         blocker=trading_blocker,
                          typed_method="GET /markets", purpose="explicit trading status"),
+        _evidence_status("trading_enabled", performed=public_calls > 0, result=trading_result, source="public_market", transport=market_transport,
+                         schema="confirmed" if trading_evidence_status == "confirmed" else "schema_unsupported",
+                         authority=trading_status_authority, blocker=trading_blocker,
+                         typed_method="GET /markets", purpose="explicit trading-enabled flag"),
+        _evidence_status("market_listed", performed=public_calls > 0, result="confirmed" if market_listed_status == "confirmed" else "confirmed_unavailable_from_source",
+                         source="public_market", transport=market_transport,
+                         schema="confirmed" if metadata is not None else "schema_unsupported",
+                         identity="confirmed" if market_listed_status == "confirmed" else "unresolved",
+                         authority="authoritative" if market_listed_status == "confirmed" else "non_authoritative",
+                         blocker=None if market_listed_status == "confirmed" else "market_not_listed",
+                         typed_method="GET /markets", purpose="market listing"),
+        _evidence_status("market_lifecycle", performed=public_calls > 0, result="confirmed" if market_lifecycle_status == "confirmed" else "confirmed_unavailable_from_source",
+                         source="public_market", transport=market_transport,
+                         schema="confirmed" if lifecycle_evidence_status == "confirmed" else "schema_unsupported",
+                         authority="authoritative" if lifecycle_evidence_status == "confirmed" else "non_authoritative",
+                         blocker=None if lifecycle_evidence_status == "confirmed" else "market_lifecycle_unavailable",
+                         typed_method="GET /markets", purpose="market lifecycle status"),
+        _evidence_status("place_supported", performed=public_calls > 0, result="confirmed_unavailable_from_source", source="public_market",
+                         transport=market_transport, authority="non_authoritative", blocker="place_operation_unavailable",
+                         typed_method="GET /markets", purpose="place operation support"),
+        _evidence_status("cancel_supported", performed=public_calls > 0, result="confirmed_unavailable_from_source", source="public_market",
+                         transport=market_transport, authority="non_authoritative", blocker="cancel_operation_unavailable",
+                         typed_method="GET /markets", purpose="cancel operation support"),
         _evidence_status("account_identity", performed=auth_calls > 0, result=account_identity_result, source="authenticated_account",
                          transport=account_transport, auth=auth_status, schema="confirmed" if account is not None else "schema_unsupported",
                          freshness=account_freshness, authority=account_authority if account_freshness != "stale" else "non_authoritative", blocker=None if account_identity_result == "confirmed" and account_freshness != "stale" else "account_identity_not_authoritative",
@@ -901,7 +1041,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     ]
     call_statuses = rpc_map.get("call_statuses", {}) if isinstance(rpc_map.get("call_statuses", {}), Mapping) else {}
     def _rpc_call_status(name: str, value: Any, *, attempted_default: bool = True) -> DreamDexLiveReadOnlyEvidenceStatus:
-        status = str(call_statuses.get(name, "confirmed" if value is not None else "transport_unavailable"))
+        status = str(call_statuses.get(name, "confirmed" if value is not None else ("not_configured" if not configuration.rpc_configured else "transport_unavailable")))
         method_names = {
             "chain_id": "eth_chainId", "target_code": "eth_getCode", "pending_nonce": "eth_getTransactionCount",
             "native_gas_balance": "eth_getBalance", "fee_data": "eth_gasPrice|eth_maxPriorityFeePerGas",
@@ -985,6 +1125,13 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         available_order_currency_balance=("authentication_unavailable" if account is None else _balance_result(order_currency, configured=True)),
         available_base_asset_balance=("authentication_unavailable" if account is None else _balance_result(base_asset, configured=True)),
         configuration_status=configuration,
+        market_listed_status=market_listed_status,
+        market_lifecycle_status=market_lifecycle_status,
+        trading_enabled_status=trading_result,
+        place_operation_status="confirmed_unavailable_from_source",
+        cancel_operation_status="confirmed_unavailable_from_source",
+        trading_status_source=trading_status_source,
+        trading_status_authority=trading_status_authority,
     )
 
 
@@ -1199,6 +1346,13 @@ def _result(policy: DreamDexZeroMutationRehearsalPolicy, evidence: DreamDexZeroM
         derived_blockers=derived_blockers,
         not_attempted_stages=not_attempted_stages,
         configuration_status=evidence.configuration_status,
+        market_listed_status=evidence.market_listed_status,
+        market_lifecycle_status=evidence.market_lifecycle_status,
+        trading_enabled_status=evidence.trading_enabled_status,
+        place_operation_status=evidence.place_operation_status,
+        cancel_operation_status=evidence.cancel_operation_status,
+        trading_status_source=evidence.trading_status_source,
+        trading_status_authority=evidence.trading_status_authority,
     )
 
 

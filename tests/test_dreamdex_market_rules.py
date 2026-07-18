@@ -45,6 +45,20 @@ def test_missing_and_unknown_status_are_fail_closed():
     assert unknown.status_for("market_status") == "unsupported"
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_explicit_public_trading_enabled_field_is_source_confirmed(enabled):
+    rules = parse_market_trading_rules({**BASE, "tradingEnabled": enabled}, symbol="SOMI:USDso")
+    assert rules.trading_enabled is enabled
+    assert rules.status_for("trading_enabled") == "confirmed"
+
+
+def test_orderbook_source_does_not_invent_trading_status():
+    metadata = MarketReadOnlySource(FixtureTransport({"markets": {"markets": [BASE]}}), "SOMI:USDso").metadata()
+    assert metadata.trading_rules is not None
+    assert metadata.trading_rules.status_for("trading_enabled") == "unavailable"
+    assert metadata.active is False
+
+
 @pytest.mark.parametrize("field,value", [("tickSize", "0"), ("lotSize", "-1"), ("minQuantity", "0"), ("baseDecimals", True)])
 def test_invalid_rule_values_are_rejected(field, value):
     with pytest.raises(ValueError):

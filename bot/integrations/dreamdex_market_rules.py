@@ -261,13 +261,26 @@ def parse_market_trading_rules(
     integer_rule("price_decimals", ("priceDecimals", *aliases(("price_decimals",))))
     integer_rule("quantity_decimals", ("quantityDecimals", *aliases(("quantity_decimals",))))
 
+    # A dedicated boolean is the least ambiguous public trading-status
+    # source.  Keep it separate from lifecycle/status text so an explicit
+    # ``False`` cannot be mistaken for a missing field.
+    enabled_keys = ("tradingEnabled", "enabled") if not allow_legacy_aliases else ("tradingEnabled", "trading_enabled", "enabled", "isTradingEnabled")
+    raw_enabled = next((row[k] for k in enabled_keys if k in row and row[k] is not None), None)
+    explicit_enabled = raw_enabled is not None
+    if explicit_enabled:
+        if not isinstance(raw_enabled, bool):
+            raise ValueError("malformed trading_enabled")
+        values["trading_enabled"] = raw_enabled
+        evidence["trading_enabled"] = _evidence(raw_enabled, source=source)
+
     status_keys = ("status",) if not allow_legacy_aliases else ("status", "marketStatus", "market_status")
     raw_status = next((row[k] for k in status_keys if k in row and row[k] is not None), None)
     if raw_status is None:
         values["market_status"] = None
-        values["trading_enabled"] = False
+        if not explicit_enabled:
+            values["trading_enabled"] = False
+            evidence["trading_enabled"] = _evidence(False, source="unavailable", status="unavailable", reason="market status unavailable")
         evidence["market_status"] = _evidence(None, source="unavailable", status="unavailable", reason="missing market status")
-        evidence["trading_enabled"] = _evidence(False, source="unavailable", status="unavailable", reason="market status unavailable")
     else:
         normalized = str(raw_status).strip().lower()
         if normalized not in _KNOWN_STATUSES:
@@ -276,9 +289,10 @@ def parse_market_trading_rules(
         else:
             status_state = "confirmed"
         values["market_status"] = normalized
-        values["trading_enabled"] = normalized in _ACTIVE
+        values["trading_enabled"] = values["trading_enabled"] if explicit_enabled else normalized in _ACTIVE
         evidence["market_status"] = _evidence(normalized, source=source, status=status_state)
-        evidence["trading_enabled"] = _evidence(values["trading_enabled"], source=source, status=status_state)
+        if not explicit_enabled:
+            evidence["trading_enabled"] = _evidence(values["trading_enabled"], source=source, status=status_state)
 
     type_keys = ("supportedOrderTypes",) if not allow_legacy_aliases else ("supportedOrderTypes", "supported_order_types", "orderTypes")
     raw_types = next((row[k] for k in type_keys if k in row and row[k] is not None), None)

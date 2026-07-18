@@ -213,6 +213,8 @@ class HttpGetTransport:
             params=dict(params or {}),
             headers={"Accept": "application/json"},
             timeout=self.timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
         )
         response.raise_for_status()
         return response.json()
@@ -236,6 +238,8 @@ class HttpRpcTransport:
             json={"jsonrpc": "2.0", "id": 1, "method": method, "params": list(params)},
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             timeout=self.timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
         )
         response.raise_for_status()
         payload = response.json()
@@ -429,6 +433,25 @@ class MarketReadOnlySource:
             trading_rules=trading_rules,
             schema_fingerprint=self._last_schema_fingerprint,
         )
+
+    def trading_status(self) -> SourceValue:
+        """Return only an explicit, source-confirmed market trading flag.
+
+        Bid/ask availability is intentionally not treated as proof that the
+        market accepts place or cancel operations.  No contract-view fallback
+        is guessed here; an unavailable public field remains unavailable.
+        """
+        metadata = self.metadata()
+        rules = metadata.trading_rules
+        if rules is None:
+            return SourceValue(None, "unavailable", "public_markets", reason="trading_status_unavailable", error_code="unavailable", observed_at=metadata.observed_at)
+        evidence = rules.evidence_for("trading_enabled")
+        if evidence.status == "confirmed" and isinstance(evidence.value, bool):
+            return SourceValue(evidence.value, "available", "public_markets", observed_at=metadata.observed_at)
+        return SourceValue(None, "unavailable", "public_markets", reason="trading_status_unavailable", error_code="unavailable", observed_at=metadata.observed_at)
+
+    get_trading_status = trading_status
+    fetch_trading_status = trading_status
 
     def orderbook(self) -> Mapping[str, Any]:
         payload = self._get("/orderbooks", {"symbols": self.symbol})
