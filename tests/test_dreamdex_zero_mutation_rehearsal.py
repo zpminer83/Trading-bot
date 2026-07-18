@@ -346,7 +346,20 @@ def test_fixture_cli_is_deterministic_and_live_mode_is_explicit(monkeypatch, cap
     assert "mode: fixture" in fixture_output
     assert "mutation RPC calls: 0" in fixture_output
     assert "submission call count: 0" in fixture_output
-    assert "http" not in fixture_output.lower()
+    assert "https://" not in fixture_output.lower()
+    assert "market identity confirmed:" in fixture_output
+    assert "order_book" in fixture_output
+    assert "market identity confirmed: confirmed\n" in fixture_output
+    matrix_lines = fixture_output.split("LIVE READ-ONLY EVIDENCE MATRIX:", 1)[1]
+    assert "market_identity" in matrix_lines and "order_book" in matrix_lines
+    assert "PRIMARY BLOCKERS:\n" in fixture_output
+    assert "DERIVED BLOCKERS:\n" in fixture_output
+    assert "NOT-ATTEMPTED STAGES:\n" in fixture_output
+    assert "balance evidence confirmed" not in fixture_output
+    assert "public logical snapshots: 1" in fixture_output
+    assert "public HTTP requests: 2" in fixture_output
+    assert "read-only RPC requests: 5" in fixture_output
+    assert "total network read requests: 9" in fixture_output
 
     monkeypatch.setattr(script, "_live_dependencies", lambda symbol: (_ for _ in ()).throw(RuntimeError("unavailable")))
     assert script.main(["--mode", "live-read-only"]) != 0

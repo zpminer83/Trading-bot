@@ -123,7 +123,7 @@ LIVE_EVIDENCE_RESULT_STATUSES = frozenset({
     "confirmed_unavailable_from_source",
 })
 LIVE_AUTHENTICATION_STATUSES = frozenset({
-    "not_configured", "session_not_configured", "session_expired",
+    "not_configured", "not_applicable", "session_not_configured", "session_expired",
     "credential_rejected", "request_unauthorized", "request_forbidden",
     "transport_failed", "response_schema_unsupported", "authentication_unavailable",
     "authenticated_success",
@@ -608,6 +608,11 @@ class DreamDexZeroMutationRehearsalEvidence:
     public_market_call_count: int = 0
     authenticated_account_call_count: int = 0
     read_only_rpc_call_count: int = 0
+    public_market_snapshot_count: int = 0
+    public_http_request_count: int = 0
+    authenticated_http_request_count: int = 0
+    read_only_rpc_request_count: int = 0
+    total_network_read_request_count: int = 0
     projected_shocked_drawdown: Decimal | None = None
     maximum_total_fee_wei: int | None = None
     transaction_type: str = "unresolved"
@@ -666,6 +671,11 @@ class DreamDexZeroMutationRehearsalEvidence:
                 "public_market_call_count": self.public_market_call_count,
                 "authenticated_account_call_count": self.authenticated_account_call_count,
                 "read_only_rpc_call_count": self.read_only_rpc_call_count,
+                "public_market_snapshot_count": self.public_market_snapshot_count,
+                "public_http_request_count": self.public_http_request_count,
+                "authenticated_http_request_count": self.authenticated_http_request_count,
+                "read_only_rpc_request_count": self.read_only_rpc_request_count,
+                "total_network_read_request_count": self.total_network_read_request_count,
                 "projected_shocked_drawdown": str(self.projected_shocked_drawdown) if self.projected_shocked_drawdown is not None else None,
                 "maximum_total_fee_wei": self.maximum_total_fee_wei,
                 "transaction_type": self.transaction_type,
@@ -779,6 +789,11 @@ class DreamDexZeroMutationRehearsalResult:
     public_market_call_count: int = 0
     authenticated_account_call_count: int = 0
     read_only_rpc_call_count: int = 0
+    public_market_snapshot_count: int = 0
+    public_http_request_count: int = 0
+    authenticated_http_request_count: int = 0
+    read_only_rpc_request_count: int = 0
+    total_network_read_request_count: int = 0
     projected_shocked_drawdown: Decimal | None = None
     maximum_total_fee_wei: int | None = None
     transaction_type: str = "unresolved"
@@ -869,6 +884,11 @@ class DreamDexZeroMutationRehearsalResult:
                 "public_market_call_count": self.public_market_call_count,
                 "authenticated_account_call_count": self.authenticated_account_call_count,
                 "read_only_rpc_call_count": self.read_only_rpc_call_count,
+                "public_market_snapshot_count": self.public_market_snapshot_count,
+                "public_http_request_count": self.public_http_request_count,
+                "authenticated_http_request_count": self.authenticated_http_request_count,
+                "read_only_rpc_request_count": self.read_only_rpc_request_count,
+                "total_network_read_request_count": self.total_network_read_request_count,
                 "projected_shocked_drawdown": str(self.projected_shocked_drawdown) if self.projected_shocked_drawdown is not None else None,
                 "maximum_total_fee_wei": self.maximum_total_fee_wei,
                 "transaction_type": self.transaction_type,
@@ -1122,6 +1142,25 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     account_freshness = "stale" if account_age_ms is not None and account_age_ms > maximum_account_age_ms else ("fresh" if account_age_ms is not None else "unknown")
 
     rpc_map = rpc if isinstance(rpc, Mapping) else {}
+    read_counts = dependencies.safe_config.get("_network_read_counts", {})
+    if not isinstance(read_counts, Mapping):
+        read_counts = {}
+    public_http_calls = int(
+        dependencies.safe_config.get(
+            "_public_http_request_count",
+            read_counts.get("public_http", public_calls),
+        )
+        or 0
+    )
+    authenticated_http_calls = int(
+        dependencies.safe_config.get(
+            "_authenticated_http_request_count",
+            read_counts.get("authenticated_http", auth_calls),
+        )
+        or 0
+    )
+    rpc_request_calls = int(rpc_calls)
+    total_network_reads = public_http_calls + authenticated_http_calls + rpc_request_calls
     configuration = dependencies.configuration_status
     rpc_status = str(rpc_map.get("status", "unavailable"))
     gap_map = dependencies.risk_snapshot
@@ -1182,40 +1221,42 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
             "transaction_owner_configuration", performed=False,
             result=_role_result(role_configuration.transaction_owner_configured, role_configuration.transaction_owner_valid),
             source=role_configuration.transaction_owner_source,
-            authority="non_authoritative", blocker=role_configuration.blockers[0] if not role_configuration.transaction_owner_valid and role_configuration.blockers else None,
+            authority="non_authoritative", auth="not_applicable", schema="not_applicable",
+            blocker=role_configuration.blockers[0] if not role_configuration.transaction_owner_valid and role_configuration.blockers else None,
             purpose="explicit contest-owner transaction signer role",
         ),
         _evidence_status(
             "trading_account_configuration", performed=False,
             result=_role_result(role_configuration.trading_account_configured, role_configuration.trading_account_valid),
             source=role_configuration.trading_account_source,
-            authority="non_authoritative", purpose="authenticated trading account role",
+            authority="non_authoritative", auth="not_applicable", schema="not_applicable", purpose="authenticated trading account role",
         ),
         _evidence_status(
             "market_target_configuration", performed=False,
             result=_role_result(role_configuration.market_target_configured, role_configuration.market_target_valid),
             source=role_configuration.market_target_source,
             authority="authoritative" if role_configuration.market_target_valid else "non_authoritative",
+            auth="not_applicable", schema="not_applicable",
             typed_method="GET /markets", purpose="exact market/pool transaction target",
         ),
         _evidence_status(
             "owner_trading_role_separation", performed=False,
             result=("confirmed" if role_configuration.owner_trading_addresses_distinct else ("role_conflict" if role_configuration.transaction_owner_configured and role_configuration.trading_account_configured else "not_configured")),
-            source="role_binding", authority="non_authoritative",
+            source="role_binding", authority="non_authoritative", auth="not_applicable", schema="not_applicable",
             blocker="transaction_owner_trading_account_role_conflict" if role_configuration.transaction_owner_configured and role_configuration.trading_account_configured and not role_configuration.owner_trading_addresses_distinct else None,
             purpose="prevent owner/trading substitution",
         ),
         _evidence_status(
             "owner_target_role_separation", performed=False,
             result=("confirmed" if role_configuration.owner_target_addresses_distinct else ("role_conflict" if role_configuration.transaction_owner_valid and role_configuration.market_target_valid else "not_configured")),
-            source="role_binding", authority="non_authoritative",
+            source="role_binding", authority="non_authoritative", auth="not_applicable", schema="not_applicable",
             blocker="transaction_owner_market_target_role_conflict" if role_configuration.transaction_owner_valid and role_configuration.market_target_valid and not role_configuration.owner_target_addresses_distinct else None,
             purpose="prevent owner/target substitution",
         ),
         _evidence_status(
             "trading_target_role_separation", performed=False,
             result=("confirmed" if role_configuration.trading_target_addresses_distinct else ("role_conflict" if role_configuration.trading_account_valid and role_configuration.market_target_valid else "not_configured")),
-            source="role_binding", authority="non_authoritative",
+            source="role_binding", authority="non_authoritative", auth="not_applicable", schema="not_applicable",
             blocker="trading_account_market_target_role_conflict" if role_configuration.trading_account_valid and role_configuration.market_target_valid and not role_configuration.trading_target_addresses_distinct else None,
             purpose="prevent trading-account/target substitution",
         ),
@@ -1332,7 +1373,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         fair_play_status=fair_status,
         market_age_ms=market_age_ms,
         account_age_ms=account_age_ms,
-        network_read_call_count=public_calls + auth_calls + rpc_calls,
+        network_read_call_count=total_network_reads,
         source_authority="authoritative" if market_status == "available" and rules_available else "non_authoritative",
         market_identity_status=market_identity,
         account_identity_status=account_authority,
@@ -1358,6 +1399,11 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         public_market_call_count=public_calls,
         authenticated_account_call_count=auth_calls,
         read_only_rpc_call_count=rpc_calls,
+        public_market_snapshot_count=public_calls,
+        public_http_request_count=public_http_calls,
+        authenticated_http_request_count=authenticated_http_calls,
+        read_only_rpc_request_count=rpc_request_calls,
+        total_network_read_request_count=total_network_reads,
         projected_shocked_drawdown=projected_dd,
         maximum_total_fee_wei=rpc_map.get("maximum_total_fee_wei"),
         transaction_type=str(rpc_map.get("transaction_type", "unresolved")),
@@ -1573,6 +1619,11 @@ def _result(policy: DreamDexZeroMutationRehearsalPolicy, evidence: DreamDexZeroM
         public_market_call_count=evidence.public_market_call_count,
         authenticated_account_call_count=evidence.authenticated_account_call_count,
         read_only_rpc_call_count=evidence.read_only_rpc_call_count,
+        public_market_snapshot_count=evidence.public_market_snapshot_count,
+        public_http_request_count=evidence.public_http_request_count,
+        authenticated_http_request_count=evidence.authenticated_http_request_count,
+        read_only_rpc_request_count=evidence.read_only_rpc_request_count,
+        total_network_read_request_count=evidence.total_network_read_request_count,
         projected_shocked_drawdown=evidence.projected_shocked_drawdown,
         maximum_total_fee_wei=evidence.maximum_total_fee_wei,
         transaction_type=evidence.transaction_type,

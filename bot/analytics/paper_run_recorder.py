@@ -126,12 +126,16 @@ class PaperRunRecord:
     raffle_tickets: int = 0
 
     notes: list[str] = field(default_factory=list)
+    # Kept after the historical fields so positional construction remains
+    # compatible with older paper-run callers.
+    record_type: str = "iteration"
 
     def to_dict(self) -> dict[str, Any]:
         return serialize_value(
             {
                 "timestamp": self.timestamp,
                 "symbol": self.symbol,
+                "record_type": self.record_type,
                 "iteration_index": self.iteration_index,
                 "iteration_ok": self.iteration_ok,
                 "error_type": self.error_type,

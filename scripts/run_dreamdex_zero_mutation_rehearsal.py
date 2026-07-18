@@ -183,8 +183,12 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
              "pending_nonce", "native_gas_balance", "fee_data", "gas_estimate")
     statuses = tuple(DreamDexLiveReadOnlyEvidenceStatus(
         evidence_name=name, request_performed=True, source_category="fixture",
-        transport_status="confirmed", authentication_status="authenticated_success" if name in {"account_identity", "trading_balances", "open_orders", "recent_fills"} else "not_configured",
-        schema_status="confirmed", freshness_status="fresh", identity_status="confirmed",
+        transport_status="confirmed", authentication_status=(
+            "authenticated_success" if name in {"account_identity", "trading_balances", "open_orders", "recent_fills"}
+            else "not_applicable" if name in {"transaction_owner_configuration", "trading_account_configuration", "market_target_configuration", "owner_trading_role_separation", "owner_target_role_separation", "trading_target_role_separation"}
+            else "not_configured"
+        ),
+        schema_status=("not_applicable" if name in {"transaction_owner_configuration", "trading_account_configuration", "market_target_configuration", "owner_trading_role_separation", "owner_target_role_separation", "trading_target_role_separation"} else "confirmed"), freshness_status="fresh", identity_status="confirmed",
         authority_status="authoritative", result_status="confirmed") for name in names)
     configuration = DreamDexLiveReadOnlyConfigurationStatus(
         public_api_configured=True, rpc_configured=True,
@@ -215,6 +219,10 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         gas_estimate_status="available", fee_status="available", market_rules_status="available",
         runtime_gate_status="available", risk_status="available", fair_play_status="available",
         market_age_ms=0, account_age_ms=0, source_authority="authoritative", network_read_call_count=9,
+        public_market_call_count=1, authenticated_account_call_count=1, read_only_rpc_call_count=5,
+        public_market_snapshot_count=1, public_http_request_count=2,
+        authenticated_http_request_count=2, read_only_rpc_request_count=5,
+        total_network_read_request_count=9,
         market_identity_status="confirmed", account_identity_status="confirmed", trading_enabled=True,
         contract_code_present=True, pending_nonce=7, gas_estimate=21000, estimated_fee_wei=1000, maximum_total_fee_wei=1000, native_balance_wei=1000000,
         drawdown_fraction=Decimal("0"), preemptive_drawdown=Decimal("0.08"), hard_drawdown_limit=Decimal("0.10"), projected_shocked_drawdown=Decimal("0.02"),
@@ -290,6 +298,10 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
                                           public_endpoint_status=public_endpoint, rpc_endpoint_status=rpc_endpoint)
     market_source = MarketReadOnlySource(HttpGetTransport(base_url or PRODUCTION_BASE_URL), symbol)
     market_cache: dict[str, object] = {}
+    network_read_counts: dict[str, int] = {
+        "public_http": 0,
+        "authenticated_http": 0,
+    }
     account_cache: dict[str, object] = {}
     rpc = DreamDexReadOnlyRpcTransport(rpc_url) if rpc_url else None
     candidate_state: dict[str, bool] = {"ready": False}
@@ -309,7 +321,9 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
             # The rehearsal requires only the authoritative market list and
             # order book.  Avoid the optional recent-trades request so live
             # call order and scope stay explicit.
+            network_read_counts["public_http"] += 1
             metadata = market_source.metadata()
+            network_read_counts["public_http"] += 1
             market_cache["snapshot"] = MarketReadOnlySnapshot(
                 metadata, market_source.orderbook(), (), observed_at=metadata.observed_at
             )
@@ -461,7 +475,11 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
         public_market_reader=read_market,
         authenticated_account_reader=read_account,
         typed_rpc_preflight_reader=read_preflight,
-        safe_config={"required_market_symbol": symbol, "_candidate_state": candidate_state},
+        safe_config={
+            "required_market_symbol": symbol,
+            "_candidate_state": candidate_state,
+            "_network_read_counts": network_read_counts,
+        },
         configuration_status=configuration,
         address_role_configuration=initial_role_configuration,
         address_role_builder=build_roles,
@@ -546,9 +564,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"mode: {mode}")
     print("rehearsal execution performed: YES")
     labels = (
-        ("public market calls", "public_market_call_count"),
-        ("authenticated account calls", "authenticated_account_call_count"),
-        ("read-only RPC calls", "read_only_rpc_call_count"),
+        ("public logical snapshots", "public_market_snapshot_count"),
+        ("public HTTP requests", "public_http_request_count"),
+        ("authenticated HTTP requests", "authenticated_http_request_count"),
+        ("read-only RPC requests", "read_only_rpc_request_count"),
+        ("total network read requests", "total_network_read_request_count"),
         ("mutation RPC calls", "mutation_rpc_call_count"),
         ("production journal writes", "production_journal_write_performed"),
         ("chain confirmed", "chain_evidence_status"),
@@ -558,8 +578,7 @@ def main(argv: list[str] | None = None) -> int:
         ("market data authoritative", "source_authority"),
         ("account data authoritative", "account_authority_status"),
         ("account identity confirmed", "account_identity_status"),
-        ("balance evidence confirmed", "balance_status"),
-        ("native gas balance evidence", "native_gas_balance_evidence"),
+        ("owner native gas balance evidence", "native_gas_balance_evidence"),
         ("authenticated trading balance evidence", "authenticated_trading_balance_evidence"),
         ("available order currency balance", "available_order_currency_balance"),
         ("available base asset balance", "available_base_asset_balance"),
