@@ -305,7 +305,12 @@ def run_burn_in(
     now = clock or (lambda: datetime.now(timezone.utc))
     fetch = fetcher or (lambda url: fetch_json(url))
     started_at = now().astimezone(timezone.utc)
-    fingerprint = _run_fingerprint(config)
+    # The configuration fingerprint identifies the policy; a burn-in run must
+    # additionally bind its UTC start so separate sessions cannot be counted
+    # as the same campaign run.
+    fingerprint = sha256(
+        f"{_run_fingerprint(config)}:{started_at.isoformat()}".encode("utf-8")
+    ).hexdigest()
     path = output_path or (
         config.output_dir
         / f"paper_run_burn_in_{started_at.strftime('%Y%m%d_%H%M%S')}_{fingerprint[:12]}.jsonl"
