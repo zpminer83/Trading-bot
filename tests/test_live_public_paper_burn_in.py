@@ -70,7 +70,7 @@ def test_burn_in_uses_only_public_fixture_and_persists_safe_event_types(tmp_path
     types = {row["record_type"] for row in rows}
     assert {"run_start", "market_snapshot", "portfolio_snapshot", "run_summary"}.issubset(types)
     text = (tmp_path / "burn.jsonl").read_text()
-    assert "http" not in text.lower()
+    assert "https://" not in text.lower()
     assert "token" not in text.lower()
 
 

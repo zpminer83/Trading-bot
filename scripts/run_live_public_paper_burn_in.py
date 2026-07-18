@@ -24,6 +24,7 @@ from bot.market.market_data_service import MarketDataService
 from bot.risk.market_freshness import MarketFreshnessLimits
 from bot.risk.portfolio_risk_guard import PortfolioRiskLimits
 from bot.competition.fair_play_guard import FairPlayLimits
+from bot.execution.passive_fill_evidence import PassiveFillEvidenceTracker
 from scripts.check_dreamdex_orderbook_rest import (
     DEFAULT_BASE_URL,
     DEFAULT_DEPTH,
@@ -272,6 +273,12 @@ def _append_event(
     notes: list[str] | None = None,
 ) -> None:
     record = base or PaperRunRecord(timestamp=timestamp, symbol=symbol)
+    # Burn-in files carry a physical sequence independent of iteration index:
+    # one iteration can intentionally emit several typed audit records.
+    sequence_number = recorder.count + 1
+    fingerprint = getattr(base, "run_fingerprint", None)
+    if fingerprint is None:
+        fingerprint = path.stem.rsplit("_", 1)[-1]
     record = replace(
         record,
         timestamp=timestamp,
@@ -279,6 +286,8 @@ def _append_event(
         record_type=record_type,
         iteration_index=iteration_index,
         notes=list(notes or record.notes),
+        sequence_number=sequence_number,
+        run_fingerprint=fingerprint,
     )
     recorder.append_jsonl(path, record, sync_to_disk=True)
 
@@ -346,6 +355,7 @@ def run_burn_in(
         signal_limits=None,
         paper_risk_exit_enabled=False,
     )
+    fill_evidence_tracker = PassiveFillEvidenceTracker()
     # The public URL is deliberately never persisted or printed.  A caller can
     # still provide the repository's existing public base through the same
     # environment convention used by the read-only market script.
@@ -418,7 +428,18 @@ def run_burn_in(
                 result.minimum_spread = min(spreads)
                 result.maximum_spread = max(spreads)
 
+                open_orders_before_step = tuple(engine.broker.open_orders)
+                passive_fill_evidence = fill_evidence_tracker.observe(
+                    orders=open_orders_before_step,
+                    orderbook=snapshot.orderbook,
+                    observed_at=timestamp,
+                )
                 result_step = engine.step(timestamp=timestamp)
+                fill_evidence_tracker.synchronize(
+                    orders=tuple(engine.broker.open_orders),
+                    orderbook=snapshot.orderbook,
+                    observed_at=timestamp,
+                )
                 freshness = result_step.market_freshness_decision
                 safety = result_step.market_safety_decision
                 accepted = (freshness is None or freshness.fresh) and (safety is None or safety.safe)
@@ -441,7 +462,7 @@ def run_burn_in(
                     record = build_record(
                         timestamp=timestamp, symbol=config.symbol, snapshot=snapshot,
                         result=result_step, engine=engine, iteration_index=next_iteration,
-                        passive_fill_evidence=[],
+                        passive_fill_evidence=passive_fill_evidence,
                     )
                     _append_event(recorder, path, record_type="market_snapshot", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, base=record)
                     if result_step.intents:
@@ -528,15 +549,57 @@ def run_burn_in(
         result.blockers.append("fair_play_halted")
     result.blockers = list(dict.fromkeys(result.blockers))
     result.result = "PASS" if not result.blockers else "FAIL"
+    summary_metrics = {
+        "market_snapshots": result.public_logical_snapshots,
+        "accepted_snapshots": result.snapshots_accepted,
+        "rejected_snapshots": result.snapshots_rejected,
+        "stale_snapshots": result.stale_snapshots,
+        "crossed_books": result.crossed_books,
+        "malformed_snapshots": result.malformed_snapshots,
+        "strategy_intents": result.strategy_intents,
+        "risk_approved_intents": result.risk_approved_intents,
+        "risk_rejected_intents": result.risk_rejected_intents,
+        "fair_play_rejected_intents": result.fair_play_rejected_intents,
+        "paper_orders_created": result.paper_orders_created,
+        "paper_cancels": result.paper_cancels,
+        "paper_replacements": result.paper_replacements,
+        "partial_fills": result.simulated_partial_fills,
+        "full_fills": result.simulated_full_fills,
+        "halts": int(bool(result.blockers)),
+        "open_orders_after_shutdown": result.open_paper_orders,
+        "live_order_calls": result.live_order_calls,
+        "authenticated_http_requests": result.authenticated_http_requests,
+        "read_only_rpc_requests": result.read_only_rpc_requests,
+        "mutation_rpc_calls": result.mutation_rpc_calls,
+        "production_journal_writes": result.production_journal_writes,
+        "signer_calls": int(result.signer_invoked),
+        "submission_calls": int(result.submission_invoked),
+    }
+    summary_notes = [
+        f"result={result.result}",
+        *result.blockers,
+        *(f"audit.{key}={value}" for key, value in summary_metrics.items()),
+    ]
     summary = PaperRunRecord(
         timestamp=now().astimezone(timezone.utc), symbol=config.symbol, record_type="run_summary",
         iteration_index=next_iteration, iteration_ok=result.result == "PASS",
-        notes=[f"result={result.result}", *result.blockers],
+        notes=summary_notes,
         cash_balance=result.ending_cash, base_position=result.ending_inventory,
-        equity=result.ending_marked_equity, drawdown=result.maximum_drawdown,
+        equity=result.ending_marked_equity, peak_equity=result.peak_equity,
+        drawdown=result.maximum_drawdown,
+        risk_max_drawdown=Decimal("0.10"),
+        preemptive_drawdown=Decimal("0.08"),
         open_orders_count=result.open_paper_orders,
+        fees_paid=getattr(portfolio, "fees_paid", None),
+        projected_shocked_drawdown=result.gap_risk_maximum_projected_drawdown,
+        preemptive_halt_latched=result.preemptive_halt_triggered,
+        hard_kill_latched=result.hard_kill_triggered,
+        gap_risk_assumptions_available=result.gap_risk_maximum_projected_drawdown is not None,
     )
-    recorder.append_jsonl(path, summary, sync_to_disk=True)
+    _append_event(
+        recorder, path, record_type="run_summary", timestamp=summary.timestamp,
+        symbol=config.symbol, iteration_index=next_iteration, base=summary,
+    )
     return result
 
 

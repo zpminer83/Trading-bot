@@ -129,6 +129,16 @@ class PaperRunRecord:
     # Kept after the historical fields so positional construction remains
     # compatible with older paper-run callers.
     record_type: str = "iteration"
+    sequence_number: int = 0
+    run_fingerprint: str | None = None
+    peak_equity: Decimal | None = None
+    fees_paid: Decimal | None = None
+    reserved_exposure: Decimal | None = None
+    projected_shocked_drawdown: Decimal | None = None
+    preemptive_drawdown: Decimal | None = None
+    preemptive_halt_latched: bool | None = None
+    hard_kill_latched: bool | None = None
+    gap_risk_assumptions_available: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return serialize_value(
@@ -223,6 +233,7 @@ class PaperRunRecord:
                 "cash_balance": self.cash_balance,
                 "base_position": self.base_position,
                 "equity": self.equity,
+                "peak_equity": self.peak_equity,
                 "realized_pnl": self.realized_pnl,
                 "unrealized_pnl": self.unrealized_pnl,
                 "drawdown": self.drawdown,
@@ -231,6 +242,15 @@ class PaperRunRecord:
                 "estimated_score": self.estimated_score,
                 "raffle_tickets": self.raffle_tickets,
                 "notes": self.notes,
+                "sequence_number": self.sequence_number,
+                "run_fingerprint": self.run_fingerprint,
+                "fees_paid": self.fees_paid,
+                "reserved_exposure": self.reserved_exposure,
+                "projected_shocked_drawdown": self.projected_shocked_drawdown,
+                "preemptive_drawdown": self.preemptive_drawdown,
+                "preemptive_halt_latched": self.preemptive_halt_latched,
+                "hard_kill_latched": self.hard_kill_latched,
+                "gap_risk_assumptions_available": self.gap_risk_assumptions_available,
             }
         )
 

@@ -855,6 +855,17 @@ def build_record(
     signal = getattr(result, "orderbook_signal", None)
     depth_diagnostic = getattr(result, "orderbook_depth_diagnostics", None)
     evidence = passive_fill_evidence or []
+    projected_budgets = [
+        budget.projected_shocked_drawdown
+        for budget in getattr(result, "gap_risk_budgets", [])
+        if budget.projected_shocked_drawdown is not None
+    ]
+    projected_shocked_drawdown = max(projected_budgets) if projected_budgets else None
+    reserved_exposure = (
+        getattr(portfolio, "reserved_cash", Decimal("0"))
+        + getattr(portfolio, "reserved_base", Decimal("0"))
+        * (snapshot.mid_price or Decimal("0"))
+    )
     effective_exchange_age = (
         getattr(market_freshness, "effective_exchange_age_seconds", None)
         if market_freshness is not None
@@ -1003,6 +1014,7 @@ def build_record(
         cash_balance=portfolio.cash_balance,
         base_position=portfolio.base_position,
         equity=portfolio.equity,
+        peak_equity=getattr(portfolio, "peak_equity", portfolio.equity),
         realized_pnl=portfolio.realized_pnl,
         unrealized_pnl=portfolio.unrealized_pnl,
         drawdown=portfolio.drawdown,
@@ -1014,6 +1026,19 @@ def build_record(
             competition.estimated_score if competition is not None else Decimal("0")
         ),
         raffle_tickets=competition.raffle_tickets if competition is not None else 0,
+        fees_paid=getattr(portfolio, "fees_paid", None),
+        reserved_exposure=reserved_exposure,
+        projected_shocked_drawdown=projected_shocked_drawdown,
+        preemptive_drawdown=(
+            portfolio_risk.preemptive_drawdown if portfolio_risk is not None else None
+        ),
+        preemptive_halt_latched=(
+            portfolio_risk.entry_halt_latched if portfolio_risk is not None else None
+        ),
+        hard_kill_latched=(
+            portfolio_risk.latched if portfolio_risk is not None else None
+        ),
+        gap_risk_assumptions_available=bool(getattr(result, "gap_risk_budgets", [])),
     )
 
 
