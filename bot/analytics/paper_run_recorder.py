@@ -140,6 +140,21 @@ class PaperRunRecord:
     hard_kill_latched: bool | None = None
     gap_risk_assumptions_available: bool | None = None
 
+    # Fair-play incident evidence.  These fields are intentionally scalar and
+    # bounded; they carry decision metadata, never raw exchange payloads.
+    configuration_fingerprint: str | None = None
+    fair_play_reason_code: str | None = None
+    fair_play_normalized_reason: str | None = None
+    fair_play_trigger_metric: Decimal | None = None
+    fair_play_trigger_threshold: Decimal | None = None
+    fair_play_consecutive_rejections: int = 0
+    fair_play_affected_intent_id: str | int | None = None
+    fair_play_affected_order_id: str | int | None = None
+    fair_play_halt_reason: str | None = None
+    fair_play_open_orders_before_halt: int | None = None
+    fair_play_cancelled_orders_count: int | None = None
+    fair_play_inventory: Decimal | None = None
+
     def to_dict(self) -> dict[str, Any]:
         return serialize_value(
             {
@@ -251,6 +266,18 @@ class PaperRunRecord:
                 "preemptive_halt_latched": self.preemptive_halt_latched,
                 "hard_kill_latched": self.hard_kill_latched,
                 "gap_risk_assumptions_available": self.gap_risk_assumptions_available,
+                "configuration_fingerprint": self.configuration_fingerprint,
+                "fair_play_reason_code": self.fair_play_reason_code,
+                "fair_play_normalized_reason": self.fair_play_normalized_reason,
+                "fair_play_trigger_metric": self.fair_play_trigger_metric,
+                "fair_play_trigger_threshold": self.fair_play_trigger_threshold,
+                "fair_play_consecutive_rejections": self.fair_play_consecutive_rejections,
+                "fair_play_affected_intent_id": self.fair_play_affected_intent_id,
+                "fair_play_affected_order_id": self.fair_play_affected_order_id,
+                "fair_play_halt_reason": self.fair_play_halt_reason,
+                "fair_play_open_orders_before_halt": self.fair_play_open_orders_before_halt,
+                "fair_play_cancelled_orders_count": self.fair_play_cancelled_orders_count,
+                "fair_play_inventory": self.fair_play_inventory,
             }
         )
 

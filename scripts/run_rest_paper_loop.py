@@ -14,6 +14,7 @@ from bot.competition.confirmed_fill_ledger import (
     ConfirmedFillLedgerLimits,
 )
 from bot.competition.fair_play_guard import FairPlayGuard, FairPlayLimits
+from bot.analytics.paper_burn_in_fair_play_incident_analyzer import normalize_fair_play_reason
 from bot.competition.trade_intent_ledger import TradeIntentLedger
 from bot.core.conservative_paper_trading_engine import (
     ConservativePaperTradingEngine,
@@ -946,6 +947,27 @@ def build_record(
         ],
         fair_play_allowed=getattr(result, "fair_play_allowed", None),
         fair_play_reason=getattr(result, "fair_play_reason", None),
+        fair_play_reason_code=getattr(result, "fair_play_reason", None),
+        fair_play_normalized_reason=(
+            normalize_fair_play_reason(getattr(result, "fair_play_reason", None)).value
+            if getattr(result, "fair_play_reason", None)
+            else None
+        ),
+        fair_play_trigger_metric=(
+            Decimal(str(getattr(result, "near_flat_cycle_count", 0)))
+            if getattr(result, "fair_play_reason", None) == "near_flat_cycle_limit"
+            else Decimal(str(getattr(result, "short_window_round_trip_count", 0)))
+            if getattr(result, "fair_play_reason", None) == "short_window_round_trip"
+            else None
+        ),
+        fair_play_trigger_threshold=(
+            Decimal(str(getattr(getattr(engine, "fair_play_guard", None), "limits", None).max_completed_near_flat_cycles))
+            if getattr(result, "fair_play_reason", None) == "near_flat_cycle_limit"
+            and getattr(getattr(engine, "fair_play_guard", None), "limits", None) is not None
+            else Decimal("1")
+            if getattr(result, "fair_play_reason", None) == "short_window_round_trip"
+            else None
+        ),
         fair_play_latched=getattr(result, "fair_play_latched", None),
         fair_play_blocked_intents_count=getattr(
             result,

@@ -7,6 +7,11 @@ from pathlib import Path
 import pytest
 
 from bot.analytics.paper_burn_in_campaign_analyzer import analyze_paper_burn_in_campaign
+from scripts.run_live_public_paper_burn_in import (
+    BurnInConfiguration,
+    _configuration_fingerprint,
+    _run_fingerprint,
+)
 
 
 def _write_run(root: Path, name: str, *, fingerprint: str | None = None, symbol: str = "SOMI:USDso", duration_steps: int = 301, risk_limit: str = "0.10", privacy: bool = False, start_offset_minutes: int = 0) -> Path:
@@ -128,3 +133,10 @@ def test_path_traversal_and_cli_no_live_arguments(tmp_path):
     from scripts import analyze_paper_burn_in_campaign as cli
     with pytest.raises(SystemExit):
         cli.main(["--input", "one.jsonl", "--rpc-url", "https://example"])
+
+
+def test_configuration_fingerprint_is_stable_but_run_identity_is_unique(tmp_path):
+    config = BurnInConfiguration(output_dir=tmp_path)
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    assert _configuration_fingerprint(config) == _configuration_fingerprint(config)
+    assert _run_fingerprint(config, start) != _run_fingerprint(config, start)

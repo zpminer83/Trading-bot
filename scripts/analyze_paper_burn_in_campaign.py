@@ -87,6 +87,10 @@ def print_analysis(summary: PaperBurnInCampaignSummary) -> None:
     print(f"  market quality: {summary.market_quality_status}")
     print(f"  risk audit: {summary.risk_status}")
     print(f"  fair-play audit: {summary.fair_play_status}")
+    print(f"  fair-play enforcement: {fair.enforcement_status}")
+    print(f"  strategy fair-play compatibility: {fair.compatibility_status}")
+    print(f"  enforcement-failed runs: {fair.enforcement_fail_runs}")
+    print(f"  compatibility-failed runs: {fair.compatibility_fail_runs}")
     print(f"  privacy audit: {summary.privacy_status}")
     print(f"  live order calls: {summary.live_order_calls}")
     print(f"  authenticated calls: {summary.authenticated_calls}")
@@ -103,7 +107,7 @@ def print_analysis(summary: PaperBurnInCampaignSummary) -> None:
     print(f"  warnings: {', '.join(summary.warnings) or 'none'}")
     print("  run results:")
     for run in summary.runs:
-        print(f"    {run.input_file}: {run.result}; qualifying={'YES' if run.qualifying else 'NO'}; fills={run.analysis.execution.paper_fills}; pnl={_v(run.absolute_pnl)}; fees={_v(run.fees)}; ending_inventory={_v(run.ending_inventory)}; market={run.analysis.market_quality.status}; risk={run.analysis.risk.status}; fair={run.analysis.fair_play.status}")
+        print(f"    {run.input_file}: {run.result}; qualifying={'YES' if run.qualifying else 'NO'}; run_fp={run.fingerprint or 'unavailable'}; config_fp={run.configuration_fingerprint or 'unavailable'}; fills={run.analysis.execution.paper_fills}; pnl={_v(run.absolute_pnl)}; fees={_v(run.fees)}; ending_inventory={_v(run.ending_inventory)}; market={run.analysis.market_quality.status}; risk={run.analysis.risk.status}; fair_enforcement={run.fair_play_enforcement}; fair_compatibility={run.fair_play_compatibility}")
     if fair.reason_counts:
         print("  fair-play reasons:")
         for reason, count in sorted(fair.reason_counts.items()):

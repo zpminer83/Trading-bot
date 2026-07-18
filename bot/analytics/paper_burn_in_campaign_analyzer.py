@@ -7,7 +7,7 @@ JSONL records in its result models.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
@@ -16,6 +16,12 @@ from statistics import median
 from typing import Any, Mapping, Sequence
 
 from bot.analytics import paper_burn_in_analyzer as single
+from bot.analytics.paper_burn_in_fair_play_incident_analyzer import (
+    PaperBurnInFairPlayIncidentAnalysis,
+    PaperBurnInFairPlayReason,
+    analyze_paper_burn_in_fair_play_incident,
+    normalize_fair_play_reason,
+)
 
 
 MIN_RUN_DURATION_SECONDS = Decimal("1500")
@@ -28,7 +34,8 @@ CONFIGURED_ADVERSE_MOVE = Decimal("0.12")
 FAIR_PLAY_REASONS = frozenset({
     "rapid_round_trip", "repeated_near_flat_cycle", "excessive_cancel_replace",
     "repetitive_same_price_intent", "intent_fill_ratio", "insufficient_fill_evidence",
-    "artificial_volume_pattern", "undisclosed_filter_decision", "other_explicit_reason",
+    "artificial_volume_pattern", "undisclosed_filter_decision",
+    "consecutive_rejection_limit", "unknown_explicit_reason",
 })
 
 
@@ -110,6 +117,10 @@ class PaperBurnInCampaignRunResult:
     fair_play_max_consecutive_rejections: int = 0
     fill_timestamps: tuple[str, ...] = ()
     executed_prices: tuple[Decimal, ...] = ()
+    configuration_fingerprint: str | None = None
+    fair_play_incident: PaperBurnInFairPlayIncidentAnalysis | None = None
+    fair_play_enforcement: str = "PASS"
+    fair_play_compatibility: str = "PASS"
 
     @property
     def result(self) -> str:
@@ -220,6 +231,10 @@ class PaperBurnInCampaignFairPlayResult:
     rejection_clustering: bool = False
     fair_play_rejection_count: int = 0
     fair_play_halt_count: int = 0
+    enforcement_status: str = "PASS"
+    compatibility_status: str = "PASS"
+    enforcement_fail_runs: int = 0
+    compatibility_fail_runs: int = 0
     warnings: tuple[str, ...] = ()
     errors: tuple[str, ...] = ()
 
@@ -278,30 +293,15 @@ class PaperBurnInCampaignSummary:
 
 
 def _normalize_reason(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    if not text:
-        return "other_explicit_reason"
-    if "rapid" in text or "round_trip" in text:
-        return "rapid_round_trip"
-    if "near_flat" in text or "near flat" in text:
-        return "repeated_near_flat_cycle"
-    if "cancel" in text or "replace" in text:
-        return "excessive_cancel_replace"
-    if "same_price" in text or "same price" in text:
-        return "repetitive_same_price_intent"
-    if "ratio" in text:
-        return "intent_fill_ratio"
-    if "evidence" in text:
-        return "insufficient_fill_evidence"
-    if "volume" in text:
-        return "artificial_volume_pattern"
-    if "undisclosed" in text:
-        return "undisclosed_filter_decision"
-    return text if text in FAIR_PLAY_REASONS else "other_explicit_reason"
+    return normalize_fair_play_reason(value).value
 
 
 def _run_projection(path: Path, analysis: single.PaperBurnInAnalysisSummary, root: str | Path | None) -> PaperBurnInCampaignRunResult:
     records = _records(path)
+    try:
+        incident = analyze_paper_burn_in_fair_play_incident(path, repository_root=root)
+    except (OSError, ValueError):
+        incident = None
     times = [_utc(row.get("timestamp")) for row in records]
     times = [value for value in times if value is not None]
     portfolios = [row for row in records if row.get("record_type") == "portfolio_snapshot"]
@@ -365,6 +365,9 @@ def _run_projection(path: Path, analysis: single.PaperBurnInAnalysisSummary, roo
         and analysis.risk.status == "PASS"
         and analysis.fair_play.status == "PASS"
         and analysis.summary_counters_match is True
+        and (incident is None or incident.enforcement == "PASS")
+        and (incident is None or incident.strategy_compatibility == "PASS")
+        and not (incident is not None and incident.halt_sequence is not None)
     )
     rel = path.resolve().relative_to(Path(root or Path.cwd()).resolve()).as_posix()
     return PaperBurnInCampaignRunResult(
@@ -377,6 +380,10 @@ def _run_projection(path: Path, analysis: single.PaperBurnInAnalysisSummary, roo
         fair_play_max_consecutive_rejections=max_consecutive,
         fill_timestamps=tuple(sorted(fill_timestamps)),
         executed_prices=tuple(sorted(executed_prices)),
+        configuration_fingerprint=(incident.configuration_fingerprint if incident else None),
+        fair_play_incident=incident,
+        fair_play_enforcement=(incident.enforcement if incident else "PASS"),
+        fair_play_compatibility=(incident.strategy_compatibility if incident else "PASS"),
     )
 
 
@@ -489,7 +496,13 @@ def _fair(runs: Sequence[PaperBurnInCampaignRunResult], execution: PaperBurnInCa
         warnings.append("more_than_10_consecutive_fair_play_rejections")
     if any(run.analysis.fair_play.fair_play_halt for run in runs):
         warnings.append("fair_play_halt_present")
-    errors = ["fair_play_audit_failed"] if any(run.analysis.fair_play.status == "FAIL" for run in runs) else []
+    enforcement_fail_runs = sum(run.fair_play_enforcement != "PASS" for run in runs)
+    compatibility_fail_runs = sum(run.fair_play_compatibility != "PASS" for run in runs)
+    # A correctly enforced halt is not itself an enforcement failure.  It is a
+    # separate strategy-compatibility/non-qualification result.
+    errors = ["fair_play_enforcement_failed"] if enforcement_fail_runs else []
+    if compatibility_fail_runs:
+        warnings.append("strategy_fair_play_compatibility_failed")
     return PaperBurnInCampaignFairPlayResult(
         status="FAIL" if errors else "PASS", reason_counts=counts,
         reason_ratio_to_intents=(Decimal(total) / Decimal(execution.total_strategy_intents) if execution.total_strategy_intents else None),
@@ -497,6 +510,10 @@ def _fair(runs: Sequence[PaperBurnInCampaignRunResult], execution: PaperBurnInCa
         affected_runs=affected, maximum_consecutive_rejections=maximum,
         rejection_clustering=maximum > 1, fair_play_rejection_count=total,
         fair_play_halt_count=sum(run.analysis.fair_play.fair_play_halt for run in runs),
+        enforcement_status="FAIL" if enforcement_fail_runs else "PASS",
+        compatibility_status="FAIL" if compatibility_fail_runs else "PASS",
+        enforcement_fail_runs=enforcement_fail_runs,
+        compatibility_fail_runs=compatibility_fail_runs,
         warnings=tuple(warnings), errors=tuple(errors),
     )
 
@@ -568,14 +585,40 @@ def analyze_paper_burn_in_campaign(paths: Sequence[str | Path], *, repository_ro
     identity_errors: list[str] = []
     if len(fingerprints) != len(set(fingerprints)):
         identity_errors.append("duplicate_run_fingerprint")
+        # The first burn-in implementation used a short filename suffix as a
+        # fingerprint.  Preserve those files for audit, but never treat a
+        # repeated short identity as independent campaign evidence.
+        short_duplicates = {
+            fingerprint for fingerprint in fingerprints
+            if len(fingerprint) < 32 and all(char in "0123456789abcdef" for char in fingerprint.lower())
+        }
+        if short_duplicates:
+            identity_errors.append("legacy_non_unique_run_fingerprint")
+    if any(run.fingerprint is None for run in runs):
+        identity_errors.append("missing_run_fingerprint")
     if len(symbols) > 1:
         identity_errors.append("symbol_mismatch")
+    duplicate_fingerprints = {
+        fingerprint for fingerprint in fingerprints
+        if fingerprints.count(fingerprint) > 1
+    }
+    if duplicate_fingerprints or any(run.fingerprint is None for run in runs):
+        runs = tuple(
+            replace(
+                run,
+                qualifying=False
+                if run.fingerprint is None or run.fingerprint in duplicate_fingerprints
+                else run.qualifying,
+            )
+            for run in runs
+        )
     qualifying = [run for run in runs if run.qualifying]
     windows = [(run.run_start, run.run_end) for run in qualifying if run.run_start and run.run_end]
     for index, (start, end) in enumerate(windows):
         for other_start, other_end in windows[index + 1:]:
             if start < other_end and other_start < end:
                 identity_errors.append("overlapping_run_windows")
+                identity_errors.append("overlapping_run_window")
     initial_values = {run.initial_equity for run in qualifying if run.initial_equity is not None}
     if len(initial_values) > 1:
         identity_errors.append("initial_equity_policy_mismatch")
@@ -593,6 +636,11 @@ def analyze_paper_burn_in_campaign(paths: Sequence[str | Path], *, repository_ro
             identity_errors.append("run_analysis_failed")
         if run.result == "FAIL":
             identity_errors.append("run_declared_failure")
+        if run.fair_play_incident is not None:
+            if run.fair_play_incident.halt_sequence is not None:
+                identity_errors.append("fair_play_halt_non_qualifying")
+            if run.fair_play_incident.evidence_sufficiency != "SUFFICIENT":
+                identity_errors.append("fair_play_evidence_insufficient")
         if run.analysis.privacy_status == "FAIL":
             identity_errors.append("run_privacy_failed")
         if any((run.analysis.live_order_calls, run.analysis.authenticated_calls, run.analysis.rpc_calls, run.analysis.mutation_rpc_calls, run.analysis.journal_writes, run.analysis.signer_calls, run.analysis.submission_calls)) or run.analysis.real_submission_enabled:
@@ -608,6 +656,9 @@ def analyze_paper_burn_in_campaign(paths: Sequence[str | Path], *, repository_ro
     blockers = list(dict.fromkeys(identity_errors + market_blockers + list(risk.errors) + list(fair.errors)))
     insufficient = len(qualifying) < MIN_QUALIFYING_RUNS or any(run.result == "INSUFFICIENT_EVIDENCE" for run in runs)
     warnings = list(fair.warnings)
+    for run in runs:
+        if run.fair_play_incident is not None:
+            warnings.extend(run.fair_play_incident.warnings)
     if execution.strategy_activity in {"SPARSE_ACTIVITY", "LIMITED_ACTIVITY"}:
         warnings.append("strategy_activity_below_adequate")
     if blockers:

@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any, Callable, Mapping
+import uuid
 
 from bot.analytics.paper_run_recorder import PaperRunRecord, PaperRunRecorder
 from bot.market.market_cache import MarketCache
@@ -144,6 +145,7 @@ class BurnInResult:
     result: str = "FAIL"
     output_file: str = ""
     run_fingerprint: str = ""
+    configuration_fingerprint: str = ""
 
     def safe_dict(self) -> dict[str, Any]:
         payload = dict(self.__dict__)
@@ -243,7 +245,7 @@ def _safe_filename_symbol(symbol: str) -> str:
     return "".join(char if char.isalnum() else "_" for char in symbol)
 
 
-def _run_fingerprint(config: BurnInConfiguration) -> str:
+def _configuration_fingerprint(config: BurnInConfiguration) -> str:
     payload = {
         "symbol": config.symbol,
         "duration_minutes": str(config.duration_minutes),
@@ -252,6 +254,13 @@ def _run_fingerprint(config: BurnInConfiguration) -> str:
         "max_snapshots": config.max_snapshots,
     }
     return sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _run_fingerprint(config: BurnInConfiguration, started_at: datetime | None = None) -> str:
+    """Create a per-session identity independent of configuration identity."""
+    start = (started_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    run_id = uuid.uuid4().hex
+    return sha256(f"{run_id}:{start.isoformat()}:{config.symbol}".encode("utf-8")).hexdigest()
 
 
 def _relative_output_path(path: Path) -> str:
@@ -271,14 +280,21 @@ def _append_event(
     iteration_index: int = 0,
     base: PaperRunRecord | None = None,
     notes: list[str] | None = None,
+    configuration_fingerprint: str | None = None,
 ) -> None:
     record = base or PaperRunRecord(timestamp=timestamp, symbol=symbol)
     # Burn-in files carry a physical sequence independent of iteration index:
     # one iteration can intentionally emit several typed audit records.
     sequence_number = recorder.count + 1
-    fingerprint = getattr(base, "run_fingerprint", None)
+    latest = recorder.latest
+    fingerprint = getattr(base, "run_fingerprint", None) or getattr(latest, "run_fingerprint", None)
     if fingerprint is None:
         fingerprint = path.stem.rsplit("_", 1)[-1]
+    configuration = (
+        configuration_fingerprint
+        or getattr(base, "configuration_fingerprint", None)
+        or getattr(latest, "configuration_fingerprint", None)
+    )
     record = replace(
         record,
         timestamp=timestamp,
@@ -288,6 +304,7 @@ def _append_event(
         notes=list(notes or record.notes),
         sequence_number=sequence_number,
         run_fingerprint=fingerprint,
+        configuration_fingerprint=configuration,
     )
     recorder.append_jsonl(path, record, sync_to_disk=True)
 
@@ -308,9 +325,8 @@ def run_burn_in(
     # The configuration fingerprint identifies the policy; a burn-in run must
     # additionally bind its UTC start so separate sessions cannot be counted
     # as the same campaign run.
-    fingerprint = sha256(
-        f"{_run_fingerprint(config)}:{started_at.isoformat()}".encode("utf-8")
-    ).hexdigest()
+    configuration_fingerprint = _configuration_fingerprint(config)
+    fingerprint = _run_fingerprint(config, started_at)
     path = output_path or (
         config.output_dir
         / f"paper_run_burn_in_{started_at.strftime('%Y%m%d_%H%M%S')}_{fingerprint[:12]}.jsonl"
@@ -324,6 +340,12 @@ def run_burn_in(
         timestamp=started_at,
         symbol=config.symbol,
         notes=["paper_only", "public_market_data_only"],
+        base=PaperRunRecord(
+            timestamp=started_at,
+            symbol=config.symbol,
+            run_fingerprint=fingerprint,
+            configuration_fingerprint=configuration_fingerprint,
+        ),
     )
 
     market_cache = MarketCache()
@@ -374,9 +396,11 @@ def run_burn_in(
         blockers=[],
         output_file=_relative_output_path(path),
         run_fingerprint=fingerprint,
+        configuration_fingerprint=configuration_fingerprint,
     )
     spreads: list[Decimal] = []
     consecutive_failures = 0
+    fair_rejection_streak = 0
     previous_mid: Decimal | None = None
     previous_fingerprint: tuple[Any, ...] | None = None
     next_iteration = 1
@@ -464,10 +488,48 @@ def run_burn_in(
                 else:
                     result.snapshots_accepted += 1
                     consecutive_failures = 0
+                    if result_step.fair_play_blocked_intents_count:
+                        fair_rejection_streak += result_step.fair_play_blocked_intents_count
+                    else:
+                        fair_rejection_streak = 0
+                    cancelled = max(
+                        before_open - len(result_step.fills) - len(engine.broker.open_orders),
+                        0,
+                    )
                     record = build_record(
                         timestamp=timestamp, symbol=config.symbol, snapshot=snapshot,
                         result=result_step, engine=engine, iteration_index=next_iteration,
                         passive_fill_evidence=passive_fill_evidence,
+                    )
+                    record = replace(
+                        record,
+                        fair_play_consecutive_rejections=fair_rejection_streak,
+                        fair_play_affected_intent_id=(
+                            next(
+                                (
+                                    event.sequence_number
+                                    for event in result_step.trade_intent_events
+                                    if event.fair_play_allowed is False
+                                ),
+                                None,
+                            )
+                        ),
+                        fair_play_open_orders_before_halt=(
+                            before_open if result_step.fair_play_latched else None
+                        ),
+                        fair_play_cancelled_orders_count=(
+                            cancelled if result_step.fair_play_latched else None
+                        ),
+                        fair_play_halt_reason=(
+                            result_step.fair_play_reason
+                            if result_step.fair_play_latched
+                            else None
+                        ),
+                        fair_play_inventory=(
+                            engine.portfolio.base_position
+                            if result_step.fair_play_latched
+                            else None
+                        ),
                     )
                     _append_event(recorder, path, record_type="market_snapshot", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, base=record)
                     if result_step.intents:
@@ -488,7 +550,6 @@ def run_burn_in(
                     result.fair_play_rejected_intents += result_step.fair_play_blocked_intents_count
                     result.paper_orders_created += len(result_step.submitted_orders)
                     result.paper_replacements += int(before_open > 0 and bool(result_step.submitted_orders))
-                    cancelled = max(before_open - len(result_step.fills) - len(engine.broker.open_orders), 0)
                     result.paper_cancels += cancelled
                     for fill in result_step.fills:
                         source = engine.broker.source_order_for_fill(fill)
