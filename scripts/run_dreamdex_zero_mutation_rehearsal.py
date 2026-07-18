@@ -25,7 +25,10 @@ from bot.execution.dreamdex_zero_mutation_rehearsal import (
     collect_live_read_only_rehearsal_evidence_from_dependencies,
     run_zero_mutation_rehearsal,
 )
-from bot.execution.dreamdex_readonly_rpc import DreamDexReadOnlyRpcTransport
+from bot.execution.dreamdex_readonly_rpc import (
+    DreamDexReadOnlyRpcTransport,
+    PINNED_SOMNIA_MAINNET_RPC_URL,
+)
 from bot.integrations.dreamdex_authenticated_read_only import (
     PRODUCTION_BASE_URL,
     build_authenticated_read_only_transport_from_env,
@@ -35,6 +38,7 @@ from bot.integrations.dreamdex_read_only import (
     HttpGetTransport,
     HttpRpcTransport,
     MarketReadOnlySource,
+    MarketReadOnlySnapshot,
 )
 
 
@@ -150,10 +154,11 @@ def _safe_public_base(value: str | None, *, allow_local_fixture: bool = False) -
     return str(value).rstrip("/")
 
 
-def _safe_rpc_url(value: str | None, *, allow_local_fixture: bool = False) -> str | None:
+def _safe_rpc_url(value: str | None, *, allow_local_fixture: bool = False,
+                  source_name: str = "dedicated_read_only_env") -> str | None:
     if not value:
         return None
-    status = _endpoint_status(value, endpoint_type="rpc", source_name="dedicated_rpc_read_only", allow_local_fixture=allow_local_fixture)
+    status = _endpoint_status(value, endpoint_type="rpc", source_name=source_name, allow_local_fixture=allow_local_fixture)
     if not status.ready:
         return None
     return str(value).rstrip("/")
@@ -238,9 +243,18 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
     public_source = "dedicated_public_read_only" if public_override else ("dedicated_public_api" if public_api_override else "pinned_production")
     public_endpoint = _endpoint_status(raw_base, endpoint_type="public_api", source_name=public_source)
     base_url = _safe_public_base(raw_base)
-    raw_rpc = os.environ.get("DREAMDEX_READ_ONLY_RPC_URL") or os.environ.get("DREAMDEX_RPC_URL")
-    rpc_endpoint = _endpoint_status(raw_rpc, endpoint_type="rpc", source_name="dedicated_rpc_read_only" if os.environ.get("DREAMDEX_READ_ONLY_RPC_URL") else ("dedicated_rpc" if os.environ.get("DREAMDEX_RPC_URL") else "not_configured"))
-    rpc_url = _safe_rpc_url(raw_rpc)
+    dedicated_rpc = os.environ.get("DREAMDEX_READ_ONLY_RPC_URL")
+    dreamdex_rpc = os.environ.get("DREAMDEX_RPC_URL")
+    if dedicated_rpc:
+        raw_rpc, rpc_source = dedicated_rpc, "dedicated_read_only_env"
+    elif dreamdex_rpc:
+        raw_rpc, rpc_source = dreamdex_rpc, "dedicated_dreamdex_env"
+    else:
+        # The pinned endpoint is the only implicit RPC fallback and is used
+        # exclusively by the explicit live-read-only mode.
+        raw_rpc, rpc_source = PINNED_SOMNIA_MAINNET_RPC_URL, "pinned_somnia_mainnet"
+    rpc_endpoint = _endpoint_status(raw_rpc, endpoint_type="rpc", source_name=rpc_source)
+    rpc_url = _safe_rpc_url(raw_rpc, source_name=rpc_source)
     authenticated = build_authenticated_read_only_transport_from_env()
     configuration = _configuration_status(base_url=base_url, rpc_url=rpc_url or None, owner=owner or None,
                                           authenticated=authenticated, symbol=symbol,
@@ -255,7 +269,13 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
         if not configuration.ready_for_public:
             raise RuntimeError("public_api_configuration_unavailable")
         if "snapshot" not in market_cache:
-            market_cache["snapshot"] = market_source.snapshot()
+            # The rehearsal requires only the authoritative market list and
+            # order book.  Avoid the optional recent-trades request so live
+            # call order and scope stay explicit.
+            metadata = market_source.metadata()
+            market_cache["snapshot"] = MarketReadOnlySnapshot(
+                metadata, market_source.orderbook(), (), observed_at=metadata.observed_at
+            )
         return market_cache["snapshot"]
 
     def read_account():
@@ -298,56 +318,106 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
         except Exception:
             pool = None
         calls = 0
+        error_categories: dict[str, str] = {}
 
-        def call(method, fallback=None):
+        def call(name: str, method, fallback=None):
             nonlocal calls
             calls += 1
             try:
-                return method()
-            except Exception:
-                return fallback
+                return method(), "confirmed"
+            except Exception as exc:
+                text = str(exc).lower()
+                category = "timeout" if "timeout" in text else (
+                    "malformed_json_rpc" if any(token in text for token in ("json", "decode", "malformed")) else
+                    "http_status_error" if any(token in text for token in ("http", "status", "401", "403", "404", "500")) else
+                    "connection_failed")
+                error_categories[name] = category
+                return fallback, "transport_unavailable"
 
-        chain_id = call(rpc.get_chain_id)
-        code = call(lambda: rpc.get_contract_code(pool), None) if pool else None
-        pending_nonce = call(lambda: rpc.get_pending_nonce(owner)) if owner else None
-        nonce_status = "confirmed" if pending_nonce is not None else ("not_attempted_due_to_prerequisite" if not owner else "transport_unavailable")
-        if candidate_state["ready"] and pool and owner:
-            gas_estimate = call(lambda: rpc.estimate_gas({"from": owner, "to": pool, "value": "0x0", "data": "0x"}))
-            gas_estimate_status = "available" if gas_estimate is not None else "unavailable"
+        # The chain identity is the first live RPC call. A mismatch stops all
+        # subsequent target, fee, and account calls fail-closed.
+        chain_id, chain_status = call("eth_chainId", rpc.get_chain_id)
+        if chain_id != 5031:
+            return {
+                "status": "unavailable", "chain_id": chain_id,
+                "target_code_status": "not_attempted_due_to_prerequisite",
+                "contract_code_present": False,
+                "pending_nonce_status": "not_attempted_due_to_prerequisite", "pending_nonce": None,
+                "gas_estimate_status": "not_attempted_due_to_prerequisite", "gas_estimate": None,
+                "fee_status": "not_attempted_due_to_prerequisite", "fee_per_gas_wei": None,
+                "maximum_total_fee_wei": None,
+                "native_balance_status": "not_attempted_due_to_prerequisite", "native_balance_wei": None,
+                "transaction_type": "unresolved", "read_only_rpc_call_count": calls,
+                "call_statuses": {
+                    "chain_id": chain_status if chain_id is not None else "transport_unavailable",
+                    "target_code": "not_attempted_due_to_prerequisite",
+                    "pending_nonce": "not_attempted_due_to_prerequisite",
+                    "native_gas_balance": "not_attempted_due_to_prerequisite",
+                    "fee_data": "not_attempted_due_to_prerequisite",
+                    "gas_estimate": "not_attempted_due_to_prerequisite",
+                },
+                "rpc_error_categories": error_categories,
+            }
+
+        # Target code is only checked when a pool address was obtained from
+        # the public market metadata; no fallback address is inferred.
+        code = None
+        code_status = "not_attempted_due_to_prerequisite"
+        if pool:
+            code, code_status = call("eth_getCode", lambda: rpc.get_contract_code(pool), None)
+        code_present = code not in {None, "0x", "0x0"}
+        if pool and code is not None and not code_present:
+            code_status = "confirmed_unavailable_from_source"
+
+        # Fees do not require an account and are collected before optional
+        # address-scoped nonce and native-balance evidence.
+        gas_price, gas_price_status = call("eth_gasPrice", rpc.get_gas_price)
+        priority, priority_status = call("eth_maxPriorityFeePerGas", rpc.get_max_priority_fee_per_gas)
+        fee_per_gas = max((item for item in (gas_price, priority) if item is not None), default=None)
+        fee_status = "confirmed" if fee_per_gas is not None else (gas_price_status if gas_price_status != "confirmed" else priority_status)
+
+        pending_nonce = None
+        nonce_status = "not_attempted_due_to_prerequisite"
+        native_balance = None
+        native_status = "not_attempted_due_to_prerequisite"
+        if owner:
+            pending_nonce, nonce_status = call("eth_getTransactionCount", lambda: rpc.get_pending_nonce(owner))
+            native_balance, native_status = call("eth_getBalance", lambda: rpc.get_native_balance(owner))
+
+        if candidate_state["ready"] and pool and owner and code_present:
+            gas_estimate, gas_estimate_status = call(
+                "eth_estimateGas",
+                lambda: rpc.estimate_gas({"from": owner, "to": pool, "value": "0x0", "data": "0x"}),
+            )
+            gas_estimate_status = "confirmed" if gas_estimate is not None else gas_estimate_status
         else:
             gas_estimate = None
             gas_estimate_status = "not_attempted_due_to_prerequisite"
-        gas_price = call(rpc.get_gas_price)
-        priority = call(rpc.get_max_priority_fee_per_gas)
-        native_balance = call(lambda: rpc.get_native_balance(owner)) if owner else None
-        native_status = "confirmed" if native_balance is not None else ("not_attempted_due_to_prerequisite" if not owner else "transport_unavailable")
-        fee_per_gas = max((item for item in (gas_price, priority) if item is not None), default=None)
         maximum_fee = gas_estimate * fee_per_gas if gas_estimate is not None and fee_per_gas is not None else None
-        complete = all(value is not None for value in (chain_id, code, pending_nonce, gas_estimate, maximum_fee, native_balance))
+        complete = chain_id == 5031 and code_present and all(
+            value is not None for value in (pending_nonce, gas_estimate, maximum_fee, native_balance)
+        )
         return {
-            "status": "available" if complete else "unavailable",
-            "chain_id": chain_id,
-            "target_code_status": "available" if code not in {None, "0x", "0x0"} else "unavailable",
-            "contract_code_present": code not in {None, "0x", "0x0"},
-            "pending_nonce_status": "available" if pending_nonce is not None else nonce_status,
-            "pending_nonce": pending_nonce,
-            "gas_estimate_status": gas_estimate_status,
-            "gas_estimate": gas_estimate,
-            "fee_status": "available" if fee_per_gas is not None else "unavailable",
-            "fee_per_gas_wei": fee_per_gas,
-            "maximum_total_fee_wei": maximum_fee,
-            "native_balance_status": "available" if native_balance is not None else native_status,
+            "status": "available" if complete else "unavailable", "chain_id": chain_id,
+            "target_code_status": code_status if pool else "not_attempted_due_to_prerequisite",
+            "contract_code_present": code_present,
+            "pending_nonce_status": "confirmed" if pending_nonce is not None else nonce_status,
+            "pending_nonce": pending_nonce, "gas_estimate_status": gas_estimate_status,
+            "gas_estimate": gas_estimate, "fee_status": fee_status,
+            "fee_per_gas_wei": fee_per_gas, "maximum_total_fee_wei": maximum_fee,
+            "native_balance_status": "confirmed" if native_balance is not None else native_status,
             "native_balance_wei": native_balance,
             "transaction_type": "legacy" if gas_price is not None else "unresolved",
             "read_only_rpc_call_count": calls,
             "call_statuses": {
-                "chain_id": "confirmed" if chain_id is not None else "transport_unavailable",
-                "target_code": "confirmed" if code not in {None, "0x", "0x0"} else "transport_unavailable",
+                "chain_id": chain_status if chain_id is not None else "transport_unavailable",
+                "target_code": code_status,
                 "pending_nonce": "confirmed" if pending_nonce is not None else nonce_status,
                 "native_gas_balance": "confirmed" if native_balance is not None else native_status,
-                "fee_data": "confirmed" if fee_per_gas is not None else "transport_unavailable",
+                "fee_data": "confirmed" if fee_per_gas is not None else fee_status,
                 "gas_estimate": gas_estimate_status,
             },
+            "rpc_error_categories": error_categories,
         }
 
     return DreamDexLiveReadOnlyRehearsalDependencies(
@@ -519,6 +589,38 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{endpoint_label} redirects allowed: {display(endpoint.get('redirects_allowed', False))}")
         print(f"{endpoint_label} transport ready: {display(endpoint.get('transport_ready', False))}")
         print(f"{endpoint_label} blockers: {', '.join(endpoint.get('blockers', [])) or 'none'}")
+    print("LIVE READ-ONLY RPC EVIDENCE:")
+    print(f"RPC source: {configuration_data.get('rpc_endpoint_status', {}).get('source_name', 'unavailable')}")
+    print("endpoint syntax: " + display(configuration_data.get("rpc_endpoint_status", {}).get("syntax_valid", False)))
+    print("redirects allowed: NO")
+    print("retries: NO")
+    rpc_evidence = {item.get("evidence_name"): item for item in data.get("evidence_statuses", [])}
+    for label, key in (
+        ("chain performed", "chain_id"),
+        ("chain confirmed", "chain_id"),
+        ("code performed", "target_code"),
+        ("code confirmed", "target_code"),
+        ("nonce performed", "pending_nonce"),
+        ("nonce confirmed", "pending_nonce"),
+        ("native balance performed", "native_gas_balance"),
+        ("native balance confirmed", "native_gas_balance"),
+        ("fee performed", "fee_data"),
+        ("fee confirmed", "fee_data"),
+        ("gas request/status", "gas_estimate"),
+    ):
+        item = rpc_evidence.get(key, {})
+        if label.endswith("performed"):
+            value = "YES" if item.get("request_performed") else "NO"
+        elif label.endswith("confirmed"):
+            value = "YES" if item.get("result_status") == "confirmed" else "NO"
+        else:
+            value = item.get("result_status", "not_attempted_due_to_prerequisite")
+        print(f"{label}: {value}")
+    print(f"RPC call count: {data.get('read_only_rpc_call_count', 0)}")
+    print("mutation calls: 0")
+    print("signer calls: 0")
+    print("submission calls: 0")
+    print("Real submission enabled: NO")
     print("TRADING STATUS SOURCE AUDIT:")
     print("source | exact field/function | authority | auth | read-only | parser | usable")
     print("public_market | tradingEnabled/status in GET /markets | source-confirmed field | none | yes | supported | only when explicit")

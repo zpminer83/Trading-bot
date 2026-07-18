@@ -33,6 +33,8 @@ LIVE_ENDPOINT_TYPES = frozenset({"public_api", "rpc"})
 LIVE_ENDPOINT_SOURCE_NAMES = frozenset({
     "not_configured", "pinned_production", "dedicated_public_read_only",
     "dedicated_public_api", "dedicated_rpc_read_only", "dedicated_rpc",
+    "dedicated_read_only_env", "dedicated_dreamdex_env",
+    "pinned_somnia_mainnet", "unavailable",
 })
 LIVE_ENDPOINT_SCHEME_STATUSES = frozenset({"https", "local_fixture", "invalid", "unavailable"})
 
@@ -1040,6 +1042,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
                          typed_method="authenticated recent-fills source", purpose="fill authority"),
     ]
     call_statuses = rpc_map.get("call_statuses", {}) if isinstance(rpc_map.get("call_statuses", {}), Mapping) else {}
+    rpc_error_categories = rpc_map.get("rpc_error_categories", {}) if isinstance(rpc_map.get("rpc_error_categories", {}), Mapping) else {}
     def _rpc_call_status(name: str, value: Any, *, attempted_default: bool = True) -> DreamDexLiveReadOnlyEvidenceStatus:
         status = str(call_statuses.get(name, "confirmed" if value is not None else ("not_configured" if not configuration.rpc_configured else "transport_unavailable")))
         method_names = {
@@ -1062,7 +1065,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
                                 schema="confirmed" if value is not None else "schema_unsupported",
                                 authority="authoritative" if value is not None else "non_authoritative",
                                 typed_method=method_names.get(name), purpose=purposes.get(name),
-                                safe_error_category=None if value is not None else status)
+                                safe_error_category=None if value is not None else str(rpc_error_categories.get(name, status)))
     evidence_statuses.extend([
         _rpc_call_status("chain_id", rpc_map.get("chain_id")),
         _rpc_call_status("target_code", rpc_map.get("contract_code_present")),
@@ -1120,7 +1123,10 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         maximum_total_fee_wei=rpc_map.get("maximum_total_fee_wei"),
         transaction_type=str(rpc_map.get("transaction_type", "unresolved")),
         evidence_statuses=tuple(evidence_statuses),
-        native_gas_balance_evidence=("confirmed" if rpc_map.get("native_balance_wei") is not None else ("not_configured" if rpc is None else "transport_unavailable")),
+        native_gas_balance_evidence=(
+            "confirmed" if rpc_map.get("native_balance_wei") is not None else
+            str(rpc_map.get("native_balance_status", "not_configured"))
+        ),
         authenticated_trading_balance_evidence=("authentication_unavailable" if account is None else _balance_result(authenticated_balance, configured=True)),
         available_order_currency_balance=("authentication_unavailable" if account is None else _balance_result(order_currency, configured=True)),
         available_base_asset_balance=("authentication_unavailable" if account is None else _balance_result(base_asset, configured=True)),

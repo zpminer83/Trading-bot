@@ -18,6 +18,7 @@ from bot.execution.dreamdex_zero_mutation_rehearsal import (
     collect_live_read_only_rehearsal_evidence,
     run_zero_mutation_rehearsal,
 )
+from bot.execution.dreamdex_readonly_rpc import PINNED_SOMNIA_MAINNET_RPC_URL
 
 
 def test_live_evidence_status_is_typed_and_safe():
@@ -352,3 +353,54 @@ def test_fixture_cli_is_deterministic_and_live_mode_is_explicit(monkeypatch, cap
     assert "submission call count: 0" in live_output
     assert "private" not in live_output.lower()
     assert "token" not in live_output.lower()
+
+
+def test_live_rpc_configuration_uses_dedicated_priority_then_pinned(monkeypatch):
+    import scripts.run_dreamdex_zero_mutation_rehearsal as script
+
+    monkeypatch.delenv("DREAMDEX_READ_ONLY_RPC_URL", raising=False)
+    monkeypatch.delenv("DREAMDEX_RPC_URL", raising=False)
+    pinned = script._live_dependencies("SOMI:USDso")
+    assert pinned.configuration_status.rpc_endpoint_status.source_name == "pinned_somnia_mainnet"
+    assert PINNED_SOMNIA_MAINNET_RPC_URL.endswith("/")
+
+    monkeypatch.setenv("DREAMDEX_RPC_URL", PINNED_SOMNIA_MAINNET_RPC_URL)
+    dreamdex = script._live_dependencies("SOMI:USDso")
+    assert dreamdex.configuration_status.rpc_endpoint_status.source_name == "dedicated_dreamdex_env"
+    monkeypatch.setenv("DREAMDEX_READ_ONLY_RPC_URL", PINNED_SOMNIA_MAINNET_RPC_URL)
+    dedicated = script._live_dependencies("SOMI:USDso")
+    assert dedicated.configuration_status.rpc_endpoint_status.source_name == "dedicated_read_only_env"
+
+
+def test_live_typed_preflight_order_is_offline_and_account_optional(monkeypatch):
+    import scripts.run_dreamdex_zero_mutation_rehearsal as script
+
+    calls = []
+
+    class FakeRpc:
+        def get_chain_id(self): calls.append("eth_chainId"); return 5031
+        def get_contract_code(self, address): calls.append("eth_getCode"); return "0x6000"
+        def get_gas_price(self): calls.append("eth_gasPrice"); return 10
+        def get_max_priority_fee_per_gas(self): calls.append("eth_maxPriorityFeePerGas"); return 2
+        def get_pending_nonce(self, address): calls.append("eth_getTransactionCount"); return 1
+        def get_native_balance(self, address): calls.append("eth_getBalance"); return 100
+        def estimate_gas(self, call): calls.append("eth_estimateGas"); return 21000
+
+    class FakeMarketSource:
+        def __init__(self, *_args): pass
+        def metadata(self):
+            return SimpleNamespace(pool_contract="0x1111111111111111111111111111111111111111", observed_at=datetime.now(timezone.utc))
+        def orderbook(self):
+            return {"bids": [{"price": "1", "quantity": "1"}], "asks": [{"price": "2", "quantity": "1"}]}
+
+    monkeypatch.setattr(script, "DreamDexReadOnlyRpcTransport", lambda *_args, **_kwargs: FakeRpc())
+    monkeypatch.setattr(script, "MarketReadOnlySource", FakeMarketSource)
+    monkeypatch.delenv("DREAMDEX_READ_ONLY_OWNER_ADDRESS", raising=False)
+    monkeypatch.delenv("DREAMDEX_READ_ONLY_RPC_URL", raising=False)
+    monkeypatch.delenv("DREAMDEX_RPC_URL", raising=False)
+    dependencies = script._live_dependencies("SOMI:USDso")
+    result = dependencies.typed_rpc_preflight_reader()
+    assert calls == ["eth_chainId", "eth_getCode", "eth_gasPrice", "eth_maxPriorityFeePerGas"]
+    assert result["read_only_rpc_call_count"] == 4
+    assert result["pending_nonce_status"] == "not_attempted_due_to_prerequisite"
+    assert result["gas_estimate_status"] == "not_attempted_due_to_prerequisite"

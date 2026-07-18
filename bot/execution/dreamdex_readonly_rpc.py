@@ -14,6 +14,16 @@ from urllib.parse import urlsplit
 
 from bot.execution.dreamdex_unsigned_transaction import MAX_UINT256
 
+# Official Somnia Mainnet public RPC.  This is a non-secret, read-only
+# configuration fallback used only by the explicit live-read-only rehearsal.
+PINNED_SOMNIA_MAINNET_RPC_URL = "https://api.infra.mainnet.somnia.network/"
+RPC_CONFIGURATION_SOURCE_NAMES = frozenset({
+    "dedicated_read_only_env",
+    "dedicated_dreamdex_env",
+    "pinned_somnia_mainnet",
+    "unavailable",
+})
+
 ALLOWED_RPC_METHODS = frozenset({
     "eth_chainId", "eth_getCode", "eth_getTransactionCount", "eth_estimateGas",
     "eth_getBlockByNumber", "eth_gasPrice", "eth_maxPriorityFeePerGas",
@@ -365,6 +375,7 @@ DreamDexLatestBlockFeeEvidence = DreamDexRpcFeeBlock
 
 
 __all__ = [
+    "PINNED_SOMNIA_MAINNET_RPC_URL", "RPC_CONFIGURATION_SOURCE_NAMES",
     "ALLOWED_RPC_METHODS", "RPC_METHOD_ALLOWLIST", "MAX_RESPONSE_BODY_BYTES", "DreamDexRpcError",
     "DreamDexRpcFeeBlock", "DreamDexReadOnlyRpc", "DreamDexReadOnlyRpcTransport",
     "FixtureDreamDexReadOnlyRpcTransport", "HttpDreamDexReadOnlyRpcTransport", "DreamDexRpcTransport", "FixtureReadOnlyRpcTransport", "DreamDexLatestBlockFeeEvidence", "validate_rpc_response", "parse_rpc_quantity", "quantity_hex",
