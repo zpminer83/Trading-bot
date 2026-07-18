@@ -15,6 +15,13 @@ def _value(value):
     return value
 
 
+def _mask_fingerprint(value: str | None) -> str:
+    """Apply the repository's short hash masking policy for CLI output."""
+    if not value:
+        return "unavailable"
+    return value if value.startswith("<") else (value[:6] + "..." + value[-4:] if len(value) > 10 else "***")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Offline paper burn-in fair-play incident analysis",
@@ -36,8 +43,8 @@ def main(argv: list[str] | None = None) -> int:
         ("network access used", "YES" if result.network_access_used else "NO"),
         ("integrity", result.integrity),
         ("symbol", result.symbol or "unavailable"),
-        ("run fingerprint", result.run_fingerprint or "unavailable"),
-        ("configuration fingerprint", result.configuration_fingerprint or "unavailable"),
+        ("run fingerprint", _mask_fingerprint(result.run_fingerprint)),
+        ("configuration fingerprint", _mask_fingerprint(result.configuration_fingerprint)),
         ("first rejection sequence", result.first_rejection_sequence),
         ("last rejection sequence", result.last_rejection_sequence),
         ("halt sequence", result.halt_sequence),
@@ -47,9 +54,14 @@ def main(argv: list[str] | None = None) -> int:
         ("raw reason codes", ", ".join(f"{k}={v}" for k, v in result.reason_code_counts) or "none"),
         ("dominant reason", result.dominant_reason or "none"),
         ("dominant reason count", result.dominant_reason_count),
+        ("rejection reason distribution", ", ".join(f"{k}={v}" for k, v in result.rejection_reason_counts) or "none"),
+        ("halt trigger distribution", ", ".join(f"{k}={v}" for k, v in result.halt_trigger_counts) or "none"),
+        ("dominant halt trigger", result.dominant_halt_trigger or "none"),
         ("halt trigger", result.halt_trigger or "none"),
+        ("halt trigger code", result.halt_trigger_code or "none"),
         ("halt threshold", _value(result.halt_threshold) or "unavailable"),
         ("observed trigger value", _value(result.observed_trigger_value) or "unavailable"),
+        ("rejection streak at halt", result.halt_rejection_streak),
         ("paper orders open before halt", result.paper_orders_open_before_halt),
         ("paper orders cancelled by halt", result.paper_orders_cancelled_by_halt),
         ("rejected intents creating orders", result.rejected_intents_creating_orders),

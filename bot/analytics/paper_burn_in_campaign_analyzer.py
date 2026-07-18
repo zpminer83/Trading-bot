@@ -7,7 +7,7 @@ JSONL records in its result models.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
@@ -35,7 +35,8 @@ FAIR_PLAY_REASONS = frozenset({
     "rapid_round_trip", "repeated_near_flat_cycle", "excessive_cancel_replace",
     "repetitive_same_price_intent", "intent_fill_ratio", "insufficient_fill_evidence",
     "artificial_volume_pattern", "undisclosed_filter_decision",
-    "consecutive_rejection_limit", "unknown_explicit_reason",
+    "consecutive_rejection_limit", "opposite_side_cooldown", "unsupported_side",
+    "ok", "unknown_explicit_reason",
 })
 
 
@@ -114,6 +115,7 @@ class PaperBurnInCampaignRunResult:
     ending_inventory: Decimal | None = None
     maximum_abs_inventory: Decimal | None = None
     fair_play_rejection_reasons: tuple[tuple[str, int], ...] = ()
+    fair_play_halt_triggers: tuple[tuple[str, int], ...] = ()
     fair_play_max_consecutive_rejections: int = 0
     fill_timestamps: tuple[str, ...] = ()
     executed_prices: tuple[Decimal, ...] = ()
@@ -224,6 +226,10 @@ class PaperBurnInCampaignRiskResult:
 class PaperBurnInCampaignFairPlayResult:
     status: str
     reason_counts: dict[str, int]
+    halt_trigger_counts: dict[str, int] = field(default_factory=dict)
+    dominant_rejection_reason: str | None = None
+    dominant_halt_trigger: str | None = None
+    runs_halted_by_trigger: int = 0
     reason_ratio_to_intents: Decimal | None = None
     reason_ratio_to_decisions: Decimal | None = None
     affected_runs: int = 0
@@ -323,6 +329,7 @@ def _run_projection(path: Path, analysis: single.PaperBurnInAnalysisSummary, roo
     inventories = [_dec(row.get("base_position")) for row in portfolios]
     inventories = [value for value in inventories if value is not None]
     reasons: dict[str, int] = {}
+    halt_triggers: dict[str, int] = {}
     reject_sequence: list[bool] = []
     fill_timestamps: set[str] = set()
     executed_prices: set[Decimal] = set()
@@ -349,6 +356,11 @@ def _run_projection(path: Path, analysis: single.PaperBurnInAnalysisSummary, roo
             if rejected:
                 reason = _normalize_reason(intent.get("fair_play_reason"))
                 reasons[reason] = reasons.get(reason, 0) + 1
+    if incident is not None:
+        for reason, count in incident.rejection_reason_counts:
+            reasons.setdefault(reason, count)
+        for trigger, count in incident.halt_trigger_counts:
+            halt_triggers[trigger] = halt_triggers.get(trigger, 0) + count
     max_consecutive = 0
     current = 0
     for value in reject_sequence:
@@ -377,6 +389,7 @@ def _run_projection(path: Path, analysis: single.PaperBurnInAnalysisSummary, roo
         ending_inventory=inventories[-1] if inventories else None,
         maximum_abs_inventory=max((abs(value) for value in inventories), default=None),
         fair_play_rejection_reasons=tuple(sorted(reasons.items())),
+        fair_play_halt_triggers=tuple(sorted(halt_triggers.items())),
         fair_play_max_consecutive_rejections=max_consecutive,
         fill_timestamps=tuple(sorted(fill_timestamps)),
         executed_prices=tuple(sorted(executed_prices)),
@@ -481,9 +494,12 @@ def _execution(runs: Sequence[PaperBurnInCampaignRunResult], market: PaperBurnIn
 
 def _fair(runs: Sequence[PaperBurnInCampaignRunResult], execution: PaperBurnInCampaignExecutionResult) -> PaperBurnInCampaignFairPlayResult:
     counts: dict[str, int] = {}
+    halt_counts: dict[str, int] = {}
     for run in runs:
         for reason, count in run.fair_play_rejection_reasons:
             counts[reason] = counts.get(reason, 0) + count
+        for trigger, count in run.fair_play_halt_triggers:
+            halt_counts[trigger] = halt_counts.get(trigger, 0) + count
     total = sum(counts.values())
     maximum = max((run.fair_play_max_consecutive_rejections for run in runs), default=0)
     affected = sum(bool(run.fair_play_rejection_reasons) for run in runs)
@@ -505,6 +521,10 @@ def _fair(runs: Sequence[PaperBurnInCampaignRunResult], execution: PaperBurnInCa
         warnings.append("strategy_fair_play_compatibility_failed")
     return PaperBurnInCampaignFairPlayResult(
         status="FAIL" if errors else "PASS", reason_counts=counts,
+        halt_trigger_counts=halt_counts,
+        dominant_rejection_reason=(max(counts, key=counts.get) if counts else None),
+        dominant_halt_trigger=(max(halt_counts, key=halt_counts.get) if halt_counts else None),
+        runs_halted_by_trigger=sum(bool(run.fair_play_halt_triggers) for run in runs),
         reason_ratio_to_intents=(Decimal(total) / Decimal(execution.total_strategy_intents) if execution.total_strategy_intents else None),
         reason_ratio_to_decisions=(Decimal(total) / Decimal(execution.total_fair_play_approved_intents + total) if execution.total_fair_play_approved_intents + total else None),
         affected_runs=affected, maximum_consecutive_rejections=maximum,

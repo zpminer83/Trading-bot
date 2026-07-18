@@ -27,14 +27,17 @@ class PaperBurnInFairPlayReason(str, Enum):
     ARTIFICIAL_VOLUME_PATTERN = "artificial_volume_pattern"
     UNDISCLOSED_FILTER_DECISION = "undisclosed_filter_decision"
     CONSECUTIVE_REJECTION_LIMIT = "consecutive_rejection_limit"
+    OPPOSITE_SIDE_COOLDOWN = "opposite_side_cooldown"
+    UNSUPPORTED_SIDE = "unsupported_side"
+    OK = "ok"
     UNKNOWN_EXPLICIT_REASON = "unknown_explicit_reason"
 
 
 FAIR_PLAY_REASON_VALUES = frozenset(item.value for item in PaperBurnInFairPlayReason)
 
-# Explicit codes emitted by the current FairPlayGuard.  Cooldown is a local
-# pre-trade rejection, not proof of a round trip, so it is retained as an
-# unknown explicit code rather than being mislabeled.
+# Explicit codes emitted by the current FairPlayGuard.  The local cooldown is
+# intentionally its own taxonomy value: it is a pre-trade rejection and must
+# not be mislabeled as a confirmed round trip.
 FAIR_PLAY_REASON_MAP: dict[str, PaperBurnInFairPlayReason] = {
     "short_window_round_trip": PaperBurnInFairPlayReason.RAPID_ROUND_TRIP,
     "rapid_round_trip": PaperBurnInFairPlayReason.RAPID_ROUND_TRIP,
@@ -47,10 +50,12 @@ FAIR_PLAY_REASON_MAP: dict[str, PaperBurnInFairPlayReason] = {
     "artificial_volume_pattern": PaperBurnInFairPlayReason.ARTIFICIAL_VOLUME_PATTERN,
     "undisclosed_filter_decision": PaperBurnInFairPlayReason.UNDISCLOSED_FILTER_DECISION,
     "consecutive_rejection_limit": PaperBurnInFairPlayReason.CONSECUTIVE_REJECTION_LIMIT,
-    "opposite_side_cooldown": PaperBurnInFairPlayReason.UNKNOWN_EXPLICIT_REASON,
-    "unsupported_side": PaperBurnInFairPlayReason.UNKNOWN_EXPLICIT_REASON,
-    "ok": PaperBurnInFairPlayReason.UNKNOWN_EXPLICIT_REASON,
+    "opposite_side_cooldown": PaperBurnInFairPlayReason.OPPOSITE_SIDE_COOLDOWN,
+    "unsupported_side": PaperBurnInFairPlayReason.UNSUPPORTED_SIDE,
+    "ok": PaperBurnInFairPlayReason.OK,
 }
+
+KNOWN_FAIR_PLAY_REASON_CODES = frozenset(FAIR_PLAY_REASON_MAP)
 
 
 def normalize_fair_play_reason(value: Any) -> PaperBurnInFairPlayReason:
@@ -62,14 +67,15 @@ def normalize_fair_play_reason(value: Any) -> PaperBurnInFairPlayReason:
 
 
 def safe_reason_code(value: Any) -> str:
-    """Return a non-sensitive code category, never an arbitrary payload."""
+    """Return a bounded code/fingerprint without echoing unknown input."""
     code = str(value or "").strip().lower()
     if code in FAIR_PLAY_REASON_MAP:
         return code
     if not code:
         return "missing"
-    if re.fullmatch(r"[a-z0-9][a-z0-9_.:-]{0,79}", code):
-        return f"unknown_code:{code[:32]}"
+    # Unknown explicit strings are not part of the public taxonomy.  Hashing
+    # keeps records useful for grouping while preventing raw values from being
+    # echoed in analyzer output.
     return "unknown_code_hash:" + hashlib.sha256(code.encode("utf-8")).hexdigest()[:16]
 
 
@@ -105,11 +111,20 @@ class PaperBurnInFairPlayIncidentAnalysis:
     reason_code_counts: tuple[tuple[str, int], ...]
     dominant_reason: str | None
     dominant_reason_count: int
+    dominant_halt_trigger: str | None
+    dominant_halt_trigger_count: int
+    rejection_reason_counts: tuple[tuple[str, int], ...]
+    halt_trigger_counts: tuple[tuple[str, int], ...]
     halt_trigger: str | None
+    halt_trigger_code: str | None
     halt_threshold: Decimal | None
     observed_trigger_value: Decimal | None
+    halt_rejection_streak: int | None
+    affected_intent_id: str | int | None
     paper_orders_open_before_halt: int | None
     paper_orders_cancelled_by_halt: int | None
+    inventory_before_halt: Decimal | None
+    inventory_after_halt: Decimal | None
     rejected_intents_creating_orders: int
     rejected_intents_creating_fills: int
     normal_intents_after_halt: int
@@ -138,7 +153,7 @@ class PaperBurnInFairPlayIncidentAnalysis:
 
     @property
     def exit_code(self) -> int:
-        return {"PASS": 0, "INSUFFICIENT_RECORDED_EVIDENCE": 3}.get(self.result, 1)
+        return {"PASS": 0, "NO_INCIDENT": 0, "INSUFFICIENT_RECORDED_EVIDENCE": 3}.get(self.result, 1)
 
 
 _SENSITIVE_PATTERNS = (
@@ -146,6 +161,15 @@ _SENSITIVE_PATTERNS = (
     re.compile(r"authorization|bearer|cookie|\btoken\b|jwt|private[_ -]?key|seed|mnemonic|keystore", re.I),
     re.compile(r"0x[0-9a-f]{40}", re.I),
 )
+
+# Incident telemetry uses the same bounded BASE:QUOTE shape as the existing
+# paper market readers.  Keeping validation here prevents malformed text from
+# being treated as an authoritative symbol or leaking into CLI formatting.
+_SYMBOL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
+
+
+def _validated_symbol(value: Any) -> str | None:
+    return value if isinstance(value, str) and _SYMBOL_RE.fullmatch(value) else None
 
 
 def _dec(value: Any) -> Decimal | None:
@@ -242,14 +266,33 @@ def analyze_paper_burn_in_fair_play_incident(
     relative = safe.relative_to(root).as_posix()
     records, parse_errors, privacy_scan = _load(safe)
     ordered = sorted(enumerate(records), key=lambda pair: _sequence(pair[1], pair[0] + 1))
-    symbol_values = {str(row.get("symbol")) for _, row in ordered if row.get("symbol")}
-    symbol = next(iter(symbol_values), None) if len(symbol_values) <= 1 else None
+    raw_symbol_values = [row.get("symbol") for _, row in ordered if row.get("symbol") is not None]
+    if any(row.get("symbol") is None for _, row in ordered):
+        parse_errors.append("symbol_missing")
+    valid_symbol_values = {
+        symbol_value
+        for symbol_value in (_validated_symbol(value) for value in raw_symbol_values)
+        if symbol_value is not None
+    }
+    if any(_validated_symbol(value) is None for value in raw_symbol_values):
+        parse_errors.append("symbol_schema_invalid")
+    authoritative_rows = [
+        row for _, row in ordered if row.get("record_type") in {"run_start", "run_summary"}
+    ]
+    authoritative_symbols = {
+        symbol_value
+        for symbol_value in (_validated_symbol(row.get("symbol")) for row in authoritative_rows)
+        if symbol_value is not None
+    }
+    symbol_values = authoritative_symbols or valid_symbol_values
+    symbol = next(iter(symbol_values), None) if len(symbol_values) == 1 else None
+    if len(symbol_values) > 1 or (symbol is not None and valid_symbol_values != {symbol}):
+        parse_errors.append("symbol_mismatch")
+        symbol = None
     fingerprints = {str(row.get("run_fingerprint")) for _, row in ordered if row.get("run_fingerprint")}
     config_fingerprints = {str(row.get("configuration_fingerprint")) for _, row in ordered if row.get("configuration_fingerprint")}
     run_fingerprint = next(iter(fingerprints), None) if len(fingerprints) == 1 else None
     configuration_fingerprint = next(iter(config_fingerprints), None) if len(config_fingerprints) == 1 else None
-    if len(symbol_values) > 1:
-        parse_errors.append("symbol_mismatch")
     if len(fingerprints) > 1:
         parse_errors.append("run_fingerprint_mismatch")
     sequence_values = [_sequence(row, physical + 1) for physical, row in ordered]
@@ -258,13 +301,29 @@ def analyze_paper_burn_in_fair_play_incident(
     rejection_events: list[FairPlayRejectionEvidence] = []
     reasons: dict[str, int] = {}
     reason_codes: dict[str, int] = {}
+    halt_triggers: dict[str, int] = {}
     unknown_reason = False
     missing_reason = False
     for physical, row in ordered:
-        if row.get("record_type") != "strategy_intent":
-            continue
         events = row.get("trade_intent_events")
         if not isinstance(events, list):
+            events = []
+        # A fair_play_decision/market_snapshot may carry the bounded scalar
+        # rejection evidence even when the optional intent-event array is not
+        # present.  Use it only as a fallback to avoid double counting.
+        used_scalar_fallback = False
+        if not events and row.get("rejection_reason_code") and row.get("fair_play_allowed") is False:
+            events = [{
+                "fair_play_allowed": False,
+                "fair_play_reason": row.get("rejection_reason_code"),
+                "sequence_number": row.get("affected_intent_id"),
+            }]
+            used_scalar_fallback = True
+        if row.get("record_type") == "strategy_intent":
+            pass
+        elif used_scalar_fallback:
+            pass
+        else:
             continue
         for event in events:
             if not isinstance(event, Mapping) or event.get("fair_play_allowed") is not False:
@@ -291,6 +350,21 @@ def analyze_paper_burn_in_fair_play_incident(
                     consecutive_rejections=_int_field(row, "fair_play_consecutive_rejections") or 0,
                 )
             )
+    # Keep the two concepts independent.  A rejected intent can be caused by
+    # a cooldown while a later, separate fill can latch the session.
+    seen_halt_triggers: set[str] = set()
+    for physical, row in ordered:
+        raw_halt = (
+            row.get("halt_trigger_code")
+            or row.get("fair_play_halt_reason")
+            or (row.get("fair_play_reason") if row.get("fair_play_latched") is True else None)
+        )
+        if raw_halt:
+            normalized_halt = normalize_fair_play_reason(raw_halt).value
+            if normalized_halt in seen_halt_triggers:
+                continue
+            seen_halt_triggers.add(normalized_halt)
+            halt_triggers[normalized_halt] = halt_triggers.get(normalized_halt, 0) + 1
     # A row-level fair-play decision is the authoritative recorded latch point.
     halt_row: Mapping[str, Any] | None = next(
         (row for _, row in ordered if row.get("fair_play_latched") is True), None
@@ -298,16 +372,30 @@ def analyze_paper_burn_in_fair_play_incident(
     halt_sequence = _sequence(halt_row, 0) if halt_row is not None else None
     halt_timestamp = _timestamp(halt_row.get("timestamp")) if halt_row else None
     halt_code = (
-        (halt_row.get("fair_play_reason") or halt_row.get("fair_play_reason_code"))
+        (
+            halt_row.get("halt_trigger_code")
+            or halt_row.get("fair_play_halt_reason")
+            or halt_row.get("fair_play_reason")
+            or halt_row.get("fair_play_reason_code")
+        )
         if halt_row
         else None
     )
+    halt_trigger_code = safe_reason_code(halt_code) if halt_code else None
     halt_trigger = normalize_fair_play_reason(halt_code).value if halt_code else None
     observed: Decimal | None = None
     threshold: Decimal | None = None
     if halt_row is not None:
-        observed = _dec(halt_row.get("fair_play_trigger_metric"))
-        threshold = _dec(halt_row.get("fair_play_trigger_threshold"))
+        observed = _dec(
+            halt_row.get("halt_observed_value")
+            if halt_row.get("halt_observed_value") is not None
+            else halt_row.get("fair_play_trigger_metric")
+        )
+        threshold = _dec(
+            halt_row.get("halt_threshold")
+            if halt_row.get("halt_threshold") is not None
+            else halt_row.get("fair_play_trigger_threshold")
+        )
         if halt_trigger == PaperBurnInFairPlayReason.REPEATED_NEAR_FLAT_CYCLE.value:
             observed = observed or _dec(halt_row.get("near_flat_cycle_count"))
         elif halt_trigger == PaperBurnInFairPlayReason.RAPID_ROUND_TRIP.value:
@@ -377,7 +465,43 @@ def analyze_paper_burn_in_fair_play_incident(
     cancelled = None
     if before_open is not None and halt_row is not None:
         after = _int_field(halt_row, "open_orders_count")
-        cancelled = max(before_open - (after or 0), 0) if after is not None else None
+        explicit_cancelled = _int_field(halt_row, "paper_orders_cancelled_by_halt")
+        cancelled = (
+            explicit_cancelled
+            if explicit_cancelled is not None
+            else max(before_open - (after or 0), 0) if after is not None else None
+        )
+    elif halt_row is not None:
+        cancelled = _int_field(halt_row, "paper_orders_cancelled_by_halt")
+    halt_rejection_streak = (
+        _int_field(halt_row, "halt_rejection_streak") if halt_row is not None else None
+    )
+    if halt_rejection_streak is None and halt_row is not None:
+        halt_rejection_streak = _int_field(halt_row, "fair_play_consecutive_rejections")
+    affected_intent_id = (
+        _safe_identifier(halt_row.get("affected_intent_id"))
+        if halt_row is not None
+        else None
+    )
+    inventory_before_halt = (
+        _dec(halt_row.get("inventory_before_halt"))
+        if halt_row is not None
+        else None
+    )
+    inventory_after_halt = (
+        _dec(halt_row.get("inventory_after_halt"))
+        if halt_row is not None
+        else None
+    )
+    if inventory_after_halt is None and halt_row is not None:
+        inventory_after_halt = _dec(halt_row.get("fair_play_inventory"))
+    explicit_before_open = (
+        _int_field(halt_row, "open_orders_before_halt") if halt_row is not None else None
+    )
+    if explicit_before_open is None and halt_row is not None:
+        explicit_before_open = _int_field(halt_row, "fair_play_open_orders_before_halt")
+    if explicit_before_open is not None:
+        before_open = explicit_before_open
     missing: list[str] = []
     if run_fingerprint is None:
         missing.append("run_fingerprint")
@@ -385,8 +509,23 @@ def analyze_paper_burn_in_fair_play_incident(
         missing.append("fair_play_reason_code")
     if halt_row is not None and halt_trigger is None:
         missing.append("fair_play_reason")
+    # A no-halt run is a valid no-incident result; threshold evidence is only
+    # required when a halt was actually recorded.
     if halt_row is not None and threshold is None:
         missing.append("fair_play_trigger_threshold")
+    if halt_row is not None and observed is None:
+        missing.append("fair_play_trigger_metric")
+    if halt_row is not None:
+        if halt_sequence is None:
+            missing.append("halt_sequence")
+        if halt_timestamp is None:
+            missing.append("halt_timestamp")
+        if before_open is None:
+            missing.append("open_orders_before_halt")
+        if cancelled is None:
+            missing.append("paper_orders_cancelled_by_halt")
+        if ending_open is None:
+            missing.append("final_open_orders")
     blockers: list[str] = list(parse_errors)
     warnings: list[str] = []
     if unknown_reason:
@@ -421,6 +560,8 @@ def analyze_paper_burn_in_fair_play_incident(
         result = "INSUFFICIENT_RECORDED_EVIDENCE"
     elif enforcement == "FAIL" or compatibility == "FAIL":
         result = "FAIL"
+    elif halt_sequence is None:
+        result = "NO_INCIDENT"
     else:
         result = "PASS"
     relative = safe.relative_to(root).as_posix()
@@ -443,11 +584,22 @@ def analyze_paper_burn_in_fair_play_incident(
         reason_code_counts=tuple(sorted(reason_codes.items())),
         dominant_reason=max(reasons, key=reasons.get) if reasons else None,
         dominant_reason_count=max(reasons.values(), default=0),
+        dominant_halt_trigger=(
+            max(halt_triggers, key=halt_triggers.get) if halt_triggers else None
+        ),
+        dominant_halt_trigger_count=max(halt_triggers.values(), default=0),
+        rejection_reason_counts=tuple(sorted(reasons.items())),
+        halt_trigger_counts=tuple(sorted(halt_triggers.items())),
         halt_trigger=halt_trigger,
+        halt_trigger_code=halt_trigger_code,
         halt_threshold=threshold,
         observed_trigger_value=observed,
+        halt_rejection_streak=halt_rejection_streak,
+        affected_intent_id=affected_intent_id,
         paper_orders_open_before_halt=before_open,
         paper_orders_cancelled_by_halt=cancelled,
+        inventory_before_halt=inventory_before_halt,
+        inventory_after_halt=inventory_after_halt,
         rejected_intents_creating_orders=rejected_orders,
         rejected_intents_creating_fills=rejected_fills,
         normal_intents_after_halt=normal_after,

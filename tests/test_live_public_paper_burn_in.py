@@ -69,6 +69,9 @@ def test_burn_in_uses_only_public_fixture_and_persists_safe_event_types(tmp_path
     rows = [json.loads(line) for line in (tmp_path / "burn.jsonl").read_text().splitlines()]
     types = {row["record_type"] for row in rows}
     assert {"run_start", "market_snapshot", "portfolio_snapshot", "run_summary"}.issubset(types)
+    assert rows[0]["run_id_version"] == "uuid4-sha256-v1"
+    assert len({row["run_fingerprint"] for row in rows}) == 1
+    assert len({row["configuration_fingerprint"] for row in rows}) == 1
     text = (tmp_path / "burn.jsonl").read_text()
     assert "https://" not in text.lower()
     assert "token" not in text.lower()
@@ -101,3 +104,40 @@ def test_burn_in_can_classify_stale_snapshot_without_using_previous_data(tmp_pat
     assert result.snapshots_accepted == 0
     assert result.stale_snapshots == 1
     assert result.open_paper_orders == 0
+
+
+def test_sampling_attempts_have_one_terminal_market_record_and_count_rejects(tmp_path):
+    good = _payload(nonce="1")
+    bad = {"symbol": "SOMI:USDso", "bids": [], "asks": []}
+    calls = iter((good, bad, good))
+    result = burn.run_burn_in(
+        _config(tmp_path, max_snapshots=3),
+        fetcher=lambda _url: next(calls),
+        sleep_fn=lambda _seconds: None,
+        clock=lambda: datetime.now(timezone.utc),
+        monotonic=lambda: 0.0,
+        output_path=tmp_path / "attempts.jsonl",
+    )
+    rows = [json.loads(line) for line in (tmp_path / "attempts.jsonl").read_text().splitlines()]
+    terminal = [row for row in rows if row["record_type"] in {"market_snapshot", "market_reject"}]
+    assert result.sampling_attempts == 3
+    assert result.snapshots_accepted + result.snapshots_rejected == 3
+    assert len(terminal) == 3
+    assert [row["terminal_result"] for row in terminal] == ["accepted", "rejected", "accepted"]
+    assert all(row["attempt_number"] == index for index, row in enumerate(terminal, 1))
+    assert all(row["scheduled_timestamp"] and row["completed_timestamp"] for row in terminal)
+    assert result.public_logical_snapshots == result.public_http_requests == 3
+
+
+def test_unknown_rejection_reason_is_not_silently_classified(tmp_path, monkeypatch):
+    monkeypatch.setattr(burn, "validate_public_orderbook_payload", lambda *args, **kwargs: ("unexplained_condition", None))
+    result = burn.run_burn_in(
+        _config(tmp_path, max_snapshots=1),
+        fetcher=lambda _url: _payload(),
+        sleep_fn=lambda _seconds: None,
+        clock=lambda: datetime.now(timezone.utc),
+        monotonic=lambda: 0.0,
+        output_path=tmp_path / "unknown.jsonl",
+    )
+    assert result.other_explicit_rejects == 1
+    assert "unclassified_rejection_reason" in result.blockers

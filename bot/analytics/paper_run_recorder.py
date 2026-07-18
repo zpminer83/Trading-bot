@@ -155,6 +155,57 @@ class PaperRunRecord:
     fair_play_cancelled_orders_count: int | None = None
     fair_play_inventory: Decimal | None = None
 
+    # Explicit fair-play incident evidence.  These aliases keep rejection
+    # reasons separate from the independent session halt trigger and remain
+    # optional for old JSONL records.
+    rejection_reason_code: str | None = None
+    rejection_reason_normalized: str | None = None
+    rejection_trigger_metric: Decimal | None = None
+    rejection_threshold: Decimal | None = None
+    rejection_streak: int = 0
+    halt_trigger_code: str | None = None
+    halt_trigger_normalized: str | None = None
+    halt_observed_value: Decimal | None = None
+    halt_threshold: Decimal | None = None
+    halt_rejection_streak: int | None = None
+    affected_intent_id: str | int | None = None
+    open_orders_before_halt: int | None = None
+    paper_orders_cancelled_by_halt: int | None = None
+    inventory_before_halt: Decimal | None = None
+    inventory_after_halt: Decimal | None = None
+    run_id_version: str | None = None
+    attempt_number: int = 0
+    scheduled_timestamp: datetime | None = None
+    started_timestamp: datetime | None = None
+    completed_timestamp: datetime | None = None
+    transport_duration_seconds: Decimal | None = None
+    sampling_delay_seconds: Decimal | None = None
+    terminal_result: str | None = None
+    reject_reason: str | None = None
+    sampling_attempts: int = 0
+    accepted_snapshots: int = 0
+    rejected_snapshots: int = 0
+    duplicate_rejects: int = 0
+    stale_rejects: int = 0
+    crossed_rejects: int = 0
+    malformed_rejects: int = 0
+    transport_rejects: int = 0
+    schema_rejects: int = 0
+    identity_rejects: int = 0
+    other_explicit_rejects: int = 0
+    sampling_delay_events: int = 0
+    markets_endpoint_requests: int = 0
+    orderbook_endpoint_requests: int = 0
+    public_http_requests: int = 0
+    starting_cash: Decimal | None = None
+    starting_inventory: Decimal | None = None
+    ending_cash: Decimal | None = None
+    ending_inventory: Decimal | None = None
+    partial_fills: int = 0
+    full_fills: int = 0
+    actual_inventory_transitions: int = 0
+    portfolio_transitions_without_fill_evidence: int = 0
+
     def to_dict(self) -> dict[str, Any]:
         return serialize_value(
             {
@@ -278,6 +329,53 @@ class PaperRunRecord:
                 "fair_play_open_orders_before_halt": self.fair_play_open_orders_before_halt,
                 "fair_play_cancelled_orders_count": self.fair_play_cancelled_orders_count,
                 "fair_play_inventory": self.fair_play_inventory,
+                "rejection_reason_code": self.rejection_reason_code,
+                "rejection_reason_normalized": self.rejection_reason_normalized,
+                "rejection_trigger_metric": self.rejection_trigger_metric,
+                "rejection_threshold": self.rejection_threshold,
+                "rejection_streak": self.rejection_streak,
+                "halt_trigger_code": self.halt_trigger_code,
+                "halt_trigger_normalized": self.halt_trigger_normalized,
+                "halt_observed_value": self.halt_observed_value,
+                "halt_threshold": self.halt_threshold,
+                "halt_rejection_streak": self.halt_rejection_streak,
+                "affected_intent_id": self.affected_intent_id,
+                "open_orders_before_halt": self.open_orders_before_halt,
+                "paper_orders_cancelled_by_halt": self.paper_orders_cancelled_by_halt,
+                "inventory_before_halt": self.inventory_before_halt,
+                "inventory_after_halt": self.inventory_after_halt,
+                "run_id_version": self.run_id_version,
+                "attempt_number": self.attempt_number,
+                "scheduled_timestamp": self.scheduled_timestamp,
+                "started_timestamp": self.started_timestamp,
+                "completed_timestamp": self.completed_timestamp,
+                "transport_duration_seconds": self.transport_duration_seconds,
+                "sampling_delay_seconds": self.sampling_delay_seconds,
+                "terminal_result": self.terminal_result,
+                "reject_reason": self.reject_reason,
+                "sampling_attempts": self.sampling_attempts,
+                "accepted_snapshots": self.accepted_snapshots,
+                "rejected_snapshots": self.rejected_snapshots,
+                "duplicate_rejects": self.duplicate_rejects,
+                "stale_rejects": self.stale_rejects,
+                "crossed_rejects": self.crossed_rejects,
+                "malformed_rejects": self.malformed_rejects,
+                "transport_rejects": self.transport_rejects,
+                "schema_rejects": self.schema_rejects,
+                "identity_rejects": self.identity_rejects,
+                "other_explicit_rejects": self.other_explicit_rejects,
+                "sampling_delay_events": self.sampling_delay_events,
+                "markets_endpoint_requests": self.markets_endpoint_requests,
+                "orderbook_endpoint_requests": self.orderbook_endpoint_requests,
+                "public_http_requests": self.public_http_requests,
+                "starting_cash": self.starting_cash,
+                "starting_inventory": self.starting_inventory,
+                "ending_cash": self.ending_cash,
+                "ending_inventory": self.ending_inventory,
+                "partial_fills": self.partial_fills,
+                "full_fills": self.full_fills,
+                "actual_inventory_transitions": self.actual_inventory_transitions,
+                "portfolio_transitions_without_fill_evidence": self.portfolio_transitions_without_fill_evidence,
             }
         )
 

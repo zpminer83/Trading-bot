@@ -847,6 +847,8 @@ def build_record(
     engine: ConservativePaperTradingEngine,
     iteration_index: int = 0,
     passive_fill_evidence: list[PassiveFillEvidence] | None = None,
+    open_orders_before_step: int | None = None,
+    inventory_before_step: Decimal | None = None,
 ) -> PaperRunRecord:
     portfolio = engine.portfolio
     competition = engine.competition
@@ -877,6 +879,47 @@ def build_record(
         and market_freshness is not None
     ):
         effective_exchange_age = market_freshness.exchange_age_seconds
+
+    fair_play_decisions = list(getattr(result, "fair_play_decisions", []) or [])
+    rejection_decision = next(
+        (decision for decision in fair_play_decisions if not decision.allowed),
+        None,
+    )
+    fair_play_reason = getattr(result, "fair_play_reason", None)
+    fair_guard = getattr(engine, "fair_play_guard", None)
+    fair_limits = getattr(fair_guard, "limits", None)
+    is_halt = bool(getattr(result, "fair_play_latched", False))
+    rejection_code = rejection_decision.reason if rejection_decision is not None else None
+    rejection_normalized = (
+        normalize_fair_play_reason(rejection_code).value
+        if rejection_code else None
+    )
+    halt_code = fair_play_reason if is_halt else None
+    halt_normalized = normalize_fair_play_reason(halt_code).value if halt_code else None
+    rejection_metric = (
+        rejection_decision.seconds_since_opposite_fill
+        if rejection_decision is not None else None
+    )
+    rejection_threshold = (
+        getattr(fair_limits, "opposite_side_cooldown_seconds", None)
+        if rejection_code == "opposite_side_cooldown" else None
+    )
+    halt_metric = None
+    halt_threshold = None
+    if halt_code == "near_flat_cycle_limit":
+        halt_metric = Decimal(str(getattr(result, "near_flat_cycle_count", 0)))
+        halt_threshold = getattr(fair_limits, "max_completed_near_flat_cycles", None)
+    elif halt_code == "short_window_round_trip":
+        halt_metric = Decimal(str(getattr(result, "short_window_round_trip_count", 0)))
+        halt_threshold = Decimal("1")
+    elif halt_code == "consecutive_rejection_limit":
+        halt_metric = Decimal(str(getattr(result, "fair_play_blocked_intents_count", 0)))
+    open_before_halt = open_orders_before_step if is_halt else None
+    cancelled_by_halt = (
+        max((open_orders_before_step or 0) - len(engine.broker.open_orders), 0)
+        if is_halt and open_orders_before_step is not None else None
+    )
+    inventory_at_halt = inventory_before_step if is_halt else None
 
     return PaperRunRecord(
         timestamp=timestamp,
@@ -946,26 +989,26 @@ def build_record(
             for event in getattr(result, "confirmed_fill_events", [])
         ],
         fair_play_allowed=getattr(result, "fair_play_allowed", None),
-        fair_play_reason=getattr(result, "fair_play_reason", None),
-        fair_play_reason_code=getattr(result, "fair_play_reason", None),
+        fair_play_reason=fair_play_reason,
+        fair_play_reason_code=fair_play_reason,
         fair_play_normalized_reason=(
-            normalize_fair_play_reason(getattr(result, "fair_play_reason", None)).value
-            if getattr(result, "fair_play_reason", None)
+            normalize_fair_play_reason(fair_play_reason).value
+            if fair_play_reason
             else None
         ),
         fair_play_trigger_metric=(
             Decimal(str(getattr(result, "near_flat_cycle_count", 0)))
-            if getattr(result, "fair_play_reason", None) == "near_flat_cycle_limit"
+            if fair_play_reason == "near_flat_cycle_limit"
             else Decimal(str(getattr(result, "short_window_round_trip_count", 0)))
-            if getattr(result, "fair_play_reason", None) == "short_window_round_trip"
+            if fair_play_reason == "short_window_round_trip"
             else None
         ),
         fair_play_trigger_threshold=(
             Decimal(str(getattr(getattr(engine, "fair_play_guard", None), "limits", None).max_completed_near_flat_cycles))
-            if getattr(result, "fair_play_reason", None) == "near_flat_cycle_limit"
+            if fair_play_reason == "near_flat_cycle_limit"
             and getattr(getattr(engine, "fair_play_guard", None), "limits", None) is not None
             else Decimal("1")
-            if getattr(result, "fair_play_reason", None) == "short_window_round_trip"
+            if fair_play_reason == "short_window_round_trip"
             else None
         ),
         fair_play_latched=getattr(result, "fair_play_latched", None),
@@ -980,6 +1023,32 @@ def build_record(
             0,
         ),
         near_flat_cycle_count=getattr(result, "near_flat_cycle_count", 0),
+        rejection_reason_code=rejection_code,
+        rejection_reason_normalized=rejection_normalized,
+        rejection_trigger_metric=rejection_metric,
+        rejection_threshold=rejection_threshold,
+        rejection_streak=getattr(result, "fair_play_blocked_intents_count", 0),
+        halt_trigger_code=halt_code,
+        halt_trigger_normalized=halt_normalized,
+        halt_observed_value=halt_metric,
+        halt_threshold=halt_threshold,
+        halt_rejection_streak=(
+            getattr(result, "fair_play_blocked_intents_count", 0) if is_halt else None
+        ),
+        affected_intent_id=(
+            next(
+                (
+                    event.sequence_number
+                    for event in getattr(result, "trade_intent_events", [])
+                    if event.fair_play_allowed is False
+                ),
+                None,
+            ) if is_halt else None
+        ),
+        open_orders_before_halt=open_before_halt,
+        paper_orders_cancelled_by_halt=cancelled_by_halt,
+        inventory_before_halt=inventory_at_halt,
+        inventory_after_halt=(portfolio.base_position if is_halt else None),
         risk_exit_enabled=getattr(
             result,
             "risk_exit_enabled",
@@ -1174,6 +1243,9 @@ def run_iteration(
             orderbook=snapshot.orderbook,
             observed_at=now,
         )
+    else:
+        open_orders_before_step = tuple(engine.broker.open_orders)
+    inventory_before_step = engine.portfolio.base_position
 
     result = engine.step(timestamp=now)
 
@@ -1192,6 +1264,8 @@ def run_iteration(
         engine=engine,
         iteration_index=index,
         passive_fill_evidence=evidence,
+        open_orders_before_step=len(open_orders_before_step),
+        inventory_before_step=inventory_before_step,
     )
 
     persist_record(

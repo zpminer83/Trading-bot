@@ -138,6 +138,32 @@ def test_counter_mismatch_is_reported_without_mutating_file(tmp_path):
     assert path.read_bytes() == before
 
 
+def test_portfolio_transition_without_fill_evidence_fails_closed(tmp_path):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = [
+        _row("run_start", 1, start, cash_balance="150", starting_cash="150", starting_inventory="0"),
+        _row(
+            "portfolio_snapshot", 2, start + timedelta(seconds=1),
+            best_bid="1", best_ask="1.01", mid_price="1.005", spread="0.01",
+            cash_balance="150", base_position="0", equity="150", peak_equity="150", drawdown="0",
+            fees_paid="0", open_orders_count=0, portfolio_risk_allowed=True,
+            risk_max_drawdown="0.10",
+        ),
+        _row(
+            "portfolio_snapshot", 3, start + timedelta(seconds=2),
+            best_bid="1", best_ask="1.01", mid_price="1.005", spread="0.01",
+            cash_balance="149", base_position="1", equity="150.005", peak_equity="150.005", drawdown="0",
+            fees_paid="0", open_orders_count=0, portfolio_risk_allowed=True,
+            risk_max_drawdown="0.10",
+        ),
+        _row("run_summary", 4, start + timedelta(seconds=2), cash_balance="149", base_position="1", equity="150.005", drawdown="0", open_orders_count=0),
+    ]
+    result = analyze_paper_burn_in(_write(tmp_path, rows, "causality.jsonl"), repository_root=tmp_path)
+    assert result.portfolio_transitions_without_fill_evidence == 1
+    assert "portfolio_transition_without_fill_evidence" in result.blockers
+    assert result.portfolio_reconstruction == "FAIL"
+
+
 def test_portfolio_equity_peak_drawdown_and_fees_checks(tmp_path):
     values = dict(
         best_bid="1", best_ask="1.01", mid_price="1.005", spread="0.01",

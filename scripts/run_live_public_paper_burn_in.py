@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping
 import uuid
 
 from bot.analytics.paper_run_recorder import PaperRunRecord, PaperRunRecorder
+from bot.analytics.paper_burn_in_fair_play_incident_analyzer import normalize_fair_play_reason
 from bot.market.market_cache import MarketCache
 from bot.market.market_data_service import MarketDataService
 from bot.risk.market_freshness import MarketFreshnessLimits
@@ -146,6 +147,23 @@ class BurnInResult:
     output_file: str = ""
     run_fingerprint: str = ""
     configuration_fingerprint: str = ""
+    sampling_attempts: int = 0
+    duplicate_rejects: int = 0
+    stale_rejects: int = 0
+    crossed_rejects: int = 0
+    malformed_rejects: int = 0
+    transport_rejects: int = 0
+    schema_rejects: int = 0
+    identity_rejects: int = 0
+    other_explicit_rejects: int = 0
+    sampling_delay_events: int = 0
+    markets_endpoint_requests: int = 0
+    orderbook_endpoint_requests: int = 0
+    total_public_http_requests: int = 0
+    starting_cash: Decimal = Decimal("0")
+    starting_inventory: Decimal = Decimal("0")
+    actual_inventory_transitions: int = 0
+    portfolio_transitions_without_fill_evidence: int = 0
 
     def safe_dict(self) -> dict[str, Any]:
         payload = dict(self.__dict__)
@@ -160,19 +178,25 @@ class BurnInResult:
 
 def _safe_failure_reason(exc: BaseException) -> str:
     text = str(exc).lower()
-    for reason in (
-        "crossed_orderbook", "non_positive_depth", "missing_bid_or_ask",
-        "malformed_snapshot", "extreme_price_jump", "symbol_mismatch", "symbol_missing",
-    ):
-        if reason in text:
-            return reason
-    if "http" in text or "url" in text or "network" in text:
-        return "public_transport_failure"
-    if "json" in text or "decode" in text:
-        return "malformed_json"
-    if "symbol" in text:
-        return "symbol_mismatch"
-    return "validation_failure"
+    if any(token in text for token in ("timeout", "timed out", "connection", "network", "http")):
+        return "transport_failure"
+    if "duplicate" in text:
+        return "duplicate"
+    if "stale" in text or "freshness" in text:
+        return "stale"
+    if "cross" in text:
+        return "crossed"
+    if "schema" in text or "level" in text:
+        return "schema_failure"
+    if "symbol" in text or "identity" in text:
+        return "identity_failure"
+    if "extreme" in text:
+        return "extreme_jump"
+    if "json" in text or "decode" in text or "malformed" in text:
+        return "malformed"
+    if "missing_bid_or_ask" in text or "non_positive_depth" in text:
+        return "schema_failure"
+    return "other_explicit_reason"
 
 
 def _decimal(value: Any, name: str) -> Decimal:
@@ -295,6 +319,7 @@ def _append_event(
         or getattr(base, "configuration_fingerprint", None)
         or getattr(latest, "configuration_fingerprint", None)
     )
+    run_id_version = getattr(base, "run_id_version", None) or getattr(latest, "run_id_version", None)
     record = replace(
         record,
         timestamp=timestamp,
@@ -305,6 +330,7 @@ def _append_event(
         sequence_number=sequence_number,
         run_fingerprint=fingerprint,
         configuration_fingerprint=configuration,
+        run_id_version=run_id_version,
     )
     recorder.append_jsonl(path, record, sync_to_disk=True)
 
@@ -345,6 +371,11 @@ def run_burn_in(
             symbol=config.symbol,
             run_fingerprint=fingerprint,
             configuration_fingerprint=configuration_fingerprint,
+            run_id_version="uuid4-sha256-v1",
+            cash_balance=config.initial_equity,
+            equity=config.initial_equity,
+            starting_cash=config.initial_equity,
+            starting_inventory=Decimal("0"),
         ),
     )
 
@@ -397,6 +428,8 @@ def run_burn_in(
         output_file=_relative_output_path(path),
         run_fingerprint=fingerprint,
         configuration_fingerprint=configuration_fingerprint,
+        starting_cash=config.initial_equity,
+        starting_inventory=Decimal("0"),
     )
     spreads: list[Decimal] = []
     consecutive_failures = 0
@@ -410,6 +443,14 @@ def run_burn_in(
         start_mono = 0.0
     last_mono = start_mono
 
+    def read_monotonic() -> float:
+        try:
+            return float(monotonic())
+        except Exception:
+            return last_mono
+
+    next_deadline = start_mono
+
     def elapsed_seconds() -> Decimal:
         nonlocal last_mono
         try:
@@ -420,13 +461,27 @@ def run_burn_in(
 
     try:
         while next_iteration <= config.max_snapshots:
-            elapsed = elapsed_seconds()
+            now_mono = read_monotonic()
+            if next_iteration > 1:
+                delay = next_deadline - now_mono
+                if delay > 0:
+                    sleep_fn(delay)
+                    now_mono = read_monotonic()
+            sampling_delay = max(now_mono - next_deadline, 0.0)
+            elapsed = Decimal(str(max(0.0, now_mono - start_mono)))
             if next_iteration > 1 and elapsed >= config.duration_seconds:
                 break
-            timestamp = now().astimezone(timezone.utc)
+            scheduled_timestamp = now().astimezone(timezone.utc)
+            timestamp = scheduled_timestamp
+            attempt_started_timestamp = timestamp
+            attempt_start_mono = now_mono
             before_open = len(engine.broker.open_orders)
+            cash_before_step = engine.portfolio.cash_balance
+            inventory_before_step = engine.portfolio.base_position
             try:
                 response = fetch(url)
+                result.orderbook_endpoint_requests += 1
+                result.total_public_http_requests += 1
                 payload = extract_orderbook_payload(response=response, symbol=config.symbol)
                 reason, candidate_mid = validate_public_orderbook_payload(
                     payload, symbol=config.symbol, previous_mid=previous_mid
@@ -464,6 +519,13 @@ def run_burn_in(
                     observed_at=timestamp,
                 )
                 result_step = engine.step(timestamp=timestamp)
+                if engine.portfolio.base_position != inventory_before_step:
+                    result.actual_inventory_transitions += 1
+                if (
+                    engine.portfolio.base_position != inventory_before_step
+                    or engine.portfolio.cash_balance != cash_before_step
+                ) and not result_step.fills:
+                    result.portfolio_transitions_without_fill_evidence += 1
                 fill_evidence_tracker.synchronize(
                     orders=tuple(engine.broker.open_orders),
                     orderbook=snapshot.orderbook,
@@ -474,19 +536,45 @@ def run_burn_in(
                 accepted = (freshness is None or freshness.fresh) and (safety is None or safety.safe)
                 if not accepted:
                     result.snapshots_rejected += 1
+                    result.sampling_attempts += 1
                     reason_text = freshness.reason if freshness is not None and not freshness.fresh else safety.reason if safety is not None else "market_rejected"
+                    reason = _safe_failure_reason(ValueError(str(reason_text)))
                     if freshness is not None and not freshness.fresh:
                         result.stale_snapshots += 1
-                    if reason_text == "crossed_orderbook":
+                        result.stale_rejects += 1
+                    if reason in {"crossed", "crossed_orderbook"}:
                         result.crossed_books += 1
-                    _append_event(
-                        recorder, path, record_type="market_reject", timestamp=timestamp,
-                        symbol=config.symbol, iteration_index=next_iteration,
-                        notes=[reason_text],
+                        result.crossed_rejects += 1
+                    if reason == "other_explicit_reason":
+                        result.other_explicit_rejects += 1
+                    sampling_delay = max(sampling_delay, max(read_monotonic() - next_deadline, 0.0))
+                    reject_record = PaperRunRecord(
+                        timestamp=timestamp, symbol=config.symbol, record_type="market_reject",
+                        iteration_ok=False,
+                        iteration_index=next_iteration, sequence_number=recorder.count + 1,
+                        run_fingerprint=fingerprint, configuration_fingerprint=configuration_fingerprint,
+                        run_id_version="uuid4-sha256-v1", notes=[reason_text], reject_reason=reason,
+                        terminal_result="rejected", attempt_number=next_iteration,
+                        scheduled_timestamp=scheduled_timestamp, started_timestamp=attempt_started_timestamp,
+                        completed_timestamp=now().astimezone(timezone.utc),
+                        transport_duration_seconds=Decimal(str(max(0.0, read_monotonic() - attempt_start_mono))),
+                        sampling_delay_seconds=Decimal(str(sampling_delay)),
+                        sampling_delay_events=int(sampling_delay > float(config.sample_interval_seconds)),
+                        accepted_snapshots=result.snapshots_accepted,
+                        rejected_snapshots=result.snapshots_rejected,
+                        sampling_attempts=result.sampling_attempts,
+                        markets_endpoint_requests=result.markets_endpoint_requests,
+                        orderbook_endpoint_requests=1,
+                        public_http_requests=1,
+                        cash_balance=engine.portfolio.cash_balance, base_position=engine.portfolio.base_position,
+                        ending_cash=engine.portfolio.cash_balance, ending_inventory=engine.portfolio.base_position,
+                        equity=engine.portfolio.equity, starting_cash=result.starting_cash,
+                        starting_inventory=result.starting_inventory, open_orders_count=len(engine.broker.open_orders),
                     )
+                    _append_event(recorder, path, record_type="market_reject", timestamp=timestamp,
+                                  symbol=config.symbol, iteration_index=next_iteration, base=reject_record)
                     consecutive_failures += 1
                 else:
-                    result.snapshots_accepted += 1
                     consecutive_failures = 0
                     if result_step.fair_play_blocked_intents_count:
                         fair_rejection_streak += result_step.fair_play_blocked_intents_count
@@ -496,6 +584,7 @@ def run_burn_in(
                         before_open - len(result_step.fills) - len(engine.broker.open_orders),
                         0,
                     )
+                    sampling_delay = max(sampling_delay, max(read_monotonic() - next_deadline, 0.0))
                     record = build_record(
                         timestamp=timestamp, symbol=config.symbol, snapshot=snapshot,
                         result=result_step, engine=engine, iteration_index=next_iteration,
@@ -525,11 +614,126 @@ def run_burn_in(
                             if result_step.fair_play_latched
                             else None
                         ),
+                        rejection_reason_code=(
+                            next(
+                                (
+                                    decision.reason
+                                    for decision in result_step.fair_play_decisions
+                                    if not decision.allowed
+                                ),
+                                None,
+                            )
+                        ),
+                        rejection_reason_normalized=(
+                            normalize_fair_play_reason(
+                                next(
+                                    (
+                                        decision.reason
+                                        for decision in result_step.fair_play_decisions
+                                        if not decision.allowed
+                                    ),
+                                    None,
+                                )
+                            ).value
+                            if any(
+                                not decision.allowed
+                                for decision in result_step.fair_play_decisions
+                            )
+                            else None
+                        ),
+                        rejection_trigger_metric=(
+                            next(
+                                (
+                                    decision.seconds_since_opposite_fill
+                                    for decision in result_step.fair_play_decisions
+                                    if not decision.allowed
+                                ),
+                                None,
+                            )
+                        ),
+                        rejection_threshold=(
+                            fair_play_limits.opposite_side_cooldown_seconds
+                            if any(
+                                decision.reason == "opposite_side_cooldown"
+                                and not decision.allowed
+                                for decision in result_step.fair_play_decisions
+                            )
+                            else None
+                        ),
+                        rejection_streak=fair_rejection_streak,
+                        halt_trigger_code=(
+                            result_step.fair_play_reason
+                            if result_step.fair_play_latched
+                            else None
+                        ),
+                        halt_trigger_normalized=(
+                            normalize_fair_play_reason(result_step.fair_play_reason).value
+                            if result_step.fair_play_latched
+                            else None
+                        ),
+                        halt_observed_value=(
+                            Decimal(str(result_step.near_flat_cycle_count))
+                            if result_step.fair_play_reason == "near_flat_cycle_limit"
+                            else Decimal(str(result_step.short_window_round_trip_count))
+                            if result_step.fair_play_reason == "short_window_round_trip"
+                            else None
+                        ),
+                        halt_threshold=(
+                            Decimal(str(fair_play_limits.max_completed_near_flat_cycles))
+                            if result_step.fair_play_reason == "near_flat_cycle_limit"
+                            else Decimal("1")
+                            if result_step.fair_play_reason == "short_window_round_trip"
+                            else None
+                        ),
+                        halt_rejection_streak=(
+                            fair_rejection_streak
+                            if result_step.fair_play_latched
+                            else None
+                        ),
+                        open_orders_before_halt=(
+                            before_open if result_step.fair_play_latched else None
+                        ),
+                        paper_orders_cancelled_by_halt=(
+                            cancelled if result_step.fair_play_latched else None
+                        ),
+                        inventory_before_halt=(
+                            inventory_before_step
+                            if result_step.fair_play_latched
+                            else None
+                        ),
+                        inventory_after_halt=(
+                            engine.portfolio.base_position
+                            if result_step.fair_play_latched
+                            else None
+                        ),
                         fair_play_inventory=(
                             engine.portfolio.base_position
                             if result_step.fair_play_latched
                             else None
                         ),
+                        attempt_number=next_iteration,
+                        scheduled_timestamp=scheduled_timestamp,
+                        started_timestamp=attempt_started_timestamp,
+                        completed_timestamp=now().astimezone(timezone.utc),
+                        transport_duration_seconds=Decimal(str(max(0.0, read_monotonic() - attempt_start_mono))),
+                        sampling_delay_seconds=Decimal(str(sampling_delay)),
+                        sampling_delay_events=int(sampling_delay > float(config.sample_interval_seconds)),
+                        terminal_result="accepted",
+                        reject_reason=None,
+                        accepted_snapshots=result.snapshots_accepted + 1,
+                        rejected_snapshots=result.snapshots_rejected,
+                        sampling_attempts=result.sampling_attempts + 1,
+                        markets_endpoint_requests=result.markets_endpoint_requests,
+                        orderbook_endpoint_requests=1,
+                        public_http_requests=1,
+                        starting_cash=result.starting_cash,
+                        starting_inventory=result.starting_inventory,
+                        ending_cash=engine.portfolio.cash_balance,
+                        ending_inventory=engine.portfolio.base_position,
+                        partial_fills=result.simulated_partial_fills,
+                        full_fills=result.simulated_full_fills,
+                        actual_inventory_transitions=result.actual_inventory_transitions,
+                        portfolio_transitions_without_fill_evidence=result.portfolio_transitions_without_fill_evidence,
                     )
                     _append_event(recorder, path, record_type="market_snapshot", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, base=record)
                     if result_step.intents:
@@ -543,6 +747,10 @@ def run_burn_in(
                     if result_step.fills:
                         _append_event(recorder, path, record_type="paper_fill", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, base=record)
                     _append_event(recorder, path, record_type="portfolio_snapshot", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, base=record)
+
+                    result.snapshots_accepted += 1
+                    result.sampling_attempts += 1
+                    result.sampling_delay_events += int(sampling_delay > float(config.sample_interval_seconds))
 
                     result.strategy_intents += len(result_step.intents)
                     result.risk_approved_intents += sum(decision.approved for decision in result_step.decisions)
@@ -566,22 +774,61 @@ def run_burn_in(
                         result.gap_risk_maximum_projected_drawdown = max(projected + ([result.gap_risk_maximum_projected_drawdown] if result.gap_risk_maximum_projected_drawdown is not None else []))
             except Exception as exc:
                 reason = _safe_failure_reason(exc)
+                # Every fetch attempt is one public order-book request, even
+                # when transport or schema validation fails before a snapshot
+                # can be accepted.
+                if result.total_public_http_requests < result.sampling_attempts + 1:
+                    result.orderbook_endpoint_requests += 1
+                    result.total_public_http_requests += 1
                 result.snapshots_rejected += 1
-                if reason == "malformed_json" or reason in {"malformed_snapshot", "non_positive_depth", "missing_bid_or_ask"}:
+                result.sampling_attempts += 1
+                if reason == "malformed":
                     result.malformed_snapshots += 1
-                if reason == "crossed_orderbook":
+                    result.malformed_rejects += 1
+                if reason == "crossed":
                     result.crossed_books += 1
-                if reason == "extreme_price_jump":
+                    result.crossed_rejects += 1
+                if reason == "extreme_jump":
                     result.extreme_jump_rejections += 1
+                if reason == "duplicate": result.duplicate_rejects += 1
+                if reason == "stale": result.stale_rejects += 1
+                if reason == "transport_failure": result.transport_rejects += 1
+                if reason == "schema_failure": result.schema_rejects += 1
+                if reason == "identity_failure": result.identity_rejects += 1
+                if reason == "other_explicit_reason": result.other_explicit_rejects += 1
+                sampling_delay = max(sampling_delay, max(read_monotonic() - next_deadline, 0.0))
+                result.sampling_delay_events += int(sampling_delay > float(config.sample_interval_seconds))
                 consecutive_failures += 1
-                _append_event(recorder, path, record_type="market_reject", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, notes=[reason])
+                reject_record = PaperRunRecord(
+                    timestamp=timestamp, symbol=config.symbol, record_type="market_reject",
+                    iteration_ok=False,
+                    iteration_index=next_iteration, sequence_number=recorder.count + 1,
+                    run_fingerprint=fingerprint, configuration_fingerprint=configuration_fingerprint,
+                    run_id_version="uuid4-sha256-v1", notes=[reason], reject_reason=reason,
+                    terminal_result="rejected", attempt_number=next_iteration,
+                    scheduled_timestamp=scheduled_timestamp, started_timestamp=attempt_started_timestamp,
+                    completed_timestamp=now().astimezone(timezone.utc),
+                    transport_duration_seconds=Decimal(str(max(0.0, read_monotonic() - attempt_start_mono))),
+                    sampling_delay_seconds=Decimal(str(sampling_delay)),
+                    sampling_delay_events=int(sampling_delay > float(config.sample_interval_seconds)),
+                    accepted_snapshots=result.snapshots_accepted,
+                    rejected_snapshots=result.snapshots_rejected,
+                    sampling_attempts=result.sampling_attempts,
+                    markets_endpoint_requests=result.markets_endpoint_requests,
+                    orderbook_endpoint_requests=1,
+                    public_http_requests=1,
+                    cash_balance=engine.portfolio.cash_balance, base_position=engine.portfolio.base_position,
+                    ending_cash=engine.portfolio.cash_balance, ending_inventory=engine.portfolio.base_position,
+                    equity=engine.portfolio.equity, starting_cash=config.initial_equity,
+                    starting_inventory=Decimal("0"), open_orders_count=len(engine.broker.open_orders),
+                )
+                _append_event(recorder, path, record_type="market_reject", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, base=reject_record)
             if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                 result.blockers.append("consecutive_market_failures")
                 _append_event(recorder, path, record_type="halt", timestamp=timestamp, symbol=config.symbol, iteration_index=next_iteration, notes=["consecutive_market_failures"])
                 break
             next_iteration += 1
-            if next_iteration <= config.max_snapshots:
-                sleep_fn(float(config.sample_interval_seconds))
+            next_deadline = max(next_deadline + float(config.sample_interval_seconds), read_monotonic() + float(config.sample_interval_seconds))
     except Exception:
         result.blockers.append("unhandled_exception")
     finally:
@@ -603,7 +850,7 @@ def run_burn_in(
     result.maximum_drawdown = portfolio.drawdown
     result.duration_completed_seconds = elapsed_seconds()
     result.public_logical_snapshots = result.snapshots_accepted + result.snapshots_rejected
-    result.public_http_requests = result.public_logical_snapshots
+    result.public_http_requests = result.total_public_http_requests
     result.total_network_read_requests = result.public_http_requests
     if result.snapshots_accepted == 0:
         result.blockers.append("no_accepted_public_snapshots")
@@ -613,15 +860,32 @@ def run_burn_in(
         result.blockers.append("hard_risk_kill_triggered")
     if result.fair_play_halt_triggered:
         result.blockers.append("fair_play_halted")
+    if result.other_explicit_rejects:
+        result.blockers.append("unclassified_rejection_reason")
+    if result.portfolio_transitions_without_fill_evidence:
+        result.blockers.append("portfolio_transition_without_fill_evidence")
     result.blockers = list(dict.fromkeys(result.blockers))
     result.result = "PASS" if not result.blockers else "FAIL"
     summary_metrics = {
         "market_snapshots": result.public_logical_snapshots,
+        "sampling_attempts": result.sampling_attempts,
         "accepted_snapshots": result.snapshots_accepted,
         "rejected_snapshots": result.snapshots_rejected,
         "stale_snapshots": result.stale_snapshots,
         "crossed_books": result.crossed_books,
         "malformed_snapshots": result.malformed_snapshots,
+        "duplicate_rejects": result.duplicate_rejects,
+        "stale_rejects": result.stale_rejects,
+        "crossed_rejects": result.crossed_rejects,
+        "malformed_rejects": result.malformed_rejects,
+        "transport_rejects": result.transport_rejects,
+        "schema_rejects": result.schema_rejects,
+        "identity_rejects": result.identity_rejects,
+        "other_explicit_rejects": result.other_explicit_rejects,
+        "sampling_delay_events": result.sampling_delay_events,
+        "markets_endpoint_requests": result.markets_endpoint_requests,
+        "orderbook_endpoint_requests": result.orderbook_endpoint_requests,
+        "public_http_requests": result.public_http_requests,
         "strategy_intents": result.strategy_intents,
         "risk_approved_intents": result.risk_approved_intents,
         "risk_rejected_intents": result.risk_rejected_intents,
@@ -657,10 +921,32 @@ def run_burn_in(
         preemptive_drawdown=Decimal("0.08"),
         open_orders_count=result.open_paper_orders,
         fees_paid=getattr(portfolio, "fees_paid", None),
+        starting_cash=result.starting_cash,
+        starting_inventory=result.starting_inventory,
+        ending_cash=result.ending_cash,
+        ending_inventory=result.ending_inventory,
+        partial_fills=result.simulated_partial_fills,
+        full_fills=result.simulated_full_fills,
+        actual_inventory_transitions=result.actual_inventory_transitions,
+        portfolio_transitions_without_fill_evidence=result.portfolio_transitions_without_fill_evidence,
         projected_shocked_drawdown=result.gap_risk_maximum_projected_drawdown,
         preemptive_halt_latched=result.preemptive_halt_triggered,
         hard_kill_latched=result.hard_kill_triggered,
         gap_risk_assumptions_available=result.gap_risk_maximum_projected_drawdown is not None,
+        sampling_attempts=result.sampling_attempts,
+        accepted_snapshots=result.snapshots_accepted,
+        rejected_snapshots=result.snapshots_rejected,
+        duplicate_rejects=result.duplicate_rejects,
+        stale_rejects=result.stale_rejects,
+        crossed_rejects=result.crossed_rejects,
+        malformed_rejects=result.malformed_rejects,
+        transport_rejects=result.transport_rejects,
+        schema_rejects=result.schema_rejects,
+        other_explicit_rejects=result.other_explicit_rejects,
+        sampling_delay_events=result.sampling_delay_events,
+        markets_endpoint_requests=result.markets_endpoint_requests,
+        orderbook_endpoint_requests=result.orderbook_endpoint_requests,
+        public_http_requests=result.public_http_requests,
     )
     _append_event(
         recorder, path, record_type="run_summary", timestamp=summary.timestamp,
@@ -681,14 +967,24 @@ def print_burn_in_summary(result: BurnInResult) -> None:
         ("executable candidate created", "NO"),
         ("live order created", "NO"),
         ("production approval", "NO"),
-        ("signer invoked", "NO"),
-        ("submission invoked", "NO"),
+        ("signer invoked", 0),
+        ("submission invoked", 0),
         ("snapshots requested", result.snapshots_requested),
         ("snapshots accepted", result.snapshots_accepted),
         ("snapshots rejected", result.snapshots_rejected),
+        ("sampling attempts", result.sampling_attempts),
         ("stale snapshots", result.stale_snapshots),
         ("crossed books", result.crossed_books),
         ("malformed snapshots", result.malformed_snapshots),
+        ("duplicate rejects", result.duplicate_rejects),
+        ("stale rejects", result.stale_rejects),
+        ("crossed rejects", result.crossed_rejects),
+        ("malformed rejects", result.malformed_rejects),
+        ("transport rejects", result.transport_rejects),
+        ("schema rejects", result.schema_rejects),
+        ("identity rejects", result.identity_rejects),
+        ("other explicit rejects", result.other_explicit_rejects),
+        ("sampling-delay events", result.sampling_delay_events),
         ("largest observed price step", result.largest_observed_price_step),
         ("minimum spread", result.minimum_spread),
         ("median spread", result.median_spread),
@@ -704,6 +1000,10 @@ def print_burn_in_summary(result: BurnInResult) -> None:
         ("simulated full fills", result.simulated_full_fills),
         ("ending cash", result.ending_cash),
         ("ending inventory", result.ending_inventory),
+        ("starting cash", result.starting_cash),
+        ("starting inventory", result.starting_inventory),
+        ("actual inventory transitions", result.actual_inventory_transitions),
+        ("portfolio transitions without fill evidence", result.portfolio_transitions_without_fill_evidence),
         ("ending marked equity", result.ending_marked_equity),
         ("peak equity", result.peak_equity),
         ("maximum drawdown", result.maximum_drawdown),
@@ -714,14 +1014,16 @@ def print_burn_in_summary(result: BurnInResult) -> None:
         ("open paper orders", result.open_paper_orders),
         ("public logical snapshots", result.public_logical_snapshots),
         ("public HTTP requests", result.public_http_requests),
+        ("markets endpoint requests", result.markets_endpoint_requests),
+        ("orderbook endpoint requests", result.orderbook_endpoint_requests),
         ("authenticated HTTP requests", result.authenticated_http_requests),
         ("read-only RPC requests", result.read_only_rpc_requests),
         ("total network read requests", result.total_network_read_requests),
         ("live order calls", result.live_order_calls),
         ("mutation RPC calls", result.mutation_rpc_calls),
         ("production journal writes", result.production_journal_writes),
-        ("signer calls", "YES" if result.signer_invoked else "NO"),
-        ("submission calls", "YES" if result.submission_invoked else "NO"),
+        ("signer calls", int(result.signer_invoked)),
+        ("submission calls", int(result.submission_invoked)),
         ("authoritative live trading status available", "NO"),
         ("usable for production readiness", "NO"),
         ("Real submission enabled", "NO"),

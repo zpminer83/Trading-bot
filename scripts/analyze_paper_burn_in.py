@@ -35,11 +35,35 @@ def print_analysis(summary: PaperBurnInAnalysisSummary) -> None:
     print(f"  ending equity match: {'YES' if summary.ending_equity_match else 'NO' if summary.ending_equity_match is False else 'UNAVAILABLE'}")
     print(f"  open orders after shutdown: {execution.final_open_orders if execution.final_open_orders is not None else 'unavailable'}")
     print(f"  accepted snapshot ratio: {_value(market.accepted_ratio)}")
+    print("  sampling telemetry:")
+    for label, value in (
+        ("sampling attempts", summary.sampling_attempts),
+        ("accepted snapshots", summary.accepted_snapshots),
+        ("rejected snapshots", summary.rejected_snapshots),
+        ("duplicate rejects", summary.duplicate_rejects),
+        ("stale rejects", summary.stale_rejects),
+        ("crossed rejects", summary.crossed_rejects),
+        ("malformed rejects", summary.malformed_rejects),
+        ("transport rejects", summary.transport_rejects),
+        ("schema rejects", summary.schema_rejects),
+        ("other explicit rejects", summary.other_explicit_rejects),
+        ("sampling delay events", summary.sampling_delay_events),
+        ("markets endpoint requests", summary.markets_endpoint_requests),
+        ("orderbook endpoint requests", summary.orderbook_endpoint_requests),
+        ("public requests", summary.total_public_http_requests),
+    ):
+        print(f"    {label}: {value}")
+    print("    reject reasons:")
+    for reason, count in sorted(market.reject_reason_counts.items()):
+        print(f"      {reason}: {count}")
     print(f"  maximum timestamp gap: {_value(market.largest_timestamp_gap_seconds)}s")
     print(f"  market quality: {market.status}")
     print(f"  strategy activity: {market.book_activity if execution.strategy_intents == 0 else ('ADEQUATE_ACTIVITY' if execution.paper_fills >= 10 and execution.inventory_transitions >= 2 and execution.distinct_executed_prices >= 2 else 'SPARSE_ACTIVITY')}")
     print(f"  strategy fills: {execution.paper_fills}")
     print(f"  inventory transitions: {execution.inventory_transitions}")
+    print(f"  portfolio transitions without fill evidence: {summary.portfolio_transitions_without_fill_evidence}")
+    print(f"  starting cash/inventory: {_value(summary.starting_cash)} / {_value(summary.starting_inventory)}")
+    print(f"  ending cash/inventory: {_value(summary.ending_cash)} / {_value(summary.ending_inventory)}")
     print(f"  risk audit: {risk.status}")
     print(f"  maximum drawdown: {_value(summary.maximum_drawdown)}")
     print(f"  maximum projected shocked drawdown: {_value(summary.maximum_projected_shocked_drawdown)}")

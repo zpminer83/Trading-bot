@@ -52,6 +52,9 @@ def print_analysis(summary: PaperBurnInCampaignSummary) -> None:
     print(f"  fair-play rejection ratio: {_v(fair.reason_ratio_to_intents)}")
     dominant = max(fair.reason_counts, key=fair.reason_counts.get) if fair.reason_counts else "none"
     print(f"  dominant fair-play reason: {dominant}")
+    print(f"  dominant rejection reason: {fair.dominant_rejection_reason or 'none'}")
+    print(f"  dominant halt trigger: {fair.dominant_halt_trigger or 'none'}")
+    print(f"  runs halted by trigger: {fair.runs_halted_by_trigger}")
     print(f"  maximum consecutive fair-play rejections: {fair.maximum_consecutive_rejections}")
     print(f"  fair-play rejection clustering: {'YES' if fair.rejection_clustering else 'NO'}")
     print(f"  fair-play affected runs: {fair.affected_runs}")
@@ -112,6 +115,10 @@ def print_analysis(summary: PaperBurnInCampaignSummary) -> None:
         print("  fair-play reasons:")
         for reason, count in sorted(fair.reason_counts.items()):
             print(f"    {reason}: {count}")
+    if fair.halt_trigger_counts:
+        print("  halt triggers:")
+        for trigger, count in sorted(fair.halt_trigger_counts.items()):
+            print(f"    {trigger}: {count}")
 
 
 def main(argv: list[str] | None = None) -> int:

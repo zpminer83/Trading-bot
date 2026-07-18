@@ -60,6 +60,22 @@ def test_paper_run_record_serializes_decimal_and_datetime():
         equity=Decimal("150"),
         weekly_volume=Decimal("10.10"),
         estimated_score=Decimal("12.12"),
+        rejection_reason_code="opposite_side_cooldown",
+        rejection_reason_normalized="opposite_side_cooldown",
+        rejection_trigger_metric=Decimal("5"),
+        rejection_threshold=Decimal("60"),
+        rejection_streak=2,
+        halt_trigger_code="near_flat_cycle_limit",
+        halt_trigger_normalized="repeated_near_flat_cycle",
+        halt_observed_value=Decimal("2"),
+        halt_threshold=Decimal("2"),
+        halt_rejection_streak=2,
+        affected_intent_id=17,
+        open_orders_before_halt=3,
+        paper_orders_cancelled_by_halt=3,
+        inventory_before_halt=Decimal("10"),
+        inventory_after_halt=Decimal("0"),
+        run_id_version="uuid4-sha256-v1",
     )
 
     data = record.to_dict()
@@ -110,6 +126,22 @@ def test_paper_run_record_serializes_decimal_and_datetime():
     assert data["risk_exit_fills_count"] == 1
     assert data["risk_exit_reason"] == "risk_exit_emergency_capital_protection"
     assert data["near_flat_cycle_count"] == 2
+    assert data["rejection_reason_code"] == "opposite_side_cooldown"
+    assert data["rejection_reason_normalized"] == "opposite_side_cooldown"
+    assert data["rejection_trigger_metric"] == "5"
+    assert data["rejection_threshold"] == "60"
+    assert data["rejection_streak"] == 2
+    assert data["halt_trigger_code"] == "near_flat_cycle_limit"
+    assert data["halt_trigger_normalized"] == "repeated_near_flat_cycle"
+    assert data["halt_observed_value"] == "2"
+    assert data["halt_threshold"] == "2"
+    assert data["halt_rejection_streak"] == 2
+    assert data["affected_intent_id"] == 17
+    assert data["open_orders_before_halt"] == 3
+    assert data["paper_orders_cancelled_by_halt"] == 3
+    assert data["inventory_before_halt"] == "10"
+    assert data["inventory_after_halt"] == "0"
+    assert data["run_id_version"] == "uuid4-sha256-v1"
 
 
 def test_paper_run_recorder_appends_records():

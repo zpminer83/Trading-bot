@@ -6,7 +6,7 @@ and reports structural evidence without changing that file or trading state.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 import json
@@ -17,7 +17,7 @@ from typing import Any, Iterable, Mapping
 
 
 ALLOWED_RECORD_TYPES = frozenset({
-    "run_start", "market_snapshot", "market_reject", "strategy_intent",
+    "run_start", "market_snapshot", "market_reject", "strategy_intent", "initial_allocation",
     "risk_decision", "fair_play_decision", "paper_order", "paper_fill",
     "portfolio_snapshot", "halt", "run_summary",
 })
@@ -36,6 +36,8 @@ DECIMAL_FIELDS = frozenset({
     "unrealized_pnl", "drawdown", "total_volume", "weekly_volume",
     "estimated_score", "fees_paid", "reserved_exposure",
     "projected_shocked_drawdown", "preemptive_drawdown",
+    "transport_duration_seconds", "sampling_delay_seconds", "starting_cash",
+    "starting_inventory", "ending_cash", "ending_inventory",
 })
 COUNT_FIELDS = frozenset({
     "iteration_index", "consecutive_failures", "evaluated_open_orders_count",
@@ -44,6 +46,14 @@ COUNT_FIELDS = frozenset({
     "signal_sample_count", "intents_count", "decisions_count", "fills_count",
     "submitted_orders_count", "open_orders_count", "raffle_tickets",
     "sequence_number",
+    "attempt_number", "sampling_attempts", "accepted_snapshots",
+    "rejected_snapshots", "duplicate_rejects", "stale_rejects",
+    "crossed_rejects", "malformed_rejects", "transport_rejects",
+    "schema_rejects", "identity_rejects", "sampling_delay_events",
+    "other_explicit_rejects",
+    "markets_endpoint_requests", "orderbook_endpoint_requests",
+    "public_http_requests", "partial_fills", "full_fills",
+    "actual_inventory_transitions", "portfolio_transitions_without_fill_evidence",
 })
 NON_NEGATIVE_FIELDS = frozenset({
     "best_bid", "best_ask", "mid_price", "spread", "exchange_age_seconds",
@@ -171,6 +181,36 @@ def _fill_events(record: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [item for item in values if isinstance(item, Mapping)]
 
 
+REJECT_REASON_CATEGORIES = frozenset({
+    "duplicate", "stale", "crossed", "malformed", "transport_failure",
+    "schema_failure", "identity_failure", "extreme_jump", "other_explicit_reason",
+})
+
+
+def _reject_category(record: Mapping[str, Any]) -> str:
+    raw = str(record.get("reject_reason") or "").strip().lower()
+    if raw in REJECT_REASON_CATEGORIES:
+        return raw
+    notes = " ".join(_notes(record)).lower()
+    if raw in {"crossed_orderbook", "crossed_book"} or "cross" in notes:
+        return "crossed"
+    if raw in {"stale", "stale_snapshot", "market_stale"} or "stale" in notes or "freshness" in notes:
+        return "stale"
+    if raw in {"duplicate", "duplicate_snapshot"} or "duplicate" in notes:
+        return "duplicate"
+    if raw in {"malformed", "malformed_snapshot", "malformed_json"} or "malformed" in notes:
+        return "malformed"
+    if raw in {"transport_failure", "public_transport_failure", "timeout", "network"} or any(token in notes for token in ("transport", "timeout", "network")):
+        return "transport_failure"
+    if raw in {"identity_failure", "symbol_mismatch", "symbol_missing"} or "symbol" in notes:
+        return "identity_failure"
+    if raw in {"extreme_jump", "extreme_price_jump"} or "extreme" in notes:
+        return "extreme_jump"
+    if raw in {"schema_failure", "malformed_level", "missing_bid_or_ask", "non_positive_depth"} or any(token in notes for token in ("schema", "level", "missing", "non_positive")):
+        return "schema_failure"
+    return "other_explicit_reason"
+
+
 @dataclass(frozen=True)
 class PaperBurnInIntegrityResult:
     status: str
@@ -210,6 +250,17 @@ class PaperBurnInMarketQualityResult:
     book_activity: str = "NO_ACTIVITY"
     errors: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
+    sampling_attempts: int = 0
+    duplicate_rejects: int = 0
+    transport_rejects: int = 0
+    schema_rejects: int = 0
+    identity_rejects: int = 0
+    other_explicit_rejects: int = 0
+    sampling_delay_events: int = 0
+    reject_reason_counts: dict[str, int] = field(default_factory=dict)
+    total_public_http_requests: int = 0
+    markets_endpoint_requests: int = 0
+    orderbook_endpoint_requests: int = 0
 
 
 @dataclass(frozen=True)
@@ -294,6 +345,26 @@ class PaperBurnInAnalysisSummary:
     blockers: tuple[str, ...] = ()
     warnings: tuple[str, ...] = ()
     result: str = "FAIL"
+    sampling_attempts: int = 0
+    accepted_snapshots: int = 0
+    rejected_snapshots: int = 0
+    duplicate_rejects: int = 0
+    stale_rejects: int = 0
+    crossed_rejects: int = 0
+    malformed_rejects: int = 0
+    transport_rejects: int = 0
+    schema_rejects: int = 0
+    other_explicit_rejects: int = 0
+    sampling_delay_events: int = 0
+    markets_endpoint_requests: int = 0
+    orderbook_endpoint_requests: int = 0
+    total_public_http_requests: int = 0
+    starting_cash: Decimal | None = None
+    starting_inventory: Decimal | None = None
+    ending_cash: Decimal | None = None
+    ending_inventory: Decimal | None = None
+    actual_inventory_transitions: int = 0
+    portfolio_transitions_without_fill_evidence: int = 0
 
     @property
     def exit_code(self) -> int:
@@ -415,10 +486,12 @@ def _market_quality(records: list[Mapping[str, Any]]) -> PaperBurnInMarketQualit
     accepted = len(snapshots)
     rejected = len(rejects)
     total = accepted + rejected
-    notes = [note.lower() for record in rejects for note in _notes(record)]
-    stale = sum(any(token in note for token in ("stale", "freshness")) for note in notes)
-    crossed = sum("cross" in note for note in notes)
-    malformed = sum(any(token in note for token in ("malformed", "missing", "non_positive")) for note in notes)
+    reason_counts = {reason: 0 for reason in REJECT_REASON_CATEGORIES}
+    for record in rejects:
+        reason_counts[_reject_category(record)] += 1
+    stale = reason_counts["stale"]
+    crossed = reason_counts["crossed"]
+    malformed = reason_counts["malformed"]
     timestamps: list[datetime] = []
     for record in snapshots:
         try:
@@ -458,7 +531,7 @@ def _market_quality(records: list[Mapping[str, Any]]) -> PaperBurnInMarketQualit
             current_failures = 0
     duration = Decimal(str((timestamps[-1] - timestamps[0]).total_seconds())) if len(timestamps) >= 2 else Decimal("0")
     inferred_interval = median(positive_gaps) if positive_gaps else Decimal("0")
-    expected = int((duration / inferred_interval).to_integral_value(rounding="ROUND_FLOOR")) + 1 if inferred_interval > 0 else max(total, 1)
+    expected = total
     ratio = Decimal(accepted) / Decimal(total) if total else None
     warnings: list[str] = []
     if accepted < 2:
@@ -470,6 +543,8 @@ def _market_quality(records: list[Mapping[str, Any]]) -> PaperBurnInMarketQualit
     errors: list[str] = []
     if crossed or malformed:
         errors.append("invalid_market_records")
+    if reason_counts["other_explicit_reason"]:
+        errors.append("unclassified_rejection_reason")
     if ratio is not None and ratio < Decimal("0.95"):
         errors.append("accepted_snapshot_ratio_below_95_percent")
     if positive_gaps and inferred_interval > 0 and max(positive_gaps) > inferred_interval * Decimal("3"):
@@ -498,20 +573,85 @@ def _market_quality(records: list[Mapping[str, Any]]) -> PaperBurnInMarketQualit
         distinct_mid_prices=len(set(mids)), distinct_best_bids=len(set(value for value in bids if value is not None)),
         distinct_best_asks=len(set(value for value in asks if value is not None)),
         book_activity=activity, errors=tuple(errors), warnings=tuple(warnings),
+        sampling_attempts=total,
+        duplicate_rejects=reason_counts["duplicate"],
+        transport_rejects=reason_counts["transport_failure"],
+        schema_rejects=reason_counts["schema_failure"],
+        identity_rejects=reason_counts["identity_failure"],
+        other_explicit_rejects=reason_counts["other_explicit_reason"],
+        sampling_delay_events=sum(
+            int(record.get("sampling_delay_events", 0) or 0)
+            for record in records
+            if record.get("record_type") in {"market_snapshot", "market_reject"}
+        ),
+        reject_reason_counts=reason_counts,
+        total_public_http_requests=sum(
+            int(record.get("public_http_requests", 0) or 0)
+            for record in records
+            if record.get("record_type") in {"market_snapshot", "market_reject"}
+        ),
+        markets_endpoint_requests=sum(
+            int(record.get("markets_endpoint_requests", 0) or 0)
+            for record in records
+            if record.get("record_type") in {"market_snapshot", "market_reject"}
+        ),
+        orderbook_endpoint_requests=sum(
+            int(record.get("orderbook_endpoint_requests", 0) or 0)
+            for record in records
+            if record.get("record_type") in {"market_snapshot", "market_reject"}
+        ),
     )
 
 
-def _portfolio(records: list[Mapping[str, Any]]) -> tuple[str, bool | None, Decimal | None, tuple[str, ...], tuple[str, ...], int]:
+def _portfolio(records: list[Mapping[str, Any]]) -> tuple[str, bool | None, Decimal | None, tuple[str, ...], tuple[str, ...], int, Decimal | None, Decimal | None, Decimal | None, Decimal | None, int]:
     snapshots = [record for record in records if record.get("record_type") == "portfolio_snapshot"]
     summary = next((record for record in records if record.get("record_type") == "run_summary"), None)
+    run_start = next((record for record in records if record.get("record_type") == "run_start"), None)
     if not snapshots:
-        return "INSUFFICIENT_RECORDED_EVIDENCE", None, None, (), ("portfolio_snapshots_missing",), 0
+        return "INSUFFICIENT_RECORDED_EVIDENCE", None, None, (), ("portfolio_snapshots_missing",), 0, None, None, None, None, 0
     errors: list[str] = []
     warnings: list[str] = []
     previous_peak: Decimal | None = None
     previous_fees: Decimal | None = None
+    previous_cash: Decimal | None = None
     previous_inventory: Decimal | None = None
+    starting_cash: Decimal | None = None
+    starting_inventory: Decimal | None = None
+    ending_cash: Decimal | None = None
+    ending_inventory: Decimal | None = None
     transitions = 0
+    unexplained_transitions = 0
+    fill_sequences = {
+        int(record.get("sequence_number", 0) or 0)
+        for record in records
+        if record.get("record_type") == "paper_fill" and _fill_events(record)
+    }
+    allocation_sequences = {
+        int(record.get("sequence_number", 0) or 0)
+        for record in records
+        if record.get("record_type") == "initial_allocation"
+    }
+    previous_sequence: int | None = None
+    if run_start is not None:
+        previous_cash = _dec(run_start.get("cash_balance"), "cash_balance")
+        if previous_cash is None:
+            previous_cash = _dec(run_start.get("starting_cash"), "starting_cash")
+        previous_inventory = _dec(run_start.get("base_position"), "base_position")
+        if previous_inventory is None:
+            previous_inventory = _dec(run_start.get("starting_inventory"), "starting_inventory")
+        # Older burn-in files serialized recorder defaults (cash=0,
+        # inventory=0) at run_start before the adapter knew its allocation.
+        # Treat an all-zero pair as unavailable rather than as an implicit
+        # allocation; explicit non-zero initial state remains authoritative.
+        if previous_cash is not None and (
+            previous_cash != 0 or (previous_inventory is not None and previous_inventory != 0)
+        ):
+            starting_cash = previous_cash
+            starting_inventory = previous_inventory
+            previous_sequence = int(run_start.get("sequence_number", 0) or 0)
+        else:
+            previous_cash = None
+            previous_inventory = None
     max_drawdown: Decimal | None = None
     for record in snapshots:
         cash = _dec(record.get("cash_balance"), "cash_balance")
@@ -526,6 +666,9 @@ def _portfolio(records: list[Mapping[str, Any]]) -> tuple[str, bool | None, Deci
         if None in (cash, inventory, equity, mark, peak, drawdown):
             warnings.append("portfolio_fields_incomplete")
             continue
+        if starting_cash is None:
+            starting_cash, starting_inventory = cash, inventory
+        ending_cash, ending_inventory = cash, inventory
         expected_equity = cash + inventory * mark
         # The recorder stores the public mid while the portfolio may be marked
         # at the executable fill/mark price.  Use a bounded relative tolerance
@@ -542,10 +685,23 @@ def _portfolio(records: list[Mapping[str, Any]]) -> tuple[str, bool | None, Deci
         fees = _dec(record.get("fees_paid"), "fees_paid")
         if fees is not None and previous_fees is not None and fees < previous_fees:
             errors.append("cumulative_fees_decreased")
-        if previous_inventory is not None and inventory != previous_inventory:
-            transitions += 1
-        previous_peak, previous_fees, previous_inventory = peak, fees, inventory
+        current_sequence = int(record.get("sequence_number", 0) or 0)
+        state_changed = (
+            previous_inventory is not None
+            and (inventory != previous_inventory or cash != previous_cash)
+        )
+        if state_changed:
+            if inventory != previous_inventory:
+                transitions += 1
+            causally_supported = any(
+                previous_sequence is not None and previous_sequence < fill_sequence <= current_sequence
+                for fill_sequence in fill_sequences | allocation_sequences
+            )
+            if not causally_supported:
+                unexplained_transitions += 1
+        previous_peak, previous_fees, previous_cash, previous_inventory = peak, fees, cash, inventory
         max_drawdown = drawdown if max_drawdown is None else max(max_drawdown, drawdown)
+        previous_sequence = current_sequence
     ending_match: bool | None = None
     if summary is not None:
         last = snapshots[-1]
@@ -564,7 +720,9 @@ def _portfolio(records: list[Mapping[str, Any]]) -> tuple[str, bool | None, Deci
             errors.append("summary_ending_state_mismatch")
     else:
         warnings.append("run_summary_missing")
-    return ("FAIL" if errors else "PASS"), ending_match, max_drawdown, tuple(dict.fromkeys(errors)), tuple(dict.fromkeys(warnings)), transitions
+    if unexplained_transitions:
+        errors.append("portfolio_transition_without_fill_evidence")
+    return ("FAIL" if errors else "PASS"), ending_match, max_drawdown, tuple(dict.fromkeys(errors)), tuple(dict.fromkeys(warnings)), transitions, starting_cash, starting_inventory, ending_cash, ending_inventory, unexplained_transitions
 
 
 def _execution_and_fair_play(records: list[Mapping[str, Any]]) -> tuple[PaperBurnInExecutionResult, PaperBurnInFairPlayResult]:
@@ -706,11 +864,21 @@ def _compare_summary(records: list[Mapping[str, Any]], execution: PaperBurnInExe
         return None, ("summary_counters_unavailable",)
     actual = {
         "market_snapshots": market.accepted_snapshots + market.rejected_snapshots,
+        "sampling_attempts": market.sampling_attempts,
         "accepted_snapshots": market.accepted_snapshots,
         "rejected_snapshots": market.rejected_snapshots,
         "stale_snapshots": market.stale_count,
         "crossed_books": market.crossed_count,
         "malformed_snapshots": market.malformed_count,
+        "duplicate_rejects": market.duplicate_rejects,
+        "transport_rejects": market.transport_rejects,
+        "schema_rejects": market.schema_rejects,
+        "identity_rejects": market.identity_rejects,
+        "other_explicit_rejects": market.other_explicit_rejects,
+        "sampling_delay_events": market.sampling_delay_events,
+        "markets_endpoint_requests": market.markets_endpoint_requests,
+        "orderbook_endpoint_requests": market.orderbook_endpoint_requests,
+        "public_http_requests": market.total_public_http_requests,
         "strategy_intents": execution.strategy_intents,
         "risk_approved_intents": execution.risk_approved_intents,
         "risk_rejected_intents": execution.risk_rejected_intents,
@@ -734,7 +902,11 @@ def analyze_paper_burn_in(path: str | Path, *, repository_root: str | Path | Non
     findings = _privacy_categories(raw)
     records, integrity = _validate_records(raw)
     market = _market_quality(records)
-    portfolio_status, ending_match, portfolio_max_dd, portfolio_errors, portfolio_warnings, transitions = _portfolio(records)
+    (
+        portfolio_status, ending_match, portfolio_max_dd, portfolio_errors,
+        portfolio_warnings, transitions, starting_cash, starting_inventory,
+        ending_cash, ending_inventory, unexplained_transitions,
+    ) = _portfolio(records)
     execution, fair = _execution_and_fair_play(records)
     execution = PaperBurnInExecutionResult(**{**execution.__dict__, "inventory_transitions": transitions})
     risk = _risk(records, execution)
@@ -752,6 +924,8 @@ def analyze_paper_burn_in(path: str | Path, *, repository_root: str | Path | Non
         blockers.append("integrity_failed")
     if portfolio_status == "FAIL":
         blockers.append("portfolio_reconstruction_failed")
+    if "portfolio_transition_without_fill_evidence" in portfolio_errors:
+        blockers.append("portfolio_transition_without_fill_evidence")
     if risk.status == "FAIL":
         blockers.append("risk_audit_failed")
     if fair.status == "FAIL":
@@ -775,6 +949,26 @@ def analyze_paper_burn_in(path: str | Path, *, repository_root: str | Path | Non
         journal_writes=counts["production_journal_writes"], signer_calls=counts["signer_calls"],
         submission_calls=counts["submission_calls"], blockers=tuple(dict.fromkeys(blockers)),
         warnings=tuple(dict.fromkeys(warnings + errors)), result=result,
+        sampling_attempts=market.sampling_attempts,
+        accepted_snapshots=market.accepted_snapshots,
+        rejected_snapshots=market.rejected_snapshots,
+        duplicate_rejects=market.duplicate_rejects,
+        stale_rejects=market.stale_count,
+        crossed_rejects=market.crossed_count,
+        malformed_rejects=market.malformed_count,
+        transport_rejects=market.transport_rejects,
+        schema_rejects=market.schema_rejects,
+        other_explicit_rejects=market.other_explicit_rejects,
+        sampling_delay_events=market.sampling_delay_events,
+        markets_endpoint_requests=market.markets_endpoint_requests,
+        orderbook_endpoint_requests=market.orderbook_endpoint_requests,
+        total_public_http_requests=market.total_public_http_requests,
+        starting_cash=starting_cash,
+        starting_inventory=starting_inventory,
+        ending_cash=ending_cash,
+        ending_inventory=ending_inventory,
+        actual_inventory_transitions=transitions,
+        portfolio_transitions_without_fill_evidence=unexplained_transitions,
     )
 
 
