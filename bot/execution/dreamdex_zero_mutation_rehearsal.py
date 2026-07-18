@@ -956,7 +956,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         trading_blocker = None if trading_enabled else "market_trading_disabled"
     else:
         trading_result = "confirmed_unavailable_from_source"
-        trading_blocker = "trading_status_unavailable"
+        trading_blocker = "trading_status_authoritative_source_unavailable"
     raw_auth_transport = str(_reader_value(account, "authenticated_transport_status", ""))
     auth_state = str(_reader_value(_reader_value(account, "auth_snapshot"), "state", ""))
     if auth_state in {"expired", "session_expired"}:
@@ -1014,13 +1014,13 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
                          source="public_market", transport=market_transport,
                          schema="confirmed" if lifecycle_evidence_status == "confirmed" else "schema_unsupported",
                          authority="authoritative" if lifecycle_evidence_status == "confirmed" else "non_authoritative",
-                         blocker=None if lifecycle_evidence_status == "confirmed" else "market_lifecycle_unavailable",
+                         blocker=None if lifecycle_evidence_status == "confirmed" else "market_lifecycle_unconfirmed",
                          typed_method="GET /markets", purpose="market lifecycle status"),
         _evidence_status("place_supported", performed=public_calls > 0, result="confirmed_unavailable_from_source", source="public_market",
-                         transport=market_transport, authority="non_authoritative", blocker="place_operation_unavailable",
+                         transport=market_transport, authority="non_authoritative", blocker="place_operation_support_unconfirmed",
                          typed_method="GET /markets", purpose="place operation support"),
         _evidence_status("cancel_supported", performed=public_calls > 0, result="confirmed_unavailable_from_source", source="public_market",
-                         transport=market_transport, authority="non_authoritative", blocker="cancel_operation_unavailable",
+                         transport=market_transport, authority="non_authoritative", blocker="cancel_operation_support_unconfirmed",
                          typed_method="GET /markets", purpose="cancel operation support"),
         _evidence_status("account_identity", performed=auth_calls > 0, result=account_identity_result, source="authenticated_account",
                          transport=account_transport, auth=auth_status, schema="confirmed" if account is not None else "schema_unsupported",
@@ -1238,7 +1238,7 @@ def run_zero_mutation_rehearsal(*, policy: DreamDexZeroMutationRehearsalPolicy,
     elif evidence.hard_drawdown_limit is None or evidence.projected_shocked_drawdown >= evidence.hard_drawdown_limit:
         blockers.append("projected_shocked_drawdown_above_hard_limit")
     if policy.require_trading_enabled and evidence.trading_enabled is not True:
-        blockers.append("trading_status_unavailable")
+        blockers.append("trading_status_authoritative_source_unavailable")
     if policy.require_contract_code and evidence.contract_code_present is not True:
         blockers.append("target_contract_code_missing")
     if policy.require_pending_nonce and evidence.pending_nonce is None:

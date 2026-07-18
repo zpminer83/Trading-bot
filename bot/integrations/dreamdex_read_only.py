@@ -444,11 +444,11 @@ class MarketReadOnlySource:
         metadata = self.metadata()
         rules = metadata.trading_rules
         if rules is None:
-            return SourceValue(None, "unavailable", "public_markets", reason="trading_status_unavailable", error_code="unavailable", observed_at=metadata.observed_at)
+            return SourceValue(None, "unavailable", "public_markets", reason="trading_status_authoritative_source_unavailable", error_code="unavailable", observed_at=metadata.observed_at)
         evidence = rules.evidence_for("trading_enabled")
         if evidence.status == "confirmed" and isinstance(evidence.value, bool):
             return SourceValue(evidence.value, "available", "public_markets", observed_at=metadata.observed_at)
-        return SourceValue(None, "unavailable", "public_markets", reason="trading_status_unavailable", error_code="unavailable", observed_at=metadata.observed_at)
+        return SourceValue(None, "unavailable", "public_markets", reason="trading_status_authoritative_source_unavailable", error_code="unavailable", observed_at=metadata.observed_at)
 
     get_trading_status = trading_status
     fetch_trading_status = trading_status

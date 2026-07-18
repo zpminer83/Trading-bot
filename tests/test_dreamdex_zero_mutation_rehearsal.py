@@ -303,6 +303,32 @@ def test_explicit_disabled_trading_status_is_distinct_from_unavailable():
     assert evidence.trading_enabled is False
 
 
+def test_unavailable_trading_authority_propagates_specific_fail_closed_blockers():
+    metadata = SimpleNamespace(
+        symbol="SOMI:USDso", pool_contract="0x1111111111111111111111111111111111111111",
+        observed_at=datetime.now(timezone.utc),
+        trading_rules=SimpleNamespace(available=True, trading_enabled=False, status_for=lambda _name: "unavailable"),
+    )
+    market = SimpleNamespace(
+        status="available", observed_at=datetime.now(timezone.utc), metadata=metadata,
+        orderbook={"bids": [{"price": "1", "quantity": "1"}], "asks": [{"price": "2", "quantity": "1"}]},
+    )
+    deps = DreamDexLiveReadOnlyRehearsalDependencies(
+        lambda: market, lambda: None,
+        lambda: {"status": "not_configured", "gas_estimate_status": "not_attempted_due_to_prerequisite",
+                 "call_statuses": {"gas_estimate": "not_attempted_due_to_prerequisite"}},
+        safe_config={"required_market_symbol": "SOMI:USDso"},
+    )
+    evidence = collect_live_read_only_rehearsal_evidence_from_dependencies(deps)
+    result = run_zero_mutation_rehearsal(policy=_policy(), evidence=evidence, candidate=None)
+    assert "trading_status_authoritative_source_unavailable" in result.primary_blockers
+    assert "market_lifecycle_unconfirmed" in result.primary_blockers
+    assert "place_operation_support_unconfirmed" in result.primary_blockers
+    assert "cancel_operation_support_unconfirmed" in result.primary_blockers
+    assert result.gas_estimate_status == "not_attempted_due_to_prerequisite"
+    assert result.ready_for_real_submission is False
+
+
 def test_rehearsal_rpc_allowlist_has_only_read_only_methods():
     assert READ_ONLY_REHEARSAL_RPC_ALLOWLIST == {"eth_chainId", "eth_getCode", "eth_getTransactionCount", "eth_estimateGas", "eth_gasPrice", "eth_maxPriorityFeePerGas", "eth_getBalance"}
     assert all(not method.startswith(READ_ONLY_REHEARSAL_FORBIDDEN_PREFIXES) for method in READ_ONLY_REHEARSAL_RPC_ALLOWLIST)
