@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from bot.execution.dreamdex_zero_mutation_rehearsal import (
+    DreamDexLiveReadOnlyEvidenceStatus,
     DreamDexLiveReadOnlyRehearsalDependencies,
     DreamDexZeroMutationRehearsalEvidence,
     DreamDexZeroMutationRehearsalPolicy,
@@ -32,6 +33,14 @@ from bot.integrations.dreamdex_read_only import (
 
 
 def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
+    names = ("market_identity", "order_book", "market_rules", "trading_status", "account_identity",
+             "trading_balances", "open_orders", "recent_fills", "chain_id", "target_code",
+             "pending_nonce", "native_gas_balance", "fee_data", "gas_estimate")
+    statuses = tuple(DreamDexLiveReadOnlyEvidenceStatus(
+        evidence_name=name, request_performed=True, source_category="fixture",
+        transport_status="confirmed", authentication_status="authenticated_success" if name in {"account_identity", "trading_balances", "open_orders", "recent_fills"} else "not_configured",
+        schema_status="confirmed", freshness_status="fresh", identity_status="confirmed",
+        authority_status="authoritative", result_status="confirmed") for name in names)
     evidence = DreamDexZeroMutationRehearsalEvidence(
         market_status="available", orderbook_status="available", account_status="available", rpc_status="available", chain_id=5031,
         target_code_status="available", pending_nonce_status="available", native_balance_status="available",
@@ -43,6 +52,9 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         drawdown_fraction=Decimal("0"), preemptive_drawdown=Decimal("0.08"), hard_drawdown_limit=Decimal("0.10"), projected_shocked_drawdown=Decimal("0.02"),
         gap_risk_status="available", gap_risk_budget_approved=True,
         account_authority_status="confirmed", open_order_status="available_empty", fills_status="available_empty",
+        evidence_statuses=statuses,
+        native_gas_balance_evidence="confirmed", authenticated_trading_balance_evidence="confirmed",
+        available_order_currency_balance="confirmed", available_base_asset_balance="confirmed",
         source_fingerprint="fixture-source", market_fingerprint="fixture-market", account_fingerprint="fixture-account",
     )
     candidate = build_rehearsal_candidate(market_symbol=policy.required_market_symbol or "SOMI:USDso", side="BUY",
@@ -50,6 +62,22 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
                                            market_rules={"tick_size": "0.0001", "quantity_step": "0.01", "minimum_quantity": "1", "minimum_notional": "1"},
                                            best_ask=Decimal("1.0010"), policy=policy)
     return evidence, candidate
+
+
+def _default_evidence() -> DreamDexZeroMutationRehearsalEvidence:
+    names = ("market_identity", "order_book", "market_rules", "trading_status", "account_identity",
+             "trading_balances", "open_orders", "recent_fills", "chain_id", "target_code",
+             "pending_nonce", "native_gas_balance", "fee_data", "gas_estimate")
+    return DreamDexZeroMutationRehearsalEvidence(gas_estimate_status="not_attempted_due_to_prerequisite", evidence_statuses=tuple(
+        DreamDexLiveReadOnlyEvidenceStatus(
+            evidence_name=name,
+            result_status="not_attempted_due_to_prerequisite" if name == "gas_estimate" else "not_configured",
+            prerequisite="formed_unsigned_candidate" if name == "gas_estimate" else None,
+            blocker="gas_estimate_prerequisite_unavailable" if name == "gas_estimate" else None,
+        ) for name in names
+    ), primary_blockers=("live_read_only_configuration_unavailable",),
+        native_gas_balance_evidence="not_configured", authenticated_trading_balance_evidence="not_configured",
+        available_order_currency_balance="not_configured", available_base_asset_balance="not_configured")
 
 
 def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies:
@@ -73,6 +101,7 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
     )
     rpc = DreamDexReadOnlyRpcTransport(rpc_url)
     cache: dict[str, object] = {}
+    candidate_state: dict[str, bool] = {"ready": False}
 
     def snapshot():
         if "snapshot" not in cache:
@@ -101,7 +130,12 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
         chain_id = call(rpc.get_chain_id)
         code = call(lambda: rpc.get_contract_code(pool), None) if pool else None
         pending_nonce = call(lambda: rpc.get_pending_nonce(owner))
-        gas_estimate = call(lambda: rpc.estimate_gas({"from": owner, "to": pool, "value": "0x0", "data": "0x"}) if pool else (_ for _ in ()).throw(ValueError()))
+        if candidate_state["ready"] and pool:
+            gas_estimate = call(lambda: rpc.estimate_gas({"from": owner, "to": pool, "value": "0x0", "data": "0x"}))
+            gas_estimate_status = "available" if gas_estimate is not None else "unavailable"
+        else:
+            gas_estimate = None
+            gas_estimate_status = "not_attempted_due_to_prerequisite"
         gas_price = call(rpc.get_gas_price)
         priority = call(rpc.get_max_priority_fee_per_gas)
         native_balance = call(lambda: rpc.get_native_balance(owner))
@@ -115,30 +149,54 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
             "contract_code_present": code not in {None, "0x", "0x0"},
             "pending_nonce_status": "available" if pending_nonce is not None else "unavailable",
             "pending_nonce": pending_nonce,
-            "gas_estimate_status": "available" if gas_estimate is not None else "unavailable",
+            "gas_estimate_status": gas_estimate_status,
             "gas_estimate": gas_estimate,
-            "fee_status": "available" if maximum_fee is not None else "unavailable",
+            "fee_status": "available" if fee_per_gas is not None else "unavailable",
+            "fee_per_gas_wei": fee_per_gas,
             "maximum_total_fee_wei": maximum_fee,
             "native_balance_status": "available" if native_balance is not None else "unavailable",
             "native_balance_wei": native_balance,
             "transaction_type": "legacy" if gas_price is not None else "unresolved",
             "read_only_rpc_call_count": calls,
+            "call_statuses": {
+                "chain_id": "confirmed" if chain_id is not None else "transport_unavailable",
+                "target_code": "confirmed" if code not in {None, "0x", "0x0"} else "transport_unavailable",
+                "pending_nonce": "confirmed" if pending_nonce is not None else "transport_unavailable",
+                "native_gas_balance": "confirmed" if native_balance is not None else "transport_unavailable",
+                "fee_data": "confirmed" if fee_per_gas is not None else "transport_unavailable",
+                "gas_estimate": gas_estimate_status,
+            },
         }
 
     return DreamDexLiveReadOnlyRehearsalDependencies(
         public_market_reader=read_market,
         authenticated_account_reader=read_account,
         typed_rpc_preflight_reader=read_preflight,
-        safe_config={"required_market_symbol": symbol},
+        safe_config={"required_market_symbol": symbol, "_candidate_state": candidate_state},
     )
 
 
 def _live_candidate(dependencies: DreamDexLiveReadOnlyRehearsalDependencies, policy: DreamDexZeroMutationRehearsalPolicy):
     try:
         market = dependencies.public_market_reader()
+        account = dependencies.authenticated_account_reader()
+        if getattr(account, "account_address_semantics", "unresolved") not in {"resolved", "authoritative"}:
+            return None
+        if getattr(account, "open_orders_status", "source_unavailable") not in {"available", "confirmed", "available_empty"}:
+            return None
+        if getattr(account, "fills_status", "source_unavailable") not in {"available", "confirmed", "available_empty"}:
+            return None
+        risk = dependencies.risk_snapshot
+        fair = dependencies.fair_play_snapshot
+        if str(risk.get("status", "unavailable")) not in {"available", "confirmed"}:
+            return None
+        if str(fair.get("status", "unavailable")) not in {"available", "confirmed"}:
+            return None
         metadata = market.metadata
         rules = metadata.trading_rules
-        if rules is None or any(value is None for value in (rules.tick_size, rules.quantity_step, rules.minimum_quantity, rules.minimum_notional)):
+        if rules is None or getattr(rules, "available", False) is not True or getattr(rules, "trading_enabled", None) is not True or any(value is None for value in (rules.tick_size, rules.quantity_step, rules.minimum_quantity, rules.minimum_notional)):
+            return None
+        if metadata.symbol != policy.required_market_symbol or not getattr(metadata, "pool_contract", None):
             return None
         book = getattr(market, "orderbook", None) or {}
         bids = book.get("bids", []) if isinstance(book, dict) else []
@@ -147,7 +205,7 @@ def _live_candidate(dependencies: DreamDexLiveReadOnlyRehearsalDependencies, pol
         best_ask = asks[0].get("price") if asks and isinstance(asks[0], dict) else None
         if best_bid is None or best_ask is None:
             return None
-        return build_rehearsal_candidate(
+        candidate = build_rehearsal_candidate(
             market_symbol=metadata.symbol or policy.required_market_symbol or "",
             side="BUY",
             price=Decimal(str(best_bid)) - (rules.tick_size or Decimal("0")),
@@ -161,6 +219,11 @@ def _live_candidate(dependencies: DreamDexLiveReadOnlyRehearsalDependencies, pol
             best_ask=Decimal(str(best_ask)),
             policy=policy,
         )
+        if candidate is not None:
+            state = dependencies.safe_config.get("_candidate_state")
+            if isinstance(state, dict):
+                state["ready"] = True
+        return candidate
     except Exception:
         return None
 
@@ -181,10 +244,10 @@ def main(argv: list[str] | None = None) -> int:
     else:
         try:
             dependencies = _live_dependencies(args.market)
-            evidence = collect_live_read_only_rehearsal_evidence_from_dependencies(dependencies)
             candidate = _live_candidate(dependencies, policy)
+            evidence = collect_live_read_only_rehearsal_evidence_from_dependencies(dependencies)
         except Exception:
-            evidence, candidate = DreamDexZeroMutationRehearsalEvidence(), None
+            evidence, candidate = _default_evidence(), None
     result = run_zero_mutation_rehearsal(policy=policy, evidence=evidence, candidate=candidate, mode=mode)
     data = result.safe_dict()
     print("LIVE READ-ONLY ZERO-MUTATION REHEARSAL:")
@@ -204,6 +267,10 @@ def main(argv: list[str] | None = None) -> int:
         ("account data authoritative", "account_authority_status"),
         ("account identity confirmed", "account_identity_status"),
         ("balance evidence confirmed", "balance_status"),
+        ("native gas balance evidence", "native_gas_balance_evidence"),
+        ("authenticated trading balance evidence", "authenticated_trading_balance_evidence"),
+        ("available order currency balance", "available_order_currency_balance"),
+        ("available base asset balance", "available_base_asset_balance"),
         ("open-order evidence confirmed", "open_order_status"),
         ("open-order count", "open_order_count"),
         ("fills evidence confirmed", "fills_status"),
@@ -242,6 +309,21 @@ def main(argv: list[str] | None = None) -> int:
         candidate_key = label.replace("candidate ", "").replace("transaction type", "transaction_type")
         value = data.get(key) if key else candidate_data.get(candidate_key)
         print(f"{label}: {display(value)}")
+    print("LIVE READ-ONLY EVIDENCE MATRIX:")
+    print("evidence | called | transport | auth | schema | authority | result")
+    for item in data.get("evidence_statuses", []):
+        print("{evidence} | {called} | {transport} | {auth} | {schema} | {authority} | {result}".format(
+            evidence=item.get("evidence_name", "unknown"),
+            called="YES" if item.get("request_performed") else "NO",
+            transport=item.get("transport_status", "unknown"), auth=item.get("authentication_status", "unknown"),
+            schema=item.get("schema_status", "unknown"), authority=item.get("authority_status", "unknown"),
+            result=item.get("result_status", "unknown")))
+    print("PRIMARY BLOCKERS:")
+    print(", ".join(data.get("primary_blockers", [])) or "none")
+    print("DERIVED BLOCKERS:")
+    print(", ".join(data.get("derived_blockers", [])) or "none")
+    print("NOT-ATTEMPTED STAGES:")
+    print(", ".join(data.get("not_attempted_stages", [])) or "none")
     print("production dry-run approved: NO")
     print("production signer configured: NO")
     print("production submitter invoked: NO")

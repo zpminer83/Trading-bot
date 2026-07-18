@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from bot.execution.dreamdex_zero_mutation_rehearsal import (
+    DreamDexLiveReadOnlyEvidenceStatus,
     DreamDexZeroMutationRehearsalEvidence,
     DreamDexLiveReadOnlyRehearsalDependencies,
     DreamDexZeroMutationRehearsalPolicy,
@@ -15,6 +16,47 @@ from bot.execution.dreamdex_zero_mutation_rehearsal import (
     collect_live_read_only_rehearsal_evidence,
     run_zero_mutation_rehearsal,
 )
+
+
+def test_live_evidence_status_is_typed_and_safe():
+    item = DreamDexLiveReadOnlyEvidenceStatus(
+        evidence_name="account_identity", request_performed=True,
+        source_category="authenticated_account", transport_status="confirmed",
+        authentication_status="authenticated_success", schema_status="confirmed",
+        authority_status="authoritative", result_status="confirmed",
+        response_shape_fingerprint="0x" + "a" * 64,
+        validation_errors=("https://secret.example/token",),
+    )
+    safe = item.safe_dict()
+    assert safe["result_status"] == "confirmed"
+    assert "https://" not in repr(item) and "secret" not in str(safe)
+    assert safe["response_shape_fingerprint"] != "0x" + "a" * 64
+
+
+def test_live_causal_gas_stage_is_not_attempted_without_candidate():
+    evidence = _evidence(
+        evidence_statuses=(DreamDexLiveReadOnlyEvidenceStatus(
+            evidence_name="gas_estimate", result_status="not_attempted_due_to_prerequisite",
+            prerequisite="formed_unsigned_candidate", blocker="gas_estimate_prerequisite_unavailable"),),
+        gas_estimate_status="not_attempted_due_to_prerequisite",
+        native_gas_balance_evidence="confirmed", authenticated_trading_balance_evidence="confirmed",
+        available_order_currency_balance="confirmed", available_base_asset_balance="confirmed",
+    )
+    result = run_zero_mutation_rehearsal(policy=_policy(), evidence=evidence, candidate=None)
+    assert "gas_estimate_prerequisite_unavailable" in result.derived_blockers
+    assert "gas_estimate_unavailable" not in result.primary_blockers
+    assert "approval_preview_not_constructed" in result.not_attempted_stages
+
+
+def test_live_balance_evidence_is_separate_from_native_gas():
+    evidence = _evidence(
+        evidence_statuses=(DreamDexLiveReadOnlyEvidenceStatus(evidence_name="trading_balances", result_status="confirmed"),),
+        native_gas_balance_evidence="confirmed", authenticated_trading_balance_evidence="confirmed_unavailable_from_source",
+        available_order_currency_balance="confirmed_unavailable_from_source", available_base_asset_balance="confirmed_unavailable_from_source",
+    )
+    result = run_zero_mutation_rehearsal(policy=_policy(), evidence=evidence, candidate=None)
+    assert "native_gas_balance_unavailable" not in result.primary_blockers
+    assert "authenticated_trading_balance_unavailable" in result.primary_blockers
 
 
 def _policy(**kwargs):
