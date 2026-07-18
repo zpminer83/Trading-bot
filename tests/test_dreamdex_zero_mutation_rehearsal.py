@@ -6,6 +6,7 @@ import pytest
 
 from bot.execution.dreamdex_zero_mutation_rehearsal import (
     DreamDexLiveReadOnlyEvidenceStatus,
+    DreamDexLiveReadOnlyConfigurationStatus,
     DreamDexZeroMutationRehearsalEvidence,
     DreamDexLiveReadOnlyRehearsalDependencies,
     DreamDexZeroMutationRehearsalPolicy,
@@ -31,6 +32,21 @@ def test_live_evidence_status_is_typed_and_safe():
     assert safe["result_status"] == "confirmed"
     assert "https://" not in repr(item) and "secret" not in str(safe)
     assert safe["response_shape_fingerprint"] != "0x" + "a" * 64
+
+
+def test_safe_configuration_status_has_no_endpoint_or_secret_values():
+    status = DreamDexLiveReadOnlyConfigurationStatus(
+        public_api_configured=True, rpc_configured=True,
+        authenticated_session_configured=False, required_chain_id=5031,
+        market_symbol="SOMI:USDso", public_transport_ready=True,
+        rpc_transport_ready=True, blockers=("authenticated_session_not_configured",),
+        configuration_fingerprint="0x" + "b" * 64,
+    )
+    text = repr(status) + str(status.safe_dict())
+    assert "http" not in text.lower()
+    assert "token" not in text.lower()
+    assert "0x" + "b" * 64 not in text
+    assert status.safe_dict()["blockers"] == ["authenticated_session_not_configured"]
 
 
 def test_live_causal_gas_stage_is_not_attempted_without_candidate():
@@ -188,6 +204,35 @@ def test_dependency_collector_uses_typed_sources_and_clamps_future_age():
     assert evidence.open_order_status == "source_unavailable"
     assert evidence.fills_status == "source_unavailable"
     assert evidence.read_only_rpc_call_count == 7
+
+
+def test_absent_account_session_does_not_suppress_public_or_rpc_readers():
+    calls = []
+    metadata = SimpleNamespace(
+        symbol="SOMI:USDso", pool_contract="0x1111111111111111111111111111111111111111",
+        observed_at=datetime.now(timezone.utc),
+        trading_rules=SimpleNamespace(available=True, trading_enabled=True),
+    )
+    market = SimpleNamespace(
+        status="available", observed_at=datetime.now(timezone.utc), metadata=metadata,
+        orderbook={"bids": [{"price": "1", "quantity": "1"}], "asks": [{"price": "2", "quantity": "1"}]},
+    )
+    config = DreamDexLiveReadOnlyConfigurationStatus(
+        public_api_configured=True, rpc_configured=True, public_transport_ready=True,
+        rpc_transport_ready=True, market_symbol="SOMI:USDso",
+    )
+    deps = DreamDexLiveReadOnlyRehearsalDependencies(
+        lambda: calls.append("market") or market,
+        lambda: None,
+        lambda: calls.append("rpc") or {"status": "available", "chain_id": 5031, "read_only_rpc_call_count": 6},
+        safe_config={"required_market_symbol": "SOMI:USDso"}, configuration_status=config,
+    )
+    evidence = collect_live_read_only_rehearsal_evidence_from_dependencies(deps)
+    assert calls == ["market", "rpc"]
+    assert evidence.public_market_call_count == 1
+    assert evidence.authenticated_account_call_count == 0
+    assert evidence.read_only_rpc_call_count == 6
+    assert evidence.account_status == "unavailable"
 
 
 def test_dependency_collector_blocks_crossed_or_wide_orderbooks():

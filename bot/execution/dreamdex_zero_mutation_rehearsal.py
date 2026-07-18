@@ -39,7 +39,8 @@ LIVE_EVIDENCE_RESULT_STATUSES = frozenset({
 LIVE_AUTHENTICATION_STATUSES = frozenset({
     "not_configured", "session_not_configured", "session_expired",
     "credential_rejected", "request_unauthorized", "request_forbidden",
-    "transport_failed", "response_schema_unsupported", "authenticated_success",
+    "transport_failed", "response_schema_unsupported", "authentication_unavailable",
+    "authenticated_success",
 })
 
 
@@ -115,6 +116,60 @@ class ReadOnlyRehearsalReader(Protocol):
 
 
 @dataclass(frozen=True, repr=False)
+class DreamDexLiveReadOnlyConfigurationStatus:
+    """Safe summary of discovered non-secret live-read-only configuration."""
+
+    public_api_configured: bool = False
+    rpc_configured: bool = False
+    authenticated_session_configured: bool = False
+    authenticated_session_current: bool = False
+    required_chain_id: int = 5031
+    market_symbol: str = "SOMI:USDso"
+    public_transport_ready: bool = False
+    rpc_transport_ready: bool = False
+    account_transport_ready: bool = False
+    configuration_fingerprint: str = ""
+    blockers: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.required_chain_id != 5031:
+            raise ValueError("live_read_only_chain_must_be_5031")
+        if not self.market_symbol or ":" not in self.market_symbol or "://" in self.market_symbol or any(char.isspace() for char in self.market_symbol):
+            raise ValueError("live_read_only_market_symbol_invalid")
+        object.__setattr__(self, "blockers", tuple(dict.fromkeys(str(item) for item in self.blockers)))
+
+    @property
+    def ready_for_public(self) -> bool:
+        return self.public_api_configured and self.public_transport_ready
+
+    @property
+    def ready_for_rpc(self) -> bool:
+        return self.rpc_configured and self.rpc_transport_ready
+
+    def safe_dict(self) -> dict[str, Any]:
+        return {
+            "public_api_configured": self.public_api_configured,
+            "rpc_configured": self.rpc_configured,
+            "authenticated_session_configured": self.authenticated_session_configured,
+            "authenticated_session_current": self.authenticated_session_current,
+            "required_chain_id": self.required_chain_id,
+            "market_symbol": self.market_symbol,
+            "public_transport_ready": self.public_transport_ready,
+            "rpc_transport_ready": self.rpc_transport_ready,
+            "account_transport_ready": self.account_transport_ready,
+            "configuration_fingerprint": mask_hex_hash(self.configuration_fingerprint) if self.configuration_fingerprint else "",
+            "blockers": list(self.blockers),
+        }
+
+    def __repr__(self) -> str:
+        return "DreamDexLiveReadOnlyConfigurationStatus(<safe>)"
+
+
+def _default_configuration_status() -> DreamDexLiveReadOnlyConfigurationStatus:
+    return DreamDexLiveReadOnlyConfigurationStatus()
+
+
+@dataclass(frozen=True, repr=False)
 class DreamDexLiveReadOnlyRehearsalDependencies:
     """The deliberately narrow dependency bundle for explicit live rehearsal.
 
@@ -130,6 +185,7 @@ class DreamDexLiveReadOnlyRehearsalDependencies:
     safe_config: Mapping[str, Any] = field(default_factory=dict)
     risk_snapshot: Mapping[str, Any] = field(default_factory=dict)
     fair_play_snapshot: Mapping[str, Any] = field(default_factory=dict)
+    configuration_status: DreamDexLiveReadOnlyConfigurationStatus = field(default_factory=_default_configuration_status)
 
     def __post_init__(self) -> None:
         for name in (
@@ -311,6 +367,7 @@ class DreamDexZeroMutationRehearsalEvidence:
     primary_blockers: tuple[str, ...] = ()
     derived_blockers: tuple[str, ...] = ()
     not_attempted_stages: tuple[str, ...] = ()
+    configuration_status: DreamDexLiveReadOnlyConfigurationStatus = field(default_factory=_default_configuration_status)
 
     def safe_dict(self) -> dict[str, Any]:
         return {"market_status": self.market_status, "account_status": self.account_status, "rpc_status": self.rpc_status,
@@ -357,7 +414,8 @@ class DreamDexZeroMutationRehearsalEvidence:
                 "available_base_asset_balance": self.available_base_asset_balance,
                 "primary_blockers": list(self.primary_blockers),
                 "derived_blockers": list(self.derived_blockers),
-                "not_attempted_stages": list(self.not_attempted_stages)}
+                "not_attempted_stages": list(self.not_attempted_stages),
+                "configuration_status": self.configuration_status.safe_dict()}
 
     def __repr__(self) -> str:
         return "DreamDexZeroMutationRehearsalEvidence(<safe>)"
@@ -471,6 +529,7 @@ class DreamDexZeroMutationRehearsalResult:
     primary_blockers: tuple[str, ...] = ()
     derived_blockers: tuple[str, ...] = ()
     not_attempted_stages: tuple[str, ...] = ()
+    configuration_status: DreamDexLiveReadOnlyConfigurationStatus = field(default_factory=_default_configuration_status)
 
     @property
     def readiness_status(self) -> str:
@@ -552,6 +611,7 @@ class DreamDexZeroMutationRehearsalResult:
                 "primary_blockers": list(self.primary_blockers),
                 "derived_blockers": list(self.derived_blockers),
                 "not_attempted_stages": list(self.not_attempted_stages),
+                "configuration_status": self.configuration_status.safe_dict(),
                 # Compatibility aliases for early offline callers.
                 "readiness_status": self.readiness_status, "mutation_call_count": self.mutation_call_count,
                 "temporary_rehearsal_journal_used": self.temporary_rehearsal_journal_used,
@@ -689,7 +749,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         market = None
     try:
         account = dependencies.authenticated_account_reader()
-        auth_calls = 1
+        auth_calls = 1 if account is not None else 0
     except Exception as exc:
         account_exc = exc
         account = None
@@ -758,6 +818,7 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     account_freshness = "stale" if account_age_ms is not None and account_age_ms > maximum_account_age_ms else ("fresh" if account_age_ms is not None else "unknown")
 
     rpc_map = rpc if isinstance(rpc, Mapping) else {}
+    configuration = dependencies.configuration_status
     rpc_status = str(rpc_map.get("status", "unavailable"))
     gap_map = dependencies.risk_snapshot
     fair_map = dependencies.fair_play_snapshot
@@ -796,8 +857,10 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
     authenticated_balance = _reader_value(account, "authenticated_trading_balance_status", _reader_value(account, "balance_status", _reader_value(authenticated_balance_status, "status", "unavailable")))
     order_currency = _reader_value(account, "order_currency_balance_status", _reader_value(account, "quote_balance_status", "unavailable"))
     base_asset = _reader_value(account, "base_asset_balance_status", _reader_value(account, "base_balance_status", "unavailable"))
-    def _balance_result(value: Any) -> str:
-        return "confirmed" if str(value) in {"available", "confirmed", "authoritative"} else "confirmed_unavailable_from_source"
+    def _balance_result(value: Any, *, configured: bool) -> str:
+        if str(value) in {"available", "confirmed", "authoritative"}:
+            return "confirmed"
+        return "confirmed_unavailable_from_source" if configured else "not_configured"
 
     evidence_statuses: list[DreamDexLiveReadOnlyEvidenceStatus] = [
         _evidence_status("market_identity", performed=public_calls > 0, result=identity_result,
@@ -823,9 +886,9 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
                          transport=account_transport, auth=auth_status, schema="confirmed" if account is not None else "schema_unsupported",
                          freshness=account_freshness, authority=account_authority if account_freshness != "stale" else "non_authoritative", blocker=None if account_identity_result == "confirmed" and account_freshness != "stale" else "account_identity_not_authoritative",
                          typed_method="authenticated account snapshot", purpose="authenticated identity and role binding"),
-        _evidence_status("trading_balances", performed=auth_calls > 0, result=_balance_result(authenticated_balance), source="authenticated_account",
-                         transport=account_transport, auth=auth_status, authority="authoritative" if _balance_result(authenticated_balance) == "confirmed" else "non_authoritative",
-                         blocker=None if _balance_result(authenticated_balance) == "confirmed" else "authenticated_trading_balance_unavailable",
+        _evidence_status("trading_balances", performed=auth_calls > 0, result=("authentication_unavailable" if account is None else _balance_result(authenticated_balance, configured=True)), source="authenticated_account",
+                         transport=account_transport, auth=auth_status, authority="authoritative" if account is not None and _balance_result(authenticated_balance, configured=True) == "confirmed" else "non_authoritative",
+                         blocker=None if account is not None and _balance_result(authenticated_balance, configured=True) == "confirmed" else "authenticated_trading_balance_unavailable",
                          typed_method="authenticated account balances", purpose="authoritative trading funds"),
         _evidence_status("open_orders", performed=auth_calls > 0, result="confirmed" if open_order_status in {"available", "confirmed", "available_empty"} else "confirmed_unavailable_from_source",
                          source="authenticated_account", transport=account_transport, auth=auth_status, authority=account_authority,
@@ -917,10 +980,11 @@ def collect_live_read_only_rehearsal_evidence_from_dependencies(
         maximum_total_fee_wei=rpc_map.get("maximum_total_fee_wei"),
         transaction_type=str(rpc_map.get("transaction_type", "unresolved")),
         evidence_statuses=tuple(evidence_statuses),
-        native_gas_balance_evidence="confirmed" if rpc_map.get("native_balance_wei") is not None else "confirmed_unavailable_from_source",
-        authenticated_trading_balance_evidence=_balance_result(authenticated_balance),
-        available_order_currency_balance=_balance_result(order_currency),
-        available_base_asset_balance=_balance_result(base_asset),
+        native_gas_balance_evidence=("confirmed" if rpc_map.get("native_balance_wei") is not None else ("not_configured" if rpc is None else "transport_unavailable")),
+        authenticated_trading_balance_evidence=("authentication_unavailable" if account is None else _balance_result(authenticated_balance, configured=True)),
+        available_order_currency_balance=("authentication_unavailable" if account is None else _balance_result(order_currency, configured=True)),
+        available_base_asset_balance=("authentication_unavailable" if account is None else _balance_result(base_asset, configured=True)),
+        configuration_status=configuration,
     )
 
 
@@ -932,6 +996,7 @@ def _causal_blocker_sets(evidence: DreamDexZeroMutationRehearsalEvidence,
     derived: list[str] = []
     not_attempted: list[str] = []
     if evidence.evidence_statuses:
+        primary.extend(evidence.configuration_status.blockers)
         primary.extend(evidence.primary_blockers)
         derived.extend(evidence.derived_blockers)
         not_attempted.extend(evidence.not_attempted_stages)
@@ -1133,6 +1198,7 @@ def _result(policy: DreamDexZeroMutationRehearsalPolicy, evidence: DreamDexZeroM
         primary_blockers=primary_blockers,
         derived_blockers=derived_blockers,
         not_attempted_stages=not_attempted_stages,
+        configuration_status=evidence.configuration_status,
     )
 
 

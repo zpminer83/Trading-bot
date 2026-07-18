@@ -10,9 +10,13 @@ import json
 import os
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
+from hashlib import sha256
+from urllib.parse import urlparse
 
 from bot.execution.dreamdex_zero_mutation_rehearsal import (
     DreamDexLiveReadOnlyEvidenceStatus,
+    DreamDexLiveReadOnlyConfigurationStatus,
     DreamDexLiveReadOnlyRehearsalDependencies,
     DreamDexZeroMutationRehearsalEvidence,
     DreamDexZeroMutationRehearsalPolicy,
@@ -29,7 +33,56 @@ from bot.integrations.dreamdex_read_only import (
     DreamDexReadOnlyAdapter,
     HttpGetTransport,
     HttpRpcTransport,
+    MarketReadOnlySource,
 )
+
+
+def _configuration_status(*, base_url: str | None, rpc_url: str | None, owner: str | None,
+                          authenticated: object, symbol: str) -> DreamDexLiveReadOnlyConfigurationStatus:
+    public_ok = bool(base_url)
+    rpc_ok = bool(rpc_url)
+    auth_configured = bool(getattr(authenticated, "configured", False))
+    blockers: list[str] = []
+    if not public_ok:
+        blockers.append("public_api_configuration_unavailable")
+    if not rpc_ok:
+        blockers.append("rpc_configuration_unavailable")
+    if not auth_configured:
+        blockers.append("authenticated_session_not_configured")
+    if auth_configured and not owner:
+        blockers.append("account_address_configuration_unavailable")
+    fingerprint_input = f"public={public_ok}|rpc={rpc_ok}|auth={auth_configured}|owner={bool(owner)}|symbol={symbol}|chain=5031"
+    return DreamDexLiveReadOnlyConfigurationStatus(
+        public_api_configured=public_ok, rpc_configured=rpc_ok,
+        authenticated_session_configured=auth_configured,
+        authenticated_session_current=False, required_chain_id=5031,
+        market_symbol=symbol, public_transport_ready=public_ok,
+        rpc_transport_ready=rpc_ok, account_transport_ready=auth_configured and bool(owner),
+        configuration_fingerprint="0x" + sha256(fingerprint_input.encode()).hexdigest(),
+        blockers=tuple(blockers),
+    )
+
+
+def _safe_public_base(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(str(value))
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return None
+    if parsed.hostname not in {"api.dreamdex.io", "stg.api.dreamdex.io"}:
+        return None
+    if parsed.path.rstrip("/") != "/v0":
+        return None
+    return str(value).rstrip("/")
+
+
+def _safe_rpc_url(value: str | None) -> str | None:
+    if not value:
+        return None
+    parsed = urlparse(str(value))
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
+        return None
+    return str(value).rstrip("/")
 
 
 def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
@@ -41,6 +94,12 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         transport_status="confirmed", authentication_status="authenticated_success" if name in {"account_identity", "trading_balances", "open_orders", "recent_fills"} else "not_configured",
         schema_status="confirmed", freshness_status="fresh", identity_status="confirmed",
         authority_status="authoritative", result_status="confirmed") for name in names)
+    configuration = DreamDexLiveReadOnlyConfigurationStatus(
+        public_api_configured=True, rpc_configured=True,
+        authenticated_session_configured=True, authenticated_session_current=True,
+        required_chain_id=5031, market_symbol=policy.required_market_symbol or "SOMI:USDso",
+        public_transport_ready=True, rpc_transport_ready=True, account_transport_ready=True,
+        configuration_fingerprint="0x" + "f" * 64)
     evidence = DreamDexZeroMutationRehearsalEvidence(
         market_status="available", orderbook_status="available", account_status="available", rpc_status="available", chain_id=5031,
         target_code_status="available", pending_nonce_status="available", native_balance_status="available",
@@ -55,6 +114,7 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
         evidence_statuses=statuses,
         native_gas_balance_evidence="confirmed", authenticated_trading_balance_evidence="confirmed",
         available_order_currency_balance="confirmed", available_base_asset_balance="confirmed",
+        configuration_status=configuration,
         source_fingerprint="fixture-source", market_fingerprint="fixture-market", account_fingerprint="fixture-account",
     )
     candidate = build_rehearsal_candidate(market_symbol=policy.required_market_symbol or "SOMI:USDso", side="BUY",
@@ -64,10 +124,11 @@ def _fixture(policy: DreamDexZeroMutationRehearsalPolicy):
     return evidence, candidate
 
 
-def _default_evidence() -> DreamDexZeroMutationRehearsalEvidence:
+def _default_evidence(configuration_status: DreamDexLiveReadOnlyConfigurationStatus | None = None) -> DreamDexZeroMutationRehearsalEvidence:
     names = ("market_identity", "order_book", "market_rules", "trading_status", "account_identity",
              "trading_balances", "open_orders", "recent_fills", "chain_id", "target_code",
              "pending_nonce", "native_gas_balance", "fee_data", "gas_estimate")
+    configuration_status = configuration_status or DreamDexLiveReadOnlyConfigurationStatus(blockers=("live_read_only_configuration_unavailable",))
     return DreamDexZeroMutationRehearsalEvidence(gas_estimate_status="not_attempted_due_to_prerequisite", evidence_statuses=tuple(
         DreamDexLiveReadOnlyEvidenceStatus(
             evidence_name=name,
@@ -75,48 +136,82 @@ def _default_evidence() -> DreamDexZeroMutationRehearsalEvidence:
             prerequisite="formed_unsigned_candidate" if name == "gas_estimate" else None,
             blocker="gas_estimate_prerequisite_unavailable" if name == "gas_estimate" else None,
         ) for name in names
-    ), primary_blockers=("live_read_only_configuration_unavailable",),
+    ), primary_blockers=configuration_status.blockers,
         native_gas_balance_evidence="not_configured", authenticated_trading_balance_evidence="not_configured",
-        available_order_currency_balance="not_configured", available_base_asset_balance="not_configured")
+        available_order_currency_balance="not_configured", available_base_asset_balance="not_configured",
+        configuration_status=configuration_status)
 
 
 def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies:
     """Build the explicit live read-only bundle from existing transports."""
     owner = os.environ.get("DREAMDEX_READ_ONLY_OWNER_ADDRESS", "")
     trading = os.environ.get("DREAMDEX_READ_ONLY_TRADING_ADDRESS", "")
-    base_url = os.environ.get("DREAMDEX_READ_ONLY_BASE_URL", PRODUCTION_BASE_URL)
-    rpc_url = os.environ.get("DREAMDEX_READ_ONLY_RPC_URL") or os.environ.get("DREAMDEX_RPC_URL", "")
-    if not owner or not trading or not rpc_url:
-        raise RuntimeError("live_read_only_configuration_unavailable")
-    authenticated = build_authenticated_read_only_transport_from_env()
-    adapter = DreamDexReadOnlyAdapter(
-        transport=HttpGetTransport(base_url),
-        rpc_transport=HttpRpcTransport(rpc_url),
-        owner=owner,
-        trading_address=trading,
-        symbol=symbol,
-        authenticated_transport=authenticated,
-        owner_platform_role=os.environ.get("DREAMDEX_READ_ONLY_OWNER_PLATFORM_ROLE"),
-        trading_platform_role=os.environ.get("DREAMDEX_READ_ONLY_TRADING_PLATFORM_ROLE"),
+    base_url = _safe_public_base(
+        os.environ.get("DREAMDEX_READ_ONLY_BASE_URL")
+        or os.environ.get("DREAMDEX_API_BASE_URL")
+        or os.environ.get("BASE_URL")
+        or PRODUCTION_BASE_URL
     )
-    rpc = DreamDexReadOnlyRpcTransport(rpc_url)
-    cache: dict[str, object] = {}
+    rpc_url = _safe_rpc_url(
+        os.environ.get("DREAMDEX_READ_ONLY_RPC_URL")
+        or os.environ.get("DREAMDEX_RPC_URL")
+        or os.environ.get("RPC_URL", "")
+    )
+    authenticated = build_authenticated_read_only_transport_from_env()
+    configuration = _configuration_status(base_url=base_url, rpc_url=rpc_url or None, owner=owner or None,
+                                          authenticated=authenticated, symbol=symbol)
+    market_source = MarketReadOnlySource(HttpGetTransport(base_url or PRODUCTION_BASE_URL), symbol)
+    market_cache: dict[str, object] = {}
+    account_cache: dict[str, object] = {}
+    rpc = DreamDexReadOnlyRpcTransport(rpc_url) if rpc_url else None
     candidate_state: dict[str, bool] = {"ready": False}
 
-    def snapshot():
-        if "snapshot" not in cache:
-            cache["snapshot"] = adapter.fetch_snapshot()
-        return cache["snapshot"]
-
     def read_market():
-        return snapshot().market  # type: ignore[union-attr]
+        if not configuration.ready_for_public:
+            raise RuntimeError("public_api_configuration_unavailable")
+        if "snapshot" not in market_cache:
+            market_cache["snapshot"] = market_source.snapshot()
+        return market_cache["snapshot"]
 
     def read_account():
-        return snapshot().account  # type: ignore[union-attr]
+        if not configuration.account_transport_ready:
+            return None
+        if "account" not in account_cache:
+            adapter = DreamDexReadOnlyAdapter(
+                transport=HttpGetTransport(base_url or PRODUCTION_BASE_URL),
+                rpc_transport=(HttpRpcTransport(rpc_url) if rpc_url else SimpleNamespace(call=lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("rpc_configuration_unavailable")))),
+                owner=owner,
+                trading_address=trading or None,
+                symbol=symbol,
+                authenticated_transport=authenticated,
+                owner_platform_role=os.environ.get("DREAMDEX_READ_ONLY_OWNER_PLATFORM_ROLE"),
+                trading_platform_role=os.environ.get("DREAMDEX_READ_ONLY_TRADING_PLATFORM_ROLE"),
+            )
+            # Use the adapter's existing authenticated-only path so the
+            # public market branch is not suppressed when auth is absent.
+            auth_snapshot = adapter._fetch_authenticated_account()
+            account_cache["account"] = SimpleNamespace(
+                account_address_semantics="resolved" if auth_snapshot.authoritative_for(trading or owner) else "unresolved",
+                open_orders_status=auth_snapshot.open_orders_status.status,
+                fills_status=auth_snapshot.fills_status.status,
+                authenticated_transport_status=getattr(authenticated, "configuration_status", "unconfigured"),
+                authenticated=auth_snapshot,
+                observed_at=auth_snapshot.observed_at,
+            )
+        return account_cache["account"]
 
     def read_preflight():
-        market = snapshot().market  # type: ignore[union-attr]
-        pool = market.pool_contract
+        if rpc is None:
+            return {
+                "status": "not_configured", "read_only_rpc_call_count": 0,
+                "gas_estimate_status": "not_attempted_due_to_prerequisite",
+                "call_statuses": {"gas_estimate": "not_attempted_due_to_prerequisite"},
+            }
+        try:
+            market = read_market()
+            pool = market.metadata.pool_contract
+        except Exception:
+            pool = None
         calls = 0
 
         def call(method, fallback=None):
@@ -129,8 +224,9 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
 
         chain_id = call(rpc.get_chain_id)
         code = call(lambda: rpc.get_contract_code(pool), None) if pool else None
-        pending_nonce = call(lambda: rpc.get_pending_nonce(owner))
-        if candidate_state["ready"] and pool:
+        pending_nonce = call(lambda: rpc.get_pending_nonce(owner)) if owner else None
+        nonce_status = "confirmed" if pending_nonce is not None else ("not_attempted_due_to_prerequisite" if not owner else "transport_unavailable")
+        if candidate_state["ready"] and pool and owner:
             gas_estimate = call(lambda: rpc.estimate_gas({"from": owner, "to": pool, "value": "0x0", "data": "0x"}))
             gas_estimate_status = "available" if gas_estimate is not None else "unavailable"
         else:
@@ -138,7 +234,8 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
             gas_estimate_status = "not_attempted_due_to_prerequisite"
         gas_price = call(rpc.get_gas_price)
         priority = call(rpc.get_max_priority_fee_per_gas)
-        native_balance = call(lambda: rpc.get_native_balance(owner))
+        native_balance = call(lambda: rpc.get_native_balance(owner)) if owner else None
+        native_status = "confirmed" if native_balance is not None else ("not_attempted_due_to_prerequisite" if not owner else "transport_unavailable")
         fee_per_gas = max((item for item in (gas_price, priority) if item is not None), default=None)
         maximum_fee = gas_estimate * fee_per_gas if gas_estimate is not None and fee_per_gas is not None else None
         complete = all(value is not None for value in (chain_id, code, pending_nonce, gas_estimate, maximum_fee, native_balance))
@@ -147,22 +244,22 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
             "chain_id": chain_id,
             "target_code_status": "available" if code not in {None, "0x", "0x0"} else "unavailable",
             "contract_code_present": code not in {None, "0x", "0x0"},
-            "pending_nonce_status": "available" if pending_nonce is not None else "unavailable",
+            "pending_nonce_status": "available" if pending_nonce is not None else nonce_status,
             "pending_nonce": pending_nonce,
             "gas_estimate_status": gas_estimate_status,
             "gas_estimate": gas_estimate,
             "fee_status": "available" if fee_per_gas is not None else "unavailable",
             "fee_per_gas_wei": fee_per_gas,
             "maximum_total_fee_wei": maximum_fee,
-            "native_balance_status": "available" if native_balance is not None else "unavailable",
+            "native_balance_status": "available" if native_balance is not None else native_status,
             "native_balance_wei": native_balance,
             "transaction_type": "legacy" if gas_price is not None else "unresolved",
             "read_only_rpc_call_count": calls,
             "call_statuses": {
                 "chain_id": "confirmed" if chain_id is not None else "transport_unavailable",
                 "target_code": "confirmed" if code not in {None, "0x", "0x0"} else "transport_unavailable",
-                "pending_nonce": "confirmed" if pending_nonce is not None else "transport_unavailable",
-                "native_gas_balance": "confirmed" if native_balance is not None else "transport_unavailable",
+                "pending_nonce": "confirmed" if pending_nonce is not None else nonce_status,
+                "native_gas_balance": "confirmed" if native_balance is not None else native_status,
                 "fee_data": "confirmed" if fee_per_gas is not None else "transport_unavailable",
                 "gas_estimate": gas_estimate_status,
             },
@@ -173,6 +270,7 @@ def _live_dependencies(symbol: str) -> DreamDexLiveReadOnlyRehearsalDependencies
         authenticated_account_reader=read_account,
         typed_rpc_preflight_reader=read_preflight,
         safe_config={"required_market_symbol": symbol, "_candidate_state": candidate_state},
+        configuration_status=configuration,
     )
 
 
@@ -309,6 +407,22 @@ def main(argv: list[str] | None = None) -> int:
         candidate_key = label.replace("candidate ", "").replace("transaction type", "transaction_type")
         value = data.get(key) if key else candidate_data.get(candidate_key)
         print(f"{label}: {display(value)}")
+    configuration_data = data.get("configuration_status", {})
+    print("SAFE LIVE CONFIGURATION:")
+    for label, key in (
+        ("public API configured", "public_api_configured"),
+        ("RPC configured", "rpc_configured"),
+        ("authenticated session configured", "authenticated_session_configured"),
+        ("authenticated session current", "authenticated_session_current"),
+        ("public transport ready", "public_transport_ready"),
+        ("RPC transport ready", "rpc_transport_ready"),
+        ("account transport ready", "account_transport_ready"),
+        ("required chain ID", "required_chain_id"),
+        ("market symbol", "market_symbol"),
+        ("configuration fingerprint", "configuration_fingerprint"),
+    ):
+        print(f"{label}: {display(configuration_data.get(key))}")
+    print(f"configuration blockers: {', '.join(configuration_data.get('blockers', [])) or 'none'}")
     print("LIVE READ-ONLY EVIDENCE MATRIX:")
     print("evidence | called | transport | auth | schema | authority | result")
     for item in data.get("evidence_statuses", []):
